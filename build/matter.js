@@ -782,32 +782,52 @@ module.exports = Bounds;
      * @param {vector} velocity
      */
     Bounds.update = function(bounds, vertices, velocity) {
-        bounds.min.x = Infinity;
-        bounds.max.x = -Infinity;
-        bounds.min.y = Infinity;
-        bounds.max.y = -Infinity;
+        var verticesLength = vertices.length;
 
-        for (var i = 0; i < vertices.length; i++) {
-            var vertex = vertices[i];
-            if (vertex.x > bounds.max.x) bounds.max.x = vertex.x;
-            if (vertex.x < bounds.min.x) bounds.min.x = vertex.x;
-            if (vertex.y > bounds.max.y) bounds.max.y = vertex.y;
-            if (vertex.y < bounds.min.y) bounds.min.y = vertex.y;
+        if (verticesLength === 0) {
+            bounds.min.x = Infinity;
+            bounds.max.x = -Infinity;
+            bounds.min.y = Infinity;
+            bounds.max.y = -Infinity;
+            return;
         }
-        
+
+        var vertex = vertices[0],
+            minX = vertex.x,
+            maxX = vertex.x,
+            minY = vertex.y,
+            maxY = vertex.y,
+            x,
+            y,
+            i;
+
+        for (i = 1; i < verticesLength; i++) {
+            vertex = vertices[i];
+            x = vertex.x;
+            y = vertex.y;
+
+            if (x > maxX) { maxX = x; } else if (x < minX) { minX = x; }
+            if (y > maxY) { maxY = y; } else if (y < minY) { minY = y; }
+        }
+
         if (velocity) {
             if (velocity.x > 0) {
-                bounds.max.x += velocity.x;
+                maxX += velocity.x;
             } else {
-                bounds.min.x += velocity.x;
+                minX += velocity.x;
             }
-            
+
             if (velocity.y > 0) {
-                bounds.max.y += velocity.y;
+                maxY += velocity.y;
             } else {
-                bounds.min.y += velocity.y;
+                minY += velocity.y;
             }
         }
+
+        bounds.min.x = minX;
+        bounds.max.x = maxX;
+        bounds.min.y = minY;
+        bounds.max.y = maxY;
     };
 
     /**
@@ -4138,7 +4158,7 @@ var Pair = __webpack_require__(9);
         }
 
         // reuse collision records for gc efficiency
-        var pair = pairs && pairs.table[Pair.id(bodyA, bodyB)],
+        var pair = pairs && pairs.table.get(Pair.id(bodyA, bodyB)),
             collision;
 
         if (!pair) {
@@ -4484,7 +4504,11 @@ module.exports = Pair;
 var Contact = __webpack_require__(16);
 
 (function() {
-    
+
+    // Multiplier used by `Pair.id` to pack two body ids into one numeric key.
+    // Keeps keys unique and exactly representable for integer body ids below it.
+    Pair._idShift = 1 << 26;
+
     /**
      * Creates a pair.
      * @method create
@@ -4586,11 +4610,15 @@ var Contact = __webpack_require__(16);
      * @method id
      * @param {body} bodyA
      * @param {body} bodyB
-     * @return {string} Unique pairId
+     * @return {number} Unique pairId
      */
     Pair.id = function(bodyA, bodyB) {
-        return bodyA.id < bodyB.id ? bodyA.id.toString(36) + ':' + bodyB.id.toString(36) 
-            : bodyB.id.toString(36) + ':' + bodyA.id.toString(36);
+        // Numeric composite key into the pairs table `Map`. Avoids the string
+        // allocation a string key would force on every broadphase lookup.
+        // Assumes integer body ids below `Pair._idShift` (engine-assigned ids).
+        return bodyA.id < bodyB.id
+            ? bodyA.id * Pair._idShift + bodyB.id
+            : bodyB.id * Pair._idShift + bodyA.id;
     };
 
 })();
@@ -5631,7 +5659,22 @@ var Collision = __webpack_require__(8);
             i,
             j;
 
-        bodies.sort(Detector._compareBoundsX);
+        // sort bodies by bounds.min.x for sweep-and-prune. The array stays nearly
+        // sorted between frames, so a stable insertion sort runs in ~O(n) here and
+        // avoids the per-comparison JS-callback overhead of Array.prototype.sort.
+        // Being stable, it yields ordering identical to the previous stable sort.
+        for (i = 1; i < bodiesLength; i++) {
+            var insertBody = bodies[i],
+                insertX = insertBody.bounds.min.x,
+                k = i - 1;
+
+            while (k >= 0 && bodies[k].bounds.min.x > insertX) {
+                bodies[k + 1] = bodies[k];
+                k--;
+            }
+
+            bodies[k + 1] = insertBody;
+        }
 
         for (i = 0; i < bodiesLength; i++) {
             var bodyA = bodies[i],
@@ -7216,12 +7259,24 @@ var Bounds = __webpack_require__(1);
                 contactCount = pair.contactCount,
                 contactShare = 1 / contactCount;
 
+            // cache body properties that are invariant across the contact loop
+            var bodyAPositionX = bodyA.position.x,
+                bodyAPositionY = bodyA.position.y,
+                bodyBPositionX = bodyB.position.x,
+                bodyBPositionY = bodyB.position.y,
+                bodyAInverseMass = bodyA.inverseMass,
+                bodyBInverseMass = bodyB.inverseMass,
+                bodyAInverseInertia = bodyA.inverseInertia,
+                bodyBInverseInertia = bodyB.inverseInertia,
+                bodyACanMove = !(bodyA.isStatic || bodyA.isSleeping),
+                bodyBCanMove = !(bodyB.isStatic || bodyB.isSleeping);
+
             // get body velocities
-            var bodyAVelocityX = bodyA.position.x - bodyA.positionPrev.x,
-                bodyAVelocityY = bodyA.position.y - bodyA.positionPrev.y,
+            var bodyAVelocityX = bodyAPositionX - bodyA.positionPrev.x,
+                bodyAVelocityY = bodyAPositionY - bodyA.positionPrev.y,
                 bodyAAngularVelocity = bodyA.angle - bodyA.anglePrev,
-                bodyBVelocityX = bodyB.position.x - bodyB.positionPrev.x,
-                bodyBVelocityY = bodyB.position.y - bodyB.positionPrev.y,
+                bodyBVelocityX = bodyBPositionX - bodyB.positionPrev.x,
+                bodyBVelocityY = bodyBPositionY - bodyB.positionPrev.y,
                 bodyBAngularVelocity = bodyB.angle - bodyB.anglePrev;
 
             // resolve each contact
@@ -7229,10 +7284,10 @@ var Bounds = __webpack_require__(1);
                 var contact = contacts[j],
                     contactVertex = contact.vertex;
 
-                var offsetAX = contactVertex.x - bodyA.position.x,
-                    offsetAY = contactVertex.y - bodyA.position.y,
-                    offsetBX = contactVertex.x - bodyB.position.x,
-                    offsetBY = contactVertex.y - bodyB.position.y;
+                var offsetAX = contactVertex.x - bodyAPositionX,
+                    offsetAY = contactVertex.y - bodyAPositionY,
+                    offsetBX = contactVertex.x - bodyBPositionX,
+                    offsetBY = contactVertex.y - bodyBPositionY;
  
                 var velocityPointAX = bodyAVelocityX - offsetAY * bodyAAngularVelocity,
                     velocityPointAY = bodyAVelocityY + offsetAX * bodyAAngularVelocity,
@@ -7247,7 +7302,7 @@ var Bounds = __webpack_require__(1);
 
                 // coulomb friction
                 var normalOverlap = pair.separation + normalVelocity;
-                var normalForce = Math.min(normalOverlap, 1);
+                var normalForce = normalOverlap < 1 ? normalOverlap : 1;
                 normalForce = normalOverlap < 0 ? 0 : normalForce;
 
                 var frictionLimit = normalForce * friction;
@@ -7269,7 +7324,7 @@ var Bounds = __webpack_require__(1);
                 // account for mass, inertia and contact offset
                 var oAcN = offsetAX * normalY - offsetAY * normalX,
                     oBcN = offsetBX * normalY - offsetBY * normalX,
-                    share = contactShare / (inverseMassTotal + bodyA.inverseInertia * oAcN * oAcN + bodyB.inverseInertia * oBcN * oBcN);
+                    share = contactShare / (inverseMassTotal + bodyAInverseInertia * oAcN * oAcN + bodyBInverseInertia * oBcN * oBcN);
 
                 // raw impulses
                 var normalImpulse = (1 + pair.restitution) * normalVelocity * share;
@@ -7307,16 +7362,16 @@ var Bounds = __webpack_require__(1);
                     impulseY = normalY * normalImpulse + tangentY * tangentImpulse;
                 
                 // apply impulse from contact
-                if (!(bodyA.isStatic || bodyA.isSleeping)) {
-                    bodyA.positionPrev.x += impulseX * bodyA.inverseMass;
-                    bodyA.positionPrev.y += impulseY * bodyA.inverseMass;
-                    bodyA.anglePrev += (offsetAX * impulseY - offsetAY * impulseX) * bodyA.inverseInertia;
+                if (bodyACanMove) {
+                    bodyA.positionPrev.x += impulseX * bodyAInverseMass;
+                    bodyA.positionPrev.y += impulseY * bodyAInverseMass;
+                    bodyA.anglePrev += (offsetAX * impulseY - offsetAY * impulseX) * bodyAInverseInertia;
                 }
 
-                if (!(bodyB.isStatic || bodyB.isSleeping)) {
-                    bodyB.positionPrev.x -= impulseX * bodyB.inverseMass;
-                    bodyB.positionPrev.y -= impulseY * bodyB.inverseMass;
-                    bodyB.anglePrev -= (offsetBX * impulseY - offsetBY * impulseX) * bodyB.inverseInertia;
+                if (bodyBCanMove) {
+                    bodyB.positionPrev.x -= impulseX * bodyBInverseMass;
+                    bodyB.positionPrev.y -= impulseY * bodyBInverseMass;
+                    bodyB.anglePrev -= (offsetBX * impulseY - offsetBY * impulseX) * bodyBInverseInertia;
                 }
             }
         }
@@ -7351,8 +7406,8 @@ var Common = __webpack_require__(0);
      * @return {pairs} A new pairs structure
      */
     Pairs.create = function(options) {
-        return Common.extend({ 
-            table: {},
+        return Common.extend({
+            table: new Map(),
             list: [],
             collisionStart: [],
             collisionActive: [],
@@ -7402,7 +7457,7 @@ var Common = __webpack_require__(0);
             } else {
                 // pair did not exist, create a new pair
                 pair = pairCreate(collision, timestamp);
-                pairsTable[pair.id] = pair;
+                pairsTable.set(pair.id, pair);
 
                 // add the new pair
                 collisionStart[collisionStartIndex++] = pair;
@@ -7430,7 +7485,7 @@ var Common = __webpack_require__(0);
                 } else {
                     // remove inactive pairs if either body awake
                     collisionEnd[collisionEndIndex++] = pair;
-                    delete pairsTable[pair.id];
+                    pairsTable.delete(pair.id);
                 }
             }
         }
@@ -7460,7 +7515,7 @@ var Common = __webpack_require__(0);
      * @return {pairs} pairs
      */
     Pairs.clear = function(pairs) {
-        pairs.table = {};
+        pairs.table = new Map();
         pairs.list.length = 0;
         pairs.collisionStart.length = 0;
         pairs.collisionActive.length = 0;
