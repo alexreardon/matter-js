@@ -1885,6 +1885,10 @@ var Axes = __webpack_require__(11);
                 part.positionPrev.x = part.position.x;
                 part.positionPrev.y = part.position.y;
                 part.anglePrev = part.angle;
+                // zero the cached velocity so a resting body reads as stopped
+                // even though Engine no longer recomputes its velocity each step
+                part.velocity.x = 0;
+                part.velocity.y = 0;
                 part.angularVelocity = 0;
                 part.speed = 0;
                 part.angularSpeed = 0;
@@ -2374,25 +2378,49 @@ var Axes = __webpack_require__(11);
         body.angle += body.angularVelocity;
 
         // transform the body geometry
-        for (var i = 0; i < body.parts.length; i++) {
-            var part = body.parts[i];
+        var parts = body.parts,
+            partsLength = parts.length,
+            velocity = body.velocity,
+            angularVelocity = body.angularVelocity,
+            position = body.position;
 
-            Vertices.translate(part.vertices, body.velocity);
-            
-            if (i > 0) {
-                part.position.x += body.velocity.x;
-                part.position.y += body.velocity.y;
+        // single-part bodies (the common case) skip the per-part position and
+        // compound-rotation bookkeeping that only applies to parts[1..]. The
+        // operations and their order are identical to the general loop below,
+        // so the result is bit-identical.
+        if (partsLength === 1) {
+            var only = parts[0];
+
+            Vertices.translate(only.vertices, velocity);
+
+            if (angularVelocity !== 0) {
+                Vertices.rotate(only.vertices, angularVelocity, position);
+                Axes.rotate(only.axes, angularVelocity);
             }
 
-            if (body.angularVelocity !== 0) {
-                Vertices.rotate(part.vertices, body.angularVelocity, body.position);
-                Axes.rotate(part.axes, body.angularVelocity);
+            Bounds.update(only.bounds, only.vertices, velocity);
+            return;
+        }
+
+        for (var i = 0; i < partsLength; i++) {
+            var part = parts[i];
+
+            Vertices.translate(part.vertices, velocity);
+
+            if (i > 0) {
+                part.position.x += velocity.x;
+                part.position.y += velocity.y;
+            }
+
+            if (angularVelocity !== 0) {
+                Vertices.rotate(part.vertices, angularVelocity, position);
+                Axes.rotate(part.axes, angularVelocity);
                 if (i > 0) {
-                    Vector.rotateAbout(part.position, body.angularVelocity, body.position, part.position);
+                    Vector.rotateAbout(part.position, angularVelocity, position, part.position);
                 }
             }
 
-            Bounds.update(part.bounds, part.vertices, body.velocity);
+            Bounds.update(part.bounds, part.vertices, velocity);
         }
     };
 
@@ -4058,6 +4086,10 @@ var Common = __webpack_require__(0);
             body.positionPrev.y = body.position.y;
 
             body.anglePrev = body.angle;
+            // zero the cached velocity so a resting body reads as stopped
+            // even though Engine no longer recomputes its velocity each step
+            body.velocity.x = 0;
+            body.velocity.y = 0;
             body.speed = 0;
             body.angularSpeed = 0;
             body.motion = 0;
@@ -4260,10 +4292,6 @@ var Pair = __webpack_require__(9);
     Collision._overlapAxes = function(result, verticesA, verticesB, axes) {
         var verticesALength = verticesA.length,
             verticesBLength = verticesB.length,
-            verticesAX = verticesA[0].x,
-            verticesAY = verticesA[0].y,
-            verticesBX = verticesB[0].x,
-            verticesBY = verticesB[0].y,
             axesLength = axes.length,
             overlapMin = Number.MAX_VALUE,
             overlapAxisNumber = 0,
@@ -4274,6 +4302,64 @@ var Pair = __webpack_require__(9);
             i,
             j;
 
+        // unrolled fast path for the box/quad-vs-quad common case (both bodies
+        // have four vertices). min/max of a fixed set is order-independent, so
+        // this produces bit-identical projections to the general loop below.
+        if (verticesALength === 4 && verticesBLength === 4) {
+            var a0 = verticesA[0], a1 = verticesA[1], a2 = verticesA[2], a3 = verticesA[3],
+                b0 = verticesB[0], b1 = verticesB[1], b2 = verticesB[2], b3 = verticesB[3],
+                a0x = a0.x, a0y = a0.y, a1x = a1.x, a1y = a1.y,
+                a2x = a2.x, a2y = a2.y, a3x = a3.x, a3y = a3.y,
+                b0x = b0.x, b0y = b0.y, b1x = b1.x, b1y = b1.y,
+                b2x = b2.x, b2y = b2.y, b3x = b3.x, b3y = b3.y;
+
+            for (i = 0; i < axesLength; i++) {
+                var qAxis = axes[i],
+                    qAxisX = qAxis.x,
+                    qAxisY = qAxis.y,
+                    qa0 = a0x * qAxisX + a0y * qAxisY,
+                    qa1 = a1x * qAxisX + a1y * qAxisY,
+                    qa2 = a2x * qAxisX + a2y * qAxisY,
+                    qa3 = a3x * qAxisX + a3y * qAxisY,
+                    qMinA = qa0, qMaxA = qa0,
+                    qb0 = b0x * qAxisX + b0y * qAxisY,
+                    qb1 = b1x * qAxisX + b1y * qAxisY,
+                    qb2 = b2x * qAxisX + b2y * qAxisY,
+                    qb3 = b3x * qAxisX + b3y * qAxisY,
+                    qMinB = qb0, qMaxB = qb0;
+
+                if (qa1 > qMaxA) { qMaxA = qa1; } else if (qa1 < qMinA) { qMinA = qa1; }
+                if (qa2 > qMaxA) { qMaxA = qa2; } else if (qa2 < qMinA) { qMinA = qa2; }
+                if (qa3 > qMaxA) { qMaxA = qa3; } else if (qa3 < qMinA) { qMinA = qa3; }
+
+                if (qb1 > qMaxB) { qMaxB = qb1; } else if (qb1 < qMinB) { qMinB = qb1; }
+                if (qb2 > qMaxB) { qMaxB = qb2; } else if (qb2 < qMinB) { qMinB = qb2; }
+                if (qb3 > qMaxB) { qMaxB = qb3; } else if (qb3 < qMinB) { qMinB = qb3; }
+
+                overlapAB = qMaxA - qMinB;
+                overlapBA = qMaxB - qMinA;
+                overlap = overlapAB < overlapBA ? overlapAB : overlapBA;
+
+                if (overlap < overlapMin) {
+                    overlapMin = overlap;
+                    overlapAxisNumber = i;
+
+                    if (overlap <= 0) {
+                        break;
+                    }
+                }
+            }
+
+            result.axis = axes[overlapAxisNumber];
+            result.overlap = overlapMin;
+            return;
+        }
+
+        var verticesAX = verticesA[0].x,
+            verticesAY = verticesA[0].y,
+            verticesBX = verticesB[0].x,
+            verticesBY = verticesB[0].y;
+
         for (i = 0; i < axesLength; i++) {
             var axis = axes[i],
                 axisX = axis.x,
@@ -4282,13 +4368,13 @@ var Pair = __webpack_require__(9);
                 minB = verticesBX * axisX + verticesBY * axisY,
                 maxA = minA,
                 maxB = minB;
-            
+
             for (j = 1; j < verticesALength; j += 1) {
                 dot = verticesA[j].x * axisX + verticesA[j].y * axisY;
 
-                if (dot > maxA) { 
+                if (dot > maxA) {
                     maxA = dot;
-                } else if (dot < minA) { 
+                } else if (dot < minA) {
                     minA = dot;
                 }
             }
@@ -4296,9 +4382,9 @@ var Pair = __webpack_require__(9);
             for (j = 1; j < verticesBLength; j += 1) {
                 dot = verticesB[j].x * axisX + verticesB[j].y * axisY;
 
-                if (dot > maxB) { 
+                if (dot > maxB) {
                     maxB = dot;
-                } else if (dot < minB) { 
+                } else if (dot < minB) {
                     minB = dot;
                 }
             }
@@ -4315,7 +4401,7 @@ var Pair = __webpack_require__(9);
                     // can not be intersecting
                     break;
                 }
-            } 
+            }
         }
 
         result.axis = axes[overlapAxisNumber];
@@ -4358,12 +4444,18 @@ var Pair = __webpack_require__(9);
             }
         }
 
+        // adjacent vertices, wrapping at the ends (cheaper than a modulo and
+        // selects the identical indices the modulo did)
+        var vertexAIndex = vertexA.index,
+            prevIndex = vertexAIndex === 0 ? verticesLength - 1 : vertexAIndex - 1,
+            nextIndex = vertexAIndex + 1 === verticesLength ? 0 : vertexAIndex + 1;
+
         // measure next vertex
-        vertexC = vertices[(verticesLength + vertexA.index - 1) % verticesLength];
+        vertexC = vertices[prevIndex];
         nearestDistance = normalX * (bodyAPositionX - vertexC.x) + normalY * (bodyAPositionY - vertexC.y);
 
         // compare with previous vertex
-        vertexB = vertices[(vertexA.index + 1) % verticesLength];
+        vertexB = vertices[nextIndex];
         if (normalX * (bodyAPositionX - vertexB.x) + normalY * (bodyAPositionY - vertexB.y) < nearestDistance) {
             _supports[0] = vertexA;
             _supports[1] = vertexB;
@@ -6744,7 +6836,17 @@ var Body = __webpack_require__(4);
         var bodiesLength = bodies.length;
 
         for (var i = 0; i < bodiesLength; i++) {
-            Body.updateVelocities(bodies[i]);
+            var body = bodies[i];
+
+            // a static or sleeping body does not move, so its velocity is
+            // constant and was set when it came to rest (see Body.setStatic and
+            // Sleeping.set); skip the redundant recompute, matching the way
+            // _bodiesApplyGravity and _bodiesUpdate already skip resting bodies
+            if (body.isStatic || body.isSleeping) {
+                continue;
+            }
+
+            Body.updateVelocities(body);
         }
     };
 
