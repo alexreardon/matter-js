@@ -282,6 +282,10 @@ var Axes = require('../geometry/Axes');
                 part.positionPrev.x = part.position.x;
                 part.positionPrev.y = part.position.y;
                 part.anglePrev = part.angle;
+                // zero the cached velocity so a resting body reads as stopped
+                // even though Engine no longer recomputes its velocity each step
+                part.velocity.x = 0;
+                part.velocity.y = 0;
                 part.angularVelocity = 0;
                 part.speed = 0;
                 part.angularSpeed = 0;
@@ -771,25 +775,49 @@ var Axes = require('../geometry/Axes');
         body.angle += body.angularVelocity;
 
         // transform the body geometry
-        for (var i = 0; i < body.parts.length; i++) {
-            var part = body.parts[i];
+        var parts = body.parts,
+            partsLength = parts.length,
+            velocity = body.velocity,
+            angularVelocity = body.angularVelocity,
+            position = body.position;
 
-            Vertices.translate(part.vertices, body.velocity);
-            
-            if (i > 0) {
-                part.position.x += body.velocity.x;
-                part.position.y += body.velocity.y;
+        // single-part bodies (the common case) skip the per-part position and
+        // compound-rotation bookkeeping that only applies to parts[1..]. The
+        // operations and their order are identical to the general loop below,
+        // so the result is bit-identical.
+        if (partsLength === 1) {
+            var only = parts[0];
+
+            Vertices.translate(only.vertices, velocity);
+
+            if (angularVelocity !== 0) {
+                Vertices.rotate(only.vertices, angularVelocity, position);
+                Axes.rotate(only.axes, angularVelocity);
             }
 
-            if (body.angularVelocity !== 0) {
-                Vertices.rotate(part.vertices, body.angularVelocity, body.position);
-                Axes.rotate(part.axes, body.angularVelocity);
+            Bounds.update(only.bounds, only.vertices, velocity);
+            return;
+        }
+
+        for (var i = 0; i < partsLength; i++) {
+            var part = parts[i];
+
+            Vertices.translate(part.vertices, velocity);
+
+            if (i > 0) {
+                part.position.x += velocity.x;
+                part.position.y += velocity.y;
+            }
+
+            if (angularVelocity !== 0) {
+                Vertices.rotate(part.vertices, angularVelocity, position);
+                Axes.rotate(part.axes, angularVelocity);
                 if (i > 0) {
-                    Vector.rotateAbout(part.position, body.angularVelocity, body.position, part.position);
+                    Vector.rotateAbout(part.position, angularVelocity, position, part.position);
                 }
             }
 
-            Bounds.update(part.bounds, part.vertices, body.velocity);
+            Bounds.update(part.bounds, part.vertices, velocity);
         }
     };
 
