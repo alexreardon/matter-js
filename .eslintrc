@@ -20,6 +20,7 @@
         "amd": true
     },
     "globals": {
+        "Map": false,
         "Matter": false,
         "window": true,
         "document": false,

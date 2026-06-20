@@ -20,8 +20,8 @@ var Common = require('../core/Common');
      * @return {pairs} A new pairs structure
      */
     Pairs.create = function(options) {
-        return Common.extend({ 
-            table: {},
+        return Common.extend({
+            table: new Map(),
             list: [],
             collisionStart: [],
             collisionActive: [],
@@ -71,7 +71,7 @@ var Common = require('../core/Common');
             } else {
                 // pair did not exist, create a new pair
                 pair = pairCreate(collision, timestamp);
-                pairsTable[pair.id] = pair;
+                pairsTable.set(pair.id, pair);
 
                 // add the new pair
                 collisionStart[collisionStartIndex++] = pair;
@@ -99,7 +99,7 @@ var Common = require('../core/Common');
                 } else {
                     // remove inactive pairs if either body awake
                     collisionEnd[collisionEndIndex++] = pair;
-                    delete pairsTable[pair.id];
+                    pairsTable.delete(pair.id);
                 }
             }
         }
@@ -129,7 +129,7 @@ var Common = require('../core/Common');
      * @return {pairs} pairs
      */
     Pairs.clear = function(pairs) {
-        pairs.table = {};
+        pairs.table = new Map();
         pairs.list.length = 0;
         pairs.collisionStart.length = 0;
         pairs.collisionActive.length = 0;

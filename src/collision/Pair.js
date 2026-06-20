@@ -11,7 +11,11 @@ module.exports = Pair;
 var Contact = require('./Contact');
 
 (function() {
-    
+
+    // Multiplier used by `Pair.id` to pack two body ids into one numeric key.
+    // Keeps keys unique and exactly representable for integer body ids below it.
+    Pair._idShift = 1 << 26;
+
     /**
      * Creates a pair.
      * @method create
@@ -113,11 +117,15 @@ var Contact = require('./Contact');
      * @method id
      * @param {body} bodyA
      * @param {body} bodyB
-     * @return {string} Unique pairId
+     * @return {number} Unique pairId
      */
     Pair.id = function(bodyA, bodyB) {
-        return bodyA.id < bodyB.id ? bodyA.id.toString(36) + ':' + bodyB.id.toString(36) 
-            : bodyB.id.toString(36) + ':' + bodyA.id.toString(36);
+        // Numeric composite key into the pairs table `Map`. Avoids the string
+        // allocation a string key would force on every broadphase lookup.
+        // Assumes integer body ids below `Pair._idShift` (engine-assigned ids).
+        return bodyA.id < bodyB.id
+            ? bodyA.id * Pair._idShift + bodyB.id
+            : bodyB.id * Pair._idShift + bodyA.id;
     };
 
 })();

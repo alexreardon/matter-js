@@ -69,7 +69,22 @@ var Collision = require('./Collision');
             i,
             j;
 
-        bodies.sort(Detector._compareBoundsX);
+        // sort bodies by bounds.min.x for sweep-and-prune. The array stays nearly
+        // sorted between frames, so a stable insertion sort runs in ~O(n) here and
+        // avoids the per-comparison JS-callback overhead of Array.prototype.sort.
+        // Being stable, it yields ordering identical to the previous stable sort.
+        for (i = 1; i < bodiesLength; i++) {
+            var insertBody = bodies[i],
+                insertX = insertBody.bounds.min.x,
+                k = i - 1;
+
+            while (k >= 0 && bodies[k].bounds.min.x > insertX) {
+                bodies[k + 1] = bodies[k];
+                k--;
+            }
+
+            bodies[k + 1] = insertBody;
+        }
 
         for (i = 0; i < bodiesLength; i++) {
             var bodyA = bodies[i],

@@ -74,7 +74,7 @@ var Pair = require('./Pair');
         }
 
         // reuse collision records for gc efficiency
-        var pair = pairs && pairs.table[Pair.id(bodyA, bodyB)],
+        var pair = pairs && pairs.table.get(Pair.id(bodyA, bodyB)),
             collision;
 
         if (!pair) {

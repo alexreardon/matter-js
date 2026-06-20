@@ -36,32 +36,52 @@ module.exports = Bounds;
      * @param {vector} velocity
      */
     Bounds.update = function(bounds, vertices, velocity) {
-        bounds.min.x = Infinity;
-        bounds.max.x = -Infinity;
-        bounds.min.y = Infinity;
-        bounds.max.y = -Infinity;
+        var verticesLength = vertices.length;
 
-        for (var i = 0; i < vertices.length; i++) {
-            var vertex = vertices[i];
-            if (vertex.x > bounds.max.x) bounds.max.x = vertex.x;
-            if (vertex.x < bounds.min.x) bounds.min.x = vertex.x;
-            if (vertex.y > bounds.max.y) bounds.max.y = vertex.y;
-            if (vertex.y < bounds.min.y) bounds.min.y = vertex.y;
+        if (verticesLength === 0) {
+            bounds.min.x = Infinity;
+            bounds.max.x = -Infinity;
+            bounds.min.y = Infinity;
+            bounds.max.y = -Infinity;
+            return;
         }
-        
+
+        var vertex = vertices[0],
+            minX = vertex.x,
+            maxX = vertex.x,
+            minY = vertex.y,
+            maxY = vertex.y,
+            x,
+            y,
+            i;
+
+        for (i = 1; i < verticesLength; i++) {
+            vertex = vertices[i];
+            x = vertex.x;
+            y = vertex.y;
+
+            if (x > maxX) { maxX = x; } else if (x < minX) { minX = x; }
+            if (y > maxY) { maxY = y; } else if (y < minY) { minY = y; }
+        }
+
         if (velocity) {
             if (velocity.x > 0) {
-                bounds.max.x += velocity.x;
+                maxX += velocity.x;
             } else {
-                bounds.min.x += velocity.x;
+                minX += velocity.x;
             }
-            
+
             if (velocity.y > 0) {
-                bounds.max.y += velocity.y;
+                maxY += velocity.y;
             } else {
-                bounds.min.y += velocity.y;
+                minY += velocity.y;
             }
         }
+
+        bounds.min.x = minX;
+        bounds.max.x = maxX;
+        bounds.min.y = minY;
+        bounds.max.y = maxY;
     };
 
     /**

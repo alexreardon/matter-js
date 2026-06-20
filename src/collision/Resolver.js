@@ -258,12 +258,24 @@ var Bounds = require('../geometry/Bounds');
                 contactCount = pair.contactCount,
                 contactShare = 1 / contactCount;
 
+            // cache body properties that are invariant across the contact loop
+            var bodyAPositionX = bodyA.position.x,
+                bodyAPositionY = bodyA.position.y,
+                bodyBPositionX = bodyB.position.x,
+                bodyBPositionY = bodyB.position.y,
+                bodyAInverseMass = bodyA.inverseMass,
+                bodyBInverseMass = bodyB.inverseMass,
+                bodyAInverseInertia = bodyA.inverseInertia,
+                bodyBInverseInertia = bodyB.inverseInertia,
+                bodyACanMove = !(bodyA.isStatic || bodyA.isSleeping),
+                bodyBCanMove = !(bodyB.isStatic || bodyB.isSleeping);
+
             // get body velocities
-            var bodyAVelocityX = bodyA.position.x - bodyA.positionPrev.x,
-                bodyAVelocityY = bodyA.position.y - bodyA.positionPrev.y,
+            var bodyAVelocityX = bodyAPositionX - bodyA.positionPrev.x,
+                bodyAVelocityY = bodyAPositionY - bodyA.positionPrev.y,
                 bodyAAngularVelocity = bodyA.angle - bodyA.anglePrev,
-                bodyBVelocityX = bodyB.position.x - bodyB.positionPrev.x,
-                bodyBVelocityY = bodyB.position.y - bodyB.positionPrev.y,
+                bodyBVelocityX = bodyBPositionX - bodyB.positionPrev.x,
+                bodyBVelocityY = bodyBPositionY - bodyB.positionPrev.y,
                 bodyBAngularVelocity = bodyB.angle - bodyB.anglePrev;
 
             // resolve each contact
@@ -271,10 +283,10 @@ var Bounds = require('../geometry/Bounds');
                 var contact = contacts[j],
                     contactVertex = contact.vertex;
 
-                var offsetAX = contactVertex.x - bodyA.position.x,
-                    offsetAY = contactVertex.y - bodyA.position.y,
-                    offsetBX = contactVertex.x - bodyB.position.x,
-                    offsetBY = contactVertex.y - bodyB.position.y;
+                var offsetAX = contactVertex.x - bodyAPositionX,
+                    offsetAY = contactVertex.y - bodyAPositionY,
+                    offsetBX = contactVertex.x - bodyBPositionX,
+                    offsetBY = contactVertex.y - bodyBPositionY;
  
                 var velocityPointAX = bodyAVelocityX - offsetAY * bodyAAngularVelocity,
                     velocityPointAY = bodyAVelocityY + offsetAX * bodyAAngularVelocity,
@@ -289,7 +301,7 @@ var Bounds = require('../geometry/Bounds');
 
                 // coulomb friction
                 var normalOverlap = pair.separation + normalVelocity;
-                var normalForce = Math.min(normalOverlap, 1);
+                var normalForce = normalOverlap < 1 ? normalOverlap : 1;
                 normalForce = normalOverlap < 0 ? 0 : normalForce;
 
                 var frictionLimit = normalForce * friction;
@@ -311,7 +323,7 @@ var Bounds = require('../geometry/Bounds');
                 // account for mass, inertia and contact offset
                 var oAcN = offsetAX * normalY - offsetAY * normalX,
                     oBcN = offsetBX * normalY - offsetBY * normalX,
-                    share = contactShare / (inverseMassTotal + bodyA.inverseInertia * oAcN * oAcN + bodyB.inverseInertia * oBcN * oBcN);
+                    share = contactShare / (inverseMassTotal + bodyAInverseInertia * oAcN * oAcN + bodyBInverseInertia * oBcN * oBcN);
 
                 // raw impulses
                 var normalImpulse = (1 + pair.restitution) * normalVelocity * share;
@@ -349,16 +361,16 @@ var Bounds = require('../geometry/Bounds');
                     impulseY = normalY * normalImpulse + tangentY * tangentImpulse;
                 
                 // apply impulse from contact
-                if (!(bodyA.isStatic || bodyA.isSleeping)) {
-                    bodyA.positionPrev.x += impulseX * bodyA.inverseMass;
-                    bodyA.positionPrev.y += impulseY * bodyA.inverseMass;
-                    bodyA.anglePrev += (offsetAX * impulseY - offsetAY * impulseX) * bodyA.inverseInertia;
+                if (bodyACanMove) {
+                    bodyA.positionPrev.x += impulseX * bodyAInverseMass;
+                    bodyA.positionPrev.y += impulseY * bodyAInverseMass;
+                    bodyA.anglePrev += (offsetAX * impulseY - offsetAY * impulseX) * bodyAInverseInertia;
                 }
 
-                if (!(bodyB.isStatic || bodyB.isSleeping)) {
-                    bodyB.positionPrev.x -= impulseX * bodyB.inverseMass;
-                    bodyB.positionPrev.y -= impulseY * bodyB.inverseMass;
-                    bodyB.anglePrev -= (offsetBX * impulseY - offsetBY * impulseX) * bodyB.inverseInertia;
+                if (bodyBCanMove) {
+                    bodyB.positionPrev.x -= impulseX * bodyBInverseMass;
+                    bodyB.positionPrev.y -= impulseY * bodyBInverseMass;
+                    bodyB.anglePrev -= (offsetBX * impulseY - offsetBY * impulseX) * bodyBInverseInertia;
                 }
             }
         }
