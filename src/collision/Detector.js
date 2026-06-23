@@ -433,10 +433,17 @@ var Collision = require('./Collision');
      * sweep but is deterministic.
      *
      * The static index is rebuilt only when the static membership changes
-     * (detected per body via a cached `_sPrev` flag), e.g. on release. A static
-     * body that MOVES while staying static (inner-scroll surfaces) is not handled
-     * here and must be treated as a mover by the caller; the page-destroyer
-     * integration does this.
+     * (detected per body via a cached `_sPrev` flag plus a `staticCount` guard),
+     * e.g. on release. A static body that MOVES while staying static (inner-scroll
+     * surfaces) is not handled here and must be treated as a mover by the caller;
+     * the page-destroyer integration does this.
+     *
+     * The static buckets (and the oversized-static list) hold body REFERENCES,
+     * not indices into `detector.bodies`. The index outlives a step, but Matter
+     * re-slices `detector.bodies` from `Composite.allBodies` on `world.isModified`
+     * (any add/remove), which reorders and shrinks that array. Since the rebuild
+     * fires only on static-membership changes, a stored index could point at the
+     * wrong body or past the array end on a later step; a reference cannot.
      * @private
      * @method _collisionsGridStatic
      * @param {detector} detector
@@ -523,7 +530,7 @@ var Collision = require('./Collision');
                     scy0 = Math.floor(sBounds.min.y * invCell),
                     scy1 = Math.floor(sBounds.max.y * invCell);
                 if ((scx1 - scx0 + 1) * (scy1 - scy0 + 1) > maxCells) {
-                    g.sOver.push(i);
+                    g.sOver.push(sb);
                     continue;
                 }
                 for (cx = scx0; cx <= scx1; cx++) {
@@ -538,7 +545,15 @@ var Collision = require('./Collision');
                         if (sBucket.length === 0) {
                             sUsed.push(key);
                         }
-                        sBucket.push(i);
+                        // store the body reference, not its index into
+                        // detector.bodies: the static index persists across
+                        // steps, but Matter re-slices detector.bodies on
+                        // world.isModified (add/remove of ANY body), which
+                        // reorders/shrinks the array. The dirty-check only
+                        // rebuilds on static-membership changes, so a stored
+                        // index can dangle into a shifted array (or past its
+                        // end) and read undefined. A body ref stays valid.
+                        sBucket.push(sb);
                     }
                 }
             }
@@ -624,8 +639,7 @@ var Collision = require('./Collision');
                     var sOcc = mStatic ? undefined : g.sBuckets.get(key);
                     if (sOcc !== undefined) {
                         for (var si = 0; si < sOcc.length; si++) {
-                            var sj = sOcc[si],
-                                sBody = bodies[sj];
+                            var sBody = sOcc[si];
                             if (sBody._gsStamp === localStamp) {
                                 continue;
                             }
@@ -674,7 +688,7 @@ var Collision = require('./Collision');
             // Skipped when the outer body is itself static (static-static).
             if (!mStatic) {
                 for (var soi = 0; soi < sOverLength; soi++) {
-                    var soBody = bodies[sOver[soi]],
+                    var soBody = sOver[soi],
                         soBounds = soBody.bounds;
                     if (mMaxX < soBounds.min.x || mMinX > soBounds.max.x || mMaxY < soBounds.min.y || mMinY > soBounds.max.y) {
                         continue;
