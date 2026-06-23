@@ -6148,7 +6148,7 @@ var Collision = __webpack_require__(8);
         var g = detector._sgrid;
         if (!g) {
             g = detector._sgrid = {
-                sBuckets: new Map(), sUsed: [], sOver: [],
+                sBuckets: new Map(), sUsed: [], sOver: [], sFlat: [],
                 dBuckets: new Map(), dUsed: [], dOver: [],
                 movers: [], stamp: 1, built: false, indexedStaticCount: -1
             };
@@ -6201,6 +6201,10 @@ var Collision = __webpack_require__(8);
             }
             sUsed.length = 0;
             g.sOver.length = 0;
+            // flat list of non-oversized statics, rebuilt with the index. An
+            // oversized mover scans this instead of walking its (unbounded)
+            // cell span; see the candidate-generation pass below.
+            g.sFlat.length = 0;
             for (i = 0; i < n; i++) {
                 var sb = bodies[i];
                 if (!(sb.isStatic || sb.isSleeping) || sb._gridDynamic === true) {
@@ -6215,6 +6219,7 @@ var Collision = __webpack_require__(8);
                     g.sOver.push(sb);
                     continue;
                 }
+                g.sFlat.push(sb);
                 for (cx = scx0; cx <= scx1; cx++) {
                     var sKeyX = (cx + keyOffset) * keyStride;
                     for (cy = scy0; cy <= scy1; cy++) {
@@ -6293,6 +6298,8 @@ var Collision = __webpack_require__(8);
         // No static body is ever an outer, so static-static is never generated.
         var sOver = g.sOver,
             sOverLength = sOver.length,
+            sFlat = g.sFlat,
+            sFlatLength = sFlat.length,
             dOverLength = dOver.length;
         for (var mGen = 0; mGen < moversLength; mGen++) {
             var ii = movers[mGen],
@@ -6310,57 +6317,84 @@ var Collision = __webpack_require__(8);
                 mcy0 = Math.floor(mMinY * invCell),
                 mcy1 = Math.floor(mMaxY * invCell);
 
-            for (cx = mcx0; cx <= mcx1; cx++) {
-                var mKeyX = (cx + keyOffset) * keyStride;
-                for (cy = mcy0; cy <= mcy1; cy++) {
-                    key = mKeyX + (cy + keyOffset);
-
-                    // mover vs static (skipped when the outer body is itself
-                    // static: a tagged moving surface vs the static page is
-                    // static-static and never resolves)
-                    var sOcc = mStatic ? undefined : g.sBuckets.get(key);
-                    if (sOcc !== undefined) {
-                        for (var si = 0; si < sOcc.length; si++) {
-                            var sBody = sOcc[si];
-                            if (sBody._gsStamp === localStamp) {
-                                continue;
-                            }
-                            sBody._gsStamp = localStamp;
-                            var sbnd = sBody.bounds;
-                            if (mMaxX < sbnd.min.x || mMinX > sbnd.max.x || mMaxY < sbnd.min.y || mMinY > sbnd.max.y) {
-                                continue;
-                            }
-                            if (!canCollide(mFilter, sBody.collisionFilter)) {
-                                continue;
-                            }
-                            collisionIndex = Detector._testPair(m, sBody, pairs, collisions, collisionIndex);
+            // Oversized mover: its bounds span more than maxCells cells, so it
+            // was NOT inserted into the dynamic index. Walking its full cell
+            // span here is unbounded: a runaway-velocity body can span thousands
+            // of cells, and an Infinity bound makes `mcx1`/`mcy1` Infinity, so
+            // `for (cx = ...; cx <= Infinity; cx++)` would never terminate (the
+            // hang this guard fixes). Mirror _collisionsGrid: scan the flat
+            // static list for normal statics it overlaps, a bounded O(statics).
+            // Normal movers find THIS body via their own oversized pass (it is
+            // in dOver); oversized statics/movers are handled by the sOver/dOver
+            // passes below. Skipped for a static (tagged moving) mover, since
+            // static-static never resolves.
+            if (m._ovD) {
+                if (!mStatic) {
+                    for (var sfi = 0; sfi < sFlatLength; sfi++) {
+                        var fsBody = sFlat[sfi],
+                            fsBounds = fsBody.bounds;
+                        if (mMaxX < fsBounds.min.x || mMinX > fsBounds.max.x || mMaxY < fsBounds.min.y || mMinY > fsBounds.max.y) {
+                            continue;
                         }
+                        if (!canCollide(mFilter, fsBody.collisionFilter)) {
+                            continue;
+                        }
+                        collisionIndex = Detector._testPair(m, fsBody, pairs, collisions, collisionIndex);
                     }
+                }
+            } else {
+                for (cx = mcx0; cx <= mcx1; cx++) {
+                    var mKeyX = (cx + keyOffset) * keyStride;
+                    for (cy = mcy0; cy <= mcy1; cy++) {
+                        key = mKeyX + (cy + keyOffset);
 
-                    // mover vs mover (dedup by index, so emit only once)
-                    var dOcc = dBuckets.get(key);
-                    if (dOcc !== undefined) {
-                        for (var dgi = 0; dgi < dOcc.length; dgi++) {
-                            var dj = dOcc[dgi];
-                            if (dj <= ii) {
-                                continue;
+                        // mover vs static (skipped when the outer body is itself
+                        // static: a tagged moving surface vs the static page is
+                        // static-static and never resolves)
+                        var sOcc = mStatic ? undefined : g.sBuckets.get(key);
+                        if (sOcc !== undefined) {
+                            for (var si = 0; si < sOcc.length; si++) {
+                                var sBody = sOcc[si];
+                                if (sBody._gsStamp === localStamp) {
+                                    continue;
+                                }
+                                sBody._gsStamp = localStamp;
+                                var sbnd = sBody.bounds;
+                                if (mMaxX < sbnd.min.x || mMinX > sbnd.max.x || mMaxY < sbnd.min.y || mMinY > sbnd.max.y) {
+                                    continue;
+                                }
+                                if (!canCollide(mFilter, sBody.collisionFilter)) {
+                                    continue;
+                                }
+                                collisionIndex = Detector._testPair(m, sBody, pairs, collisions, collisionIndex);
                             }
-                            var dBody = bodies[dj];
-                            if (dBody._gsStamp === localStamp) {
-                                continue;
+                        }
+
+                        // mover vs mover (dedup by index, so emit only once)
+                        var dOcc = dBuckets.get(key);
+                        if (dOcc !== undefined) {
+                            for (var dgi = 0; dgi < dOcc.length; dgi++) {
+                                var dj = dOcc[dgi];
+                                if (dj <= ii) {
+                                    continue;
+                                }
+                                var dBody = bodies[dj];
+                                if (dBody._gsStamp === localStamp) {
+                                    continue;
+                                }
+                                dBody._gsStamp = localStamp;
+                                if (mStatic && (dBody.isStatic || dBody.isSleeping)) {
+                                    continue;
+                                }
+                                var dbnd = dBody.bounds;
+                                if (mMaxX < dbnd.min.x || mMinX > dbnd.max.x || mMaxY < dbnd.min.y || mMinY > dbnd.max.y) {
+                                    continue;
+                                }
+                                if (!canCollide(mFilter, dBody.collisionFilter)) {
+                                    continue;
+                                }
+                                collisionIndex = Detector._testPair(m, dBody, pairs, collisions, collisionIndex);
                             }
-                            dBody._gsStamp = localStamp;
-                            if (mStatic && (dBody.isStatic || dBody.isSleeping)) {
-                                continue;
-                            }
-                            var dbnd = dBody.bounds;
-                            if (mMaxX < dbnd.min.x || mMinX > dbnd.max.x || mMaxY < dbnd.min.y || mMinY > dbnd.max.y) {
-                                continue;
-                            }
-                            if (!canCollide(mFilter, dBody.collisionFilter)) {
-                                continue;
-                            }
-                            collisionIndex = Detector._testPair(m, dBody, pairs, collisions, collisionIndex);
                         }
                     }
                 }
@@ -6382,10 +6416,17 @@ var Collision = __webpack_require__(8);
                 }
             }
 
-            // mover vs oversized movers (dedup by index)
+            // mover vs oversized movers. The index dedup (emit an
+            // oversized-oversized pair once, from the lower-index outer) applies
+            // ONLY when the outer is itself oversized. A non-oversized mover
+            // never appears in dOver, so the pair is emitted here exactly once
+            // with it as the outer; without the `m._ovD` guard a normal mover
+            // whose index is higher than an oversized mover's would wrongly skip
+            // the pair, and it would be lost entirely (the oversized mover no
+            // longer cell-walks to find normal movers).
             for (var doi = 0; doi < dOverLength; doi++) {
                 var doIdx = dOver[doi];
-                if (doIdx <= ii) {
+                if (m._ovD && doIdx <= ii) {
                     continue;
                 }
                 var doBody = bodies[doIdx],
