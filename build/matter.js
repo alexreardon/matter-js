@@ -2143,7 +2143,120 @@ var Axes = __webpack_require__(11);
     };
 
     /**
-     * Sets the current linear velocity of the body.  
+     * Sets both the position and angle of the body in a single fused pass,
+     * equivalent to calling `Body.setPosition(body, { x, y })` then
+     * `Body.setAngle(body, angle)` (angular/linear velocity are left unchanged).
+     *
+     * The stock two-call sequence walks the vertices twice and writes the bounds
+     * twice, and the post-translate bounds write is dead work overwritten by the
+     * post-rotate one. When BOTH axes move on a single-part body (the common
+     * case for an authoritative pose writeback), this does one combined vertex
+     * pass - translate, rotate about the new position, min/max scan - and one
+     * bounds write, replicating the stock float ops in the stock order so the
+     * resulting body state is bit-identical.
+     *
+     * A single-axis change (position OR angle only) and compound bodies fall
+     * back to the stock setters: the fused rotate math is not bit-identical at a
+     * zero angle delta (the translate-then-rotate roundtrip loses precision when
+     * cos is exactly 1), and compound parts need per-part position bookkeeping.
+     * @method setPose
+     * @param {body} body
+     * @param {number} x
+     * @param {number} y
+     * @param {number} angle
+     */
+    Body.setPose = function(body, x, y, angle) {
+        var positionChanged = x !== body.position.x || y !== body.position.y,
+            angleChanged = angle !== body.angle;
+
+        if (!positionChanged || !angleChanged || body.parts.length > 1) {
+            if (positionChanged) {
+                Body.setPosition(body, { x: x, y: y });
+            }
+            if (angleChanged) {
+                Body.setAngle(body, angle);
+            }
+            return;
+        }
+
+        // The setPosition half: shift position and positionPrev by the delta.
+        var deltaX = x - body.position.x,
+            deltaY = y - body.position.y;
+
+        body.positionPrev.x += deltaX;
+        body.positionPrev.y += deltaY;
+        body.position.x += deltaX;
+        body.position.y += deltaY;
+
+        // The setAngle half: shift angle and anglePrev; vertices rotate about the
+        // NEW position, exactly as the stock call sequence does.
+        var deltaAngle = angle - body.angle;
+
+        body.anglePrev += deltaAngle;
+        body.angle += deltaAngle;
+
+        var cos = Math.cos(deltaAngle),
+            sin = Math.sin(deltaAngle),
+            pointX = body.position.x,
+            pointY = body.position.y,
+            vertices = body.vertices,
+            verticesLength = vertices.length,
+            minX = 0,
+            maxX = 0,
+            minY = 0,
+            maxY = 0;
+
+        for (var i = 0; i < verticesLength; i++) {
+            var vertex = vertices[i],
+                translatedX = vertex.x + deltaX,
+                translatedY = vertex.y + deltaY,
+                relativeX = translatedX - pointX,
+                relativeY = translatedY - pointY,
+                rotatedX = pointX + (relativeX * cos - relativeY * sin),
+                rotatedY = pointY + (relativeX * sin + relativeY * cos);
+
+            vertex.x = rotatedX;
+            vertex.y = rotatedY;
+
+            if (i === 0) {
+                minX = maxX = rotatedX;
+                minY = maxY = rotatedY;
+                continue;
+            }
+
+            if (rotatedX > maxX) { maxX = rotatedX; } else if (rotatedX < minX) { minX = rotatedX; }
+            if (rotatedY > maxY) { maxY = rotatedY; } else if (rotatedY < minY) { minY = rotatedY; }
+        }
+
+        // Axes.rotate, inlined (deltaAngle is nonzero on this path).
+        var axes = body.axes,
+            axesLength = axes.length;
+
+        for (var j = 0; j < axesLength; j++) {
+            var axis = axes[j],
+                rotatedAxisX = axis.x * cos - axis.y * sin;
+
+            axis.y = axis.x * sin + axis.y * cos;
+            axis.x = rotatedAxisX;
+        }
+
+        // The Bounds.update speculative-contact expansion: grow toward the
+        // current velocity direction, identical to the stock call.
+        var velocity = body.velocity;
+
+        if (velocity.x > 0) { maxX += velocity.x; } else { minX += velocity.x; }
+        if (velocity.y > 0) { maxY += velocity.y; } else { minY += velocity.y; }
+
+        var bounds = body.bounds;
+
+        bounds.min.x = minX;
+        bounds.max.x = maxX;
+        bounds.min.y = minY;
+        bounds.max.y = maxY;
+    };
+
+    /**
+     * Sets the current linear velocity of the body.
      * Affects body speed.
      * @method setVelocity
      * @param {body} body
