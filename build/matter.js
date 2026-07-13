@@ -2159,13 +2159,13 @@ var Axes = __webpack_require__(11);
      * back to the stock setters: the fused rotate math is not bit-identical at a
      * zero angle delta (the translate-then-rotate roundtrip loses precision when
      * cos is exactly 1), and compound parts need per-part position bookkeeping.
-     * @method setPose
+     * @method setPositionAndAngle
      * @param {body} body
      * @param {number} x
      * @param {number} y
      * @param {number} angle
      */
-    Body.setPose = function(body, x, y, angle) {
+    Body.setPositionAndAngle = function(body, x, y, angle) {
         var positionChanged = x !== body.position.x || y !== body.position.y,
             angleChanged = angle !== body.angle;
 
