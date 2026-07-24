@@ -468,8 +468,21 @@ var Collision = require('./Collision');
             g = detector._sgrid = {
                 sBuckets: new Map(), sUsed: [], sOver: [], sFlat: [],
                 dBuckets: new Map(), dUsed: [], dOver: [],
-                movers: [], stamp: 1, built: false, indexedStaticCount: -1
+                movers: [], stamp: 1, built: false, indexedStaticCount: -1,
+                // static-index build epoch: bumped on every rebuild so each
+                // mover's cached static-candidate list can be validated cheaply
+                epoch: 0,
+                cellSize: 0
             };
+        }
+
+        // a cell-size change invalidates every bucket key, including the
+        // persistent static index built under the old size; force a rebuild
+        // (without this, live cell-size tuning queries stale static buckets
+        // and silently misses mover-vs-static collisions)
+        if (g.cellSize !== cellSize) {
+            g.cellSize = cellSize;
+            g.built = false;
         }
 
         // 1) classify bodies into movers (dynamic) vs static, detecting any
@@ -564,6 +577,7 @@ var Collision = require('./Collision');
             }
             g.built = true;
             g.indexedStaticCount = staticCount;
+            g.epoch += 1;
         }
 
         // 3) rebuild the dynamic index each step from the movers
@@ -661,30 +675,58 @@ var Collision = require('./Collision');
                     }
                 }
             } else {
+                // static-candidate cache: while this mover's cell span, its
+                // static-vs-static role and the static index are all
+                // unchanged, the set of statics sharing cells with it cannot
+                // change either, so the per-cell static bucket lookups are
+                // skipped and the cached candidate list is re-tested directly
+                // (bounds overlap and collision filters are still evaluated
+                // every step). Resting debris hits this cache nearly every
+                // step; a fast mover (bullet) misses and pays the same fused
+                // walk it always did. Emission order is movers-then-statics on
+                // BOTH paths so a cache hit and a miss produce the identical
+                // collision order (a cache-state-dependent order would fork
+                // trajectories).
+                var scList = m._scList,
+                    scValid = scList !== null
+                        && m._scEpoch === g.epoch
+                        && m._scStatic === mStatic
+                        && m._scCx0 === mcx0 && m._scCx1 === mcx1
+                        && m._scCy0 === mcy0 && m._scCy1 === mcy1;
+
+                if (!scValid) {
+                    if (scList === null) {
+                        scList = m._scList = [];
+                    }
+                    scList.length = 0;
+                    m._scEpoch = g.epoch;
+                    m._scStatic = mStatic;
+                    m._scCx0 = mcx0;
+                    m._scCx1 = mcx1;
+                    m._scCy0 = mcy0;
+                    m._scCy1 = mcy1;
+                }
+
                 for (cx = mcx0; cx <= mcx1; cx++) {
                     var mKeyX = (cx + keyOffset) * keyStride;
                     for (cy = mcy0; cy <= mcy1; cy++) {
                         key = mKeyX + (cy + keyOffset);
 
-                        // mover vs static (skipped when the outer body is itself
-                        // static: a tagged moving surface vs the static page is
-                        // static-static and never resolves)
-                        var sOcc = mStatic ? undefined : g.sBuckets.get(key);
-                        if (sOcc !== undefined) {
-                            for (var si = 0; si < sOcc.length; si++) {
-                                var sBody = sOcc[si];
-                                if (sBody._gsStamp === localStamp) {
-                                    continue;
+                        // collect static candidates on a cache miss (tested
+                        // from the list after the walk; skipped when the outer
+                        // body is itself static, as a tagged moving surface vs
+                        // the static page is static-static and never resolves)
+                        if (!scValid) {
+                            var sOcc = mStatic ? undefined : g.sBuckets.get(key);
+                            if (sOcc !== undefined) {
+                                for (var si = 0; si < sOcc.length; si++) {
+                                    var sBody = sOcc[si];
+                                    if (sBody._gsStamp === localStamp) {
+                                        continue;
+                                    }
+                                    sBody._gsStamp = localStamp;
+                                    scList.push(sBody);
                                 }
-                                sBody._gsStamp = localStamp;
-                                var sbnd = sBody.bounds;
-                                if (mMaxX < sbnd.min.x || mMinX > sbnd.max.x || mMaxY < sbnd.min.y || mMinY > sbnd.max.y) {
-                                    continue;
-                                }
-                                if (!canCollide(mFilter, sBody.collisionFilter)) {
-                                    continue;
-                                }
-                                collisionIndex = Detector._testPair(m, sBody, pairs, collisions, collisionIndex);
                             }
                         }
 
@@ -714,6 +756,21 @@ var Collision = require('./Collision');
                                 collisionIndex = Detector._testPair(m, dBody, pairs, collisions, collisionIndex);
                             }
                         }
+                    }
+                }
+
+                // mover vs its static candidates (cached or just collected)
+                if (!mStatic) {
+                    for (var sci = 0, scListLength = scList.length; sci < scListLength; sci++) {
+                        var scBody = scList[sci],
+                            scBounds = scBody.bounds;
+                        if (mMaxX < scBounds.min.x || mMinX > scBounds.max.x || mMaxY < scBounds.min.y || mMinY > scBounds.max.y) {
+                            continue;
+                        }
+                        if (!canCollide(mFilter, scBody.collisionFilter)) {
+                            continue;
+                        }
+                        collisionIndex = Detector._testPair(m, scBody, pairs, collisions, collisionIndex);
                     }
                 }
             }

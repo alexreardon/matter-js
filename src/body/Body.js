@@ -111,7 +111,15 @@ var Axes = require('../geometry/Axes');
             _ov: false,
             _ovD: false,
             _gridDynamic: false,
-            _solverStamp: 0
+            _solverStamp: 0,
+            // gridStatic static-candidate cache (see Detector._collisionsGridStatic)
+            _scEpoch: 0,
+            _scStatic: false,
+            _scCx0: 0,
+            _scCx1: 0,
+            _scCy0: 0,
+            _scCy1: 0,
+            _scList: null
         };
 
         var body = Common.extend(defaults, options);
