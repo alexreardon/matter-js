@@ -23,22 +23,74 @@ var Bounds = require('../geometry/Bounds');
 
     /**
      * Prepare pairs for position solving.
+     *
+     * When the optional `container` (the engine's `pairs` structure) is given,
+     * the bodies touched by active pairs are also collected into a persistent
+     * per-engine scratch list (`container._solverBodies`), and each body's
+     * `totalContacts` is zeroed on first touch here rather than by a full
+     * all-bodies reset in `postSolvePosition`. This lets `postSolvePosition`
+     * visit only the bodies the solver can have affected instead of scanning
+     * the whole world (dense static pages make that scan the cost).
      * @method preSolvePosition
      * @param {pair[]} pairs
+     * @param {pairs} [container] The engine's pairs structure for scratch state
      */
-    Resolver.preSolvePosition = function(pairs) {
+    Resolver.preSolvePosition = function(pairs, container) {
         var i,
             pair,
             contactCount,
             pairsLength = pairs.length;
 
+        if (container) {
+            var solverBodies = container._solverBodies || (container._solverBodies = []),
+                epoch = (container._solverEpoch || 0) + 1,
+                solverBodyCount = 0;
+
+            container._solverEpoch = epoch;
+
+            // find total contacts on each body, collecting each touched body
+            // once (epoch stamp) and zeroing its contact count on first touch
+            for (i = 0; i < pairsLength; i++) {
+                pair = pairs[i];
+
+                if (!pair.isActive)
+                    continue;
+
+                contactCount = pair.contactCount;
+
+                var parentA = pair.collision.parentA,
+                    parentB = pair.collision.parentB;
+
+                if (parentA._solverStamp !== epoch) {
+                    parentA._solverStamp = epoch;
+                    parentA.totalContacts = 0;
+                    solverBodies[solverBodyCount++] = parentA;
+                }
+
+                if (parentB._solverStamp !== epoch) {
+                    parentB._solverStamp = epoch;
+                    parentB.totalContacts = 0;
+                    solverBodies[solverBodyCount++] = parentB;
+                }
+
+                parentA.totalContacts += contactCount;
+                parentB.totalContacts += contactCount;
+            }
+
+            if (solverBodies.length !== solverBodyCount) {
+                solverBodies.length = solverBodyCount;
+            }
+
+            return;
+        }
+
         // find total contacts on each body
         for (i = 0; i < pairsLength; i++) {
             pair = pairs[i];
-            
+
             if (!pair.isActive)
                 continue;
-            
+
             contactCount = pair.contactCount;
             pair.collision.parentA.totalContacts += contactCount;
             pair.collision.parentB.totalContacts += contactCount;
@@ -113,17 +165,124 @@ var Bounds = require('../geometry/Bounds');
     };
 
     /**
+     * Applies the accumulated position impulse to a single body and either
+     * clears it or decays it to warm the next step. Identical math to the
+     * classic full-scan path; shared by both `postSolvePosition` modes.
+     * @private
+     * @method _postSolveBody
+     * @param {body} body
+     * @return {boolean} `true` when the body still carries a non-zero impulse
+     */
+    Resolver._postSolveBody = function(body) {
+        var positionImpulse = body.positionImpulse,
+            positionImpulseX = positionImpulse.x,
+            positionImpulseY = positionImpulse.y,
+            velocity = body.velocity;
+
+        if (positionImpulseX === 0 && positionImpulseY === 0) {
+            return false;
+        }
+
+        // update body geometry
+        for (var j = 0; j < body.parts.length; j++) {
+            var part = body.parts[j];
+            Vertices.translate(part.vertices, positionImpulse);
+            Bounds.update(part.bounds, part.vertices, velocity);
+            part.position.x += positionImpulseX;
+            part.position.y += positionImpulseY;
+        }
+
+        // move the body without changing velocity
+        body.positionPrev.x += positionImpulseX;
+        body.positionPrev.y += positionImpulseY;
+
+        if (positionImpulseX * velocity.x + positionImpulseY * velocity.y < 0) {
+            // reset cached impulse if the body has velocity along it
+            positionImpulse.x = 0;
+            positionImpulse.y = 0;
+            return false;
+        }
+
+        // warm the next iteration
+        positionImpulse.x *= Resolver._positionWarming;
+        positionImpulse.y *= Resolver._positionWarming;
+
+        // the warming decay only asymptotes towards zero; below this magnitude
+        // the remaining translation is far under any observable simulation
+        // scale, so clear it outright to let carried bodies retire
+        if (positionImpulse.x < 1e-9 && positionImpulse.x > -1e-9
+            && positionImpulse.y < 1e-9 && positionImpulse.y > -1e-9) {
+            positionImpulse.x = 0;
+            positionImpulse.y = 0;
+            return false;
+        }
+
+        return true;
+    };
+
+    /**
      * Apply position resolution.
+     *
+     * When the optional `container` (the engine's `pairs` structure, as passed
+     * to `preSolvePosition`) is given, only the bodies collected there plus any
+     * bodies still carrying a warmed impulse from earlier steps are visited,
+     * instead of scanning every body in the world. A body whose pair ended but
+     * whose warmed impulse is still decaying stays in a persistent carry list
+     * until the impulse clears, preserving the classic path's decay behaviour.
      * @method postSolvePosition
      * @param {body[]} bodies
+     * @param {pairs} [container] The engine's pairs structure for scratch state
      */
-    Resolver.postSolvePosition = function(bodies) {
+    Resolver.postSolvePosition = function(bodies, container) {
         var positionWarming = Resolver._positionWarming,
-            bodiesLength = bodies.length,
             verticesTranslate = Vertices.translate,
-            boundsUpdate = Bounds.update;
+            boundsUpdate = Bounds.update,
+            i;
 
-        for (var i = 0; i < bodiesLength; i++) {
+        if (container) {
+            var solverBodies = container._solverBodies || (container._solverBodies = []),
+                solverBodiesLength = solverBodies.length,
+                carry = container._impulseCarry || (container._impulseCarry = []),
+                carryLength = carry.length,
+                epoch = container._solverEpoch,
+                postSolveBody = Resolver._postSolveBody,
+                carryCount = 0;
+
+            // bodies from earlier steps still decaying a warmed impulse, first:
+            // this loop compacts the carry list in place, and must finish its
+            // reads before the solver-bodies loop below appends into the same
+            // array. Bodies also touched by this step's pairs are skipped here
+            // (the stamp matches) and handled in the second loop instead.
+            for (i = 0; i < carryLength; i++) {
+                var carryBody = carry[i];
+                if (carryBody._solverStamp === epoch) {
+                    continue;
+                }
+                if (postSolveBody(carryBody)) {
+                    // in-place compaction: carryCount <= i always holds here
+                    carry[carryCount++] = carryBody;
+                }
+            }
+
+            // bodies touched by this step's pairs; append any that finish the
+            // step still carrying a warmed impulse
+            for (i = 0; i < solverBodiesLength; i++) {
+                var solverBody = solverBodies[i];
+                if (postSolveBody(solverBody)) {
+                    carry[carryCount++] = solverBody;
+                }
+            }
+
+            if (carry.length !== carryCount) {
+                carry.length = carryCount;
+            }
+
+            return;
+        }
+
+        var bodiesLength = bodies.length;
+
+        for (i = 0; i < bodiesLength; i++) {
             var body = bodies[i],
                 positionImpulse = body.positionImpulse,
                 positionImpulseX = positionImpulse.x,

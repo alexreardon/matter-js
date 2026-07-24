@@ -194,11 +194,14 @@ var Body = require('../body/Body');
         // iteratively resolve position between collisions
         var positionDamping = Common.clamp(20 / engine.positionIterations, 0, 1);
         
-        Resolver.preSolvePosition(pairs.list);
+        // pass the pairs container so the resolver can collect the touched
+        // bodies and apply position impulses to only those (plus any bodies
+        // still decaying a warmed impulse), not the whole world
+        Resolver.preSolvePosition(pairs.list, pairs);
         for (i = 0; i < engine.positionIterations; i++) {
             Resolver.solvePosition(pairs.list, delta, positionDamping);
         }
-        Resolver.postSolvePosition(allBodies);
+        Resolver.postSolvePosition(allBodies, pairs);
 
         // update all constraints (second pass)
         Constraint.preSolveAll(allBodies);
