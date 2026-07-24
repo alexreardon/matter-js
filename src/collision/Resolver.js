@@ -31,6 +31,10 @@ var Bounds = require('../geometry/Bounds');
      * all-bodies reset in `postSolvePosition`. This lets `postSolvePosition`
      * visit only the bodies the solver can have affected instead of scanning
      * the whole world (dense static pages make that scan the cost).
+     *
+     * `_solverStamp` is pre-declared in `Body.create`; see the rule there
+     * before adding any new per-body scratch field (a lazily added field
+     * splits body hidden classes and slows the whole engine).
      * @method preSolvePosition
      * @param {pair[]} pairs
      * @param {pairs} [container] The engine's pairs structure for scratch state

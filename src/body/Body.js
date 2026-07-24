@@ -105,6 +105,9 @@ var Axes = require('../geometry/Axes');
             // splits body object shapes and degrades every hot property access
             // site engine-wide (measured 1.3-4.8x slower whole-step when
             // _solverStamp was added lazily to only pair-touched bodies).
+            // RULE: any NEW per-body scratch field, from any module, must be
+            // added to this block with a default of the same type it will
+            // hold, never assigned onto a body for the first time elsewhere.
             _stamp: 0,
             _gsStamp: 0,
             _sPrev: false,

@@ -444,6 +444,11 @@ var Collision = require('./Collision');
      * (any add/remove), which reorders and shrinks that array. Since the rebuild
      * fires only on static-membership changes, a stored index could point at the
      * wrong body or past the array end on a later step; a reference cannot.
+     *
+     * Every per-body field this path writes (`_sPrev`, `_gsStamp`, `_ovD`,
+     * `_gridDynamic`, `_sc*`) is pre-declared in `Body.create`; see the rule
+     * there before introducing a new one (a lazily added field splits body
+     * hidden classes and slows the whole engine, measured 1.3-4.8x).
      * @private
      * @method _collisionsGridStatic
      * @param {detector} detector
