@@ -4,6 +4,45 @@
 
 [brm.io/matter-js](https://brm.io/matter-js/)
 
+## About this fork
+
+A performance fork of `matter-js@0.20.0`, tuned for scenes that are a dense field
+of thousands of STATIC bodies with a smaller set of dynamic debris moving through
+it (a web page shattered into tiles, for the page destroyer game). Upstream is
+dormant, so the work lives here. Consumed as release-tag tarballs
+(`v0.20.0-perfN`); the built `build/matter.js` bundle is committed so installs
+need no build step.
+
+What changed, and the rough benefit:
+
+- **Static-index grid broadphase** (`Detector._mode = 'gridStatic'`, opt-in; the
+  classic sweep remains the default). Statics are bucketed once and only movers
+  generate candidate pairs, so calm dense scenes stop paying for the static field
+  every step. Several times faster whole-step on static-dominated scenes
+  (roughly 3-9x standalone, 2.6-4.4x in-game), with an oversized-body guard and
+  a per-mover static-candidate cache on top.
+- **Engine pass scoping.** Per-step all-body scans are gone where they did no
+  work: gravity / integration / velocity passes iterate a movers list, position
+  impulses apply only to solver-touched bodies, and constraint passes are
+  skipped when the world has no constraints. Tens of percent off whole-step cost
+  on the target workload (-14% to -31% across the perf8 regimes).
+- **Hidden-class hygiene.** All per-body scratch fields are pre-declared in
+  `Body.create`; lazily added properties were splitting body object shapes and
+  slowing every hot property access engine-wide (measured up to several times
+  slower). New scratch fields must be declared there too.
+- **Allocation and narrowphase micro-optimisations.** Numeric pair ids instead
+  of string keys, a quad-unrolled SAT fast path for the box-vs-box common case,
+  resting-body skips, fused `Body.setPositionAndAngle`. Less per-frame garbage
+  (about a third less allocation per update) and a few percent step time.
+- **Correctness gates.** A tiered determinism spec (`test/Determinism.spec.js`)
+  pins settle scenes within a tight epsilon and holds chaotic scenes to physical
+  invariants, alongside upstream's example suite. The simulation is
+  deterministic but intentionally re-baselined relative to stock: the grid
+  broadphase and later passes emit collisions in a different, still
+  deterministic, order.
+
+Everything below this point is the upstream readme.
+
 [Demos](#demos) ・ [Gallery](#gallery) ・ [Features](#features) ・ [Plugins](#plugins) ・ [Install](#install) ・ [Usage](#usage) ・ [Examples](#examples) ・ [Docs](#documentation) ・ [Wiki](https://github.com/liabru/matter-js/wiki) ・ [References](#references) ・ [License](#license)
 
 ### Demos
