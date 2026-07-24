@@ -165,12 +165,22 @@ var Body = require('../body/Body');
 
         Events.trigger(engine, 'beforeSolve', event);
 
+        // with no constraints in the world every body's constraintImpulse is
+        // zero, so the pre/post passes (full-body scans) and the solve loop
+        // are all no-ops; skip them entirely. Caveat: a body whose constraint
+        // was removed while its warmed impulse was still non-zero keeps that
+        // residual impulse frozen until a constraint exists again, instead of
+        // applying it for a few more decaying steps.
+        var hasConstraints = allConstraints.length > 0;
+
         // update all constraints (first pass)
-        Constraint.preSolveAll(allBodies);
-        for (i = 0; i < engine.constraintIterations; i++) {
-            Constraint.solveAll(allConstraints, delta);
+        if (hasConstraints) {
+            Constraint.preSolveAll(allBodies);
+            for (i = 0; i < engine.constraintIterations; i++) {
+                Constraint.solveAll(allConstraints, delta);
+            }
+            Constraint.postSolveAll(allBodies);
         }
-        Constraint.postSolveAll(allBodies);
 
         // find all collisions
         var collisions = Detector.collisions(detector);
@@ -204,11 +214,13 @@ var Body = require('../body/Body');
         Resolver.postSolvePosition(allBodies, pairs);
 
         // update all constraints (second pass)
-        Constraint.preSolveAll(allBodies);
-        for (i = 0; i < engine.constraintIterations; i++) {
-            Constraint.solveAll(allConstraints, delta);
+        if (hasConstraints) {
+            Constraint.preSolveAll(allBodies);
+            for (i = 0; i < engine.constraintIterations; i++) {
+                Constraint.solveAll(allConstraints, delta);
+            }
+            Constraint.postSolveAll(allBodies);
         }
-        Constraint.postSolveAll(allBodies);
 
         // iteratively resolve velocity between collisions
         Resolver.preSolveVelocity(pairs.list);
