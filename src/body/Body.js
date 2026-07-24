@@ -97,7 +97,21 @@ var Axes = require('../geometry/Axes');
             mass: 0,
             inertia: 0,
             deltaTime: 1000 / 60,
-            _original: null
+            _original: null,
+            // per-step scratch stamps and flags used by the broadphase
+            // (grid/gridStatic modes), the resolver body collection, and the
+            // page-destroyer moving-static tag. Pre-declared so every body
+            // shares one hidden class: adding any of these lazily at first use
+            // splits body object shapes and degrades every hot property access
+            // site engine-wide (measured 1.3-4.8x slower whole-step when
+            // _solverStamp was added lazily to only pair-touched bodies).
+            _stamp: 0,
+            _gsStamp: 0,
+            _sPrev: false,
+            _ov: false,
+            _ovD: false,
+            _gridDynamic: false,
+            _solverStamp: 0
         };
 
         var body = Common.extend(defaults, options);
