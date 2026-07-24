@@ -131,12 +131,36 @@ var Body = require('../body/Body');
         if (engine.enableSleeping)
             Sleeping.update(allBodies, delta);
 
-        // apply gravity to all bodies
-        Engine._bodiesApplyGravity(allBodies, engine.gravity);
+        // classify the moving bodies once per step into a persistent scratch
+        // array, so the per-body passes below (gravity, integration, velocity
+        // recompute) iterate only movers instead of flag-scanning every static
+        // in the world each time. The passes keep their own static/sleeping
+        // guards, so a body set static mid-update is still skipped; a body
+        // released mid-update (static to dynamic inside an event callback)
+        // joins the passes on the next step, when callers have set its
+        // velocity explicitly anyway. Force clearing deliberately stays a
+        // full-body pass (a stale force on a static body must not survive
+        // into a later release).
+        var moverBodies = engine._moverBodies || (engine._moverBodies = []),
+            allBodiesLength = allBodies.length,
+            moverCount = 0;
+
+        for (i = 0; i < allBodiesLength; i++) {
+            var classifyBody = allBodies[i];
+            if (!(classifyBody.isStatic || classifyBody.isSleeping)) {
+                moverBodies[moverCount++] = classifyBody;
+            }
+        }
+        if (moverBodies.length !== moverCount) {
+            moverBodies.length = moverCount;
+        }
+
+        // apply gravity to all moving bodies
+        Engine._bodiesApplyGravity(moverBodies, engine.gravity);
 
         // update all body position and rotation by integration
         if (delta > 0) {
-            Engine._bodiesUpdate(allBodies, delta);
+            Engine._bodiesUpdate(moverBodies, delta);
         }
 
         Events.trigger(engine, 'beforeSolve', event);
@@ -190,7 +214,7 @@ var Body = require('../body/Body');
         }
 
         // update body speed and velocity properties
-        Engine._bodiesUpdateVelocities(allBodies);
+        Engine._bodiesUpdateVelocities(moverBodies);
 
         // trigger collision events
         if (pairs.collisionActive.length > 0) {
