@@ -1700,7 +1700,29 @@ var Axes = __webpack_require__(11);
             mass: 0,
             inertia: 0,
             deltaTime: 1000 / 60,
-            _original: null
+            _original: null,
+            // per-step scratch stamps and flags used by the broadphase
+            // (grid/gridStatic modes), the resolver body collection, and the
+            // page-destroyer moving-static tag. Pre-declared so every body
+            // shares one hidden class: adding any of these lazily at first use
+            // splits body object shapes and degrades every hot property access
+            // site engine-wide (measured 1.3-4.8x slower whole-step when
+            // _solverStamp was added lazily to only pair-touched bodies).
+            _stamp: 0,
+            _gsStamp: 0,
+            _sPrev: false,
+            _ov: false,
+            _ovD: false,
+            _gridDynamic: false,
+            _solverStamp: 0,
+            // gridStatic static-candidate cache (see Detector._collisionsGridStatic)
+            _scEpoch: 0,
+            _scStatic: false,
+            _scCx0: 0,
+            _scCx1: 0,
+            _scCy0: 0,
+            _scCy1: 0,
+            _scList: null
         };
 
         var body = Common.extend(defaults, options);
@@ -6263,8 +6285,21 @@ var Collision = __webpack_require__(8);
             g = detector._sgrid = {
                 sBuckets: new Map(), sUsed: [], sOver: [], sFlat: [],
                 dBuckets: new Map(), dUsed: [], dOver: [],
-                movers: [], stamp: 1, built: false, indexedStaticCount: -1
+                movers: [], stamp: 1, built: false, indexedStaticCount: -1,
+                // static-index build epoch: bumped on every rebuild so each
+                // mover's cached static-candidate list can be validated cheaply
+                epoch: 0,
+                cellSize: 0
             };
+        }
+
+        // a cell-size change invalidates every bucket key, including the
+        // persistent static index built under the old size; force a rebuild
+        // (without this, live cell-size tuning queries stale static buckets
+        // and silently misses mover-vs-static collisions)
+        if (g.cellSize !== cellSize) {
+            g.cellSize = cellSize;
+            g.built = false;
         }
 
         // 1) classify bodies into movers (dynamic) vs static, detecting any
@@ -6359,6 +6394,7 @@ var Collision = __webpack_require__(8);
             }
             g.built = true;
             g.indexedStaticCount = staticCount;
+            g.epoch += 1;
         }
 
         // 3) rebuild the dynamic index each step from the movers
@@ -6456,30 +6492,58 @@ var Collision = __webpack_require__(8);
                     }
                 }
             } else {
+                // static-candidate cache: while this mover's cell span, its
+                // static-vs-static role and the static index are all
+                // unchanged, the set of statics sharing cells with it cannot
+                // change either, so the per-cell static bucket lookups are
+                // skipped and the cached candidate list is re-tested directly
+                // (bounds overlap and collision filters are still evaluated
+                // every step). Resting debris hits this cache nearly every
+                // step; a fast mover (bullet) misses and pays the same fused
+                // walk it always did. Emission order is movers-then-statics on
+                // BOTH paths so a cache hit and a miss produce the identical
+                // collision order (a cache-state-dependent order would fork
+                // trajectories).
+                var scList = m._scList,
+                    scValid = scList !== null
+                        && m._scEpoch === g.epoch
+                        && m._scStatic === mStatic
+                        && m._scCx0 === mcx0 && m._scCx1 === mcx1
+                        && m._scCy0 === mcy0 && m._scCy1 === mcy1;
+
+                if (!scValid) {
+                    if (scList === null) {
+                        scList = m._scList = [];
+                    }
+                    scList.length = 0;
+                    m._scEpoch = g.epoch;
+                    m._scStatic = mStatic;
+                    m._scCx0 = mcx0;
+                    m._scCx1 = mcx1;
+                    m._scCy0 = mcy0;
+                    m._scCy1 = mcy1;
+                }
+
                 for (cx = mcx0; cx <= mcx1; cx++) {
                     var mKeyX = (cx + keyOffset) * keyStride;
                     for (cy = mcy0; cy <= mcy1; cy++) {
                         key = mKeyX + (cy + keyOffset);
 
-                        // mover vs static (skipped when the outer body is itself
-                        // static: a tagged moving surface vs the static page is
-                        // static-static and never resolves)
-                        var sOcc = mStatic ? undefined : g.sBuckets.get(key);
-                        if (sOcc !== undefined) {
-                            for (var si = 0; si < sOcc.length; si++) {
-                                var sBody = sOcc[si];
-                                if (sBody._gsStamp === localStamp) {
-                                    continue;
+                        // collect static candidates on a cache miss (tested
+                        // from the list after the walk; skipped when the outer
+                        // body is itself static, as a tagged moving surface vs
+                        // the static page is static-static and never resolves)
+                        if (!scValid) {
+                            var sOcc = mStatic ? undefined : g.sBuckets.get(key);
+                            if (sOcc !== undefined) {
+                                for (var si = 0; si < sOcc.length; si++) {
+                                    var sBody = sOcc[si];
+                                    if (sBody._gsStamp === localStamp) {
+                                        continue;
+                                    }
+                                    sBody._gsStamp = localStamp;
+                                    scList.push(sBody);
                                 }
-                                sBody._gsStamp = localStamp;
-                                var sbnd = sBody.bounds;
-                                if (mMaxX < sbnd.min.x || mMinX > sbnd.max.x || mMaxY < sbnd.min.y || mMinY > sbnd.max.y) {
-                                    continue;
-                                }
-                                if (!canCollide(mFilter, sBody.collisionFilter)) {
-                                    continue;
-                                }
-                                collisionIndex = Detector._testPair(m, sBody, pairs, collisions, collisionIndex);
                             }
                         }
 
@@ -6509,6 +6573,21 @@ var Collision = __webpack_require__(8);
                                 collisionIndex = Detector._testPair(m, dBody, pairs, collisions, collisionIndex);
                             }
                         }
+                    }
+                }
+
+                // mover vs its static candidates (cached or just collected)
+                if (!mStatic) {
+                    for (var sci = 0, scListLength = scList.length; sci < scListLength; sci++) {
+                        var scBody = scList[sci],
+                            scBounds = scBody.bounds;
+                        if (mMaxX < scBounds.min.x || mMinX > scBounds.max.x || mMaxY < scBounds.min.y || mMinY > scBounds.max.y) {
+                            continue;
+                        }
+                        if (!canCollide(mFilter, scBody.collisionFilter)) {
+                            continue;
+                        }
+                        collisionIndex = Detector._testPair(m, scBody, pairs, collisions, collisionIndex);
                     }
                 }
             }
@@ -7358,22 +7437,56 @@ var Body = __webpack_require__(4);
         if (engine.enableSleeping)
             Sleeping.update(allBodies, delta);
 
-        // apply gravity to all bodies
-        Engine._bodiesApplyGravity(allBodies, engine.gravity);
+        // classify the moving bodies once per step into a persistent scratch
+        // array, so the per-body passes below (gravity, integration, velocity
+        // recompute) iterate only movers instead of flag-scanning every static
+        // in the world each time. The passes keep their own static/sleeping
+        // guards, so a body set static mid-update is still skipped; a body
+        // released mid-update (static to dynamic inside an event callback)
+        // joins the passes on the next step, when callers have set its
+        // velocity explicitly anyway. Force clearing deliberately stays a
+        // full-body pass (a stale force on a static body must not survive
+        // into a later release).
+        var moverBodies = engine._moverBodies || (engine._moverBodies = []),
+            allBodiesLength = allBodies.length,
+            moverCount = 0;
+
+        for (i = 0; i < allBodiesLength; i++) {
+            var classifyBody = allBodies[i];
+            if (!(classifyBody.isStatic || classifyBody.isSleeping)) {
+                moverBodies[moverCount++] = classifyBody;
+            }
+        }
+        if (moverBodies.length !== moverCount) {
+            moverBodies.length = moverCount;
+        }
+
+        // apply gravity to all moving bodies
+        Engine._bodiesApplyGravity(moverBodies, engine.gravity);
 
         // update all body position and rotation by integration
         if (delta > 0) {
-            Engine._bodiesUpdate(allBodies, delta);
+            Engine._bodiesUpdate(moverBodies, delta);
         }
 
         Events.trigger(engine, 'beforeSolve', event);
 
+        // with no constraints in the world every body's constraintImpulse is
+        // zero, so the pre/post passes (full-body scans) and the solve loop
+        // are all no-ops; skip them entirely. Caveat: a body whose constraint
+        // was removed while its warmed impulse was still non-zero keeps that
+        // residual impulse frozen until a constraint exists again, instead of
+        // applying it for a few more decaying steps.
+        var hasConstraints = allConstraints.length > 0;
+
         // update all constraints (first pass)
-        Constraint.preSolveAll(allBodies);
-        for (i = 0; i < engine.constraintIterations; i++) {
-            Constraint.solveAll(allConstraints, delta);
+        if (hasConstraints) {
+            Constraint.preSolveAll(allBodies);
+            for (i = 0; i < engine.constraintIterations; i++) {
+                Constraint.solveAll(allConstraints, delta);
+            }
+            Constraint.postSolveAll(allBodies);
         }
-        Constraint.postSolveAll(allBodies);
 
         // find all collisions
         var collisions = Detector.collisions(detector);
@@ -7397,18 +7510,23 @@ var Body = __webpack_require__(4);
         // iteratively resolve position between collisions
         var positionDamping = Common.clamp(20 / engine.positionIterations, 0, 1);
         
-        Resolver.preSolvePosition(pairs.list);
+        // pass the pairs container so the resolver can collect the touched
+        // bodies and apply position impulses to only those (plus any bodies
+        // still decaying a warmed impulse), not the whole world
+        Resolver.preSolvePosition(pairs.list, pairs);
         for (i = 0; i < engine.positionIterations; i++) {
             Resolver.solvePosition(pairs.list, delta, positionDamping);
         }
-        Resolver.postSolvePosition(allBodies);
+        Resolver.postSolvePosition(allBodies, pairs);
 
         // update all constraints (second pass)
-        Constraint.preSolveAll(allBodies);
-        for (i = 0; i < engine.constraintIterations; i++) {
-            Constraint.solveAll(allConstraints, delta);
+        if (hasConstraints) {
+            Constraint.preSolveAll(allBodies);
+            for (i = 0; i < engine.constraintIterations; i++) {
+                Constraint.solveAll(allConstraints, delta);
+            }
+            Constraint.postSolveAll(allBodies);
         }
-        Constraint.postSolveAll(allBodies);
 
         // iteratively resolve velocity between collisions
         Resolver.preSolveVelocity(pairs.list);
@@ -7417,7 +7535,7 @@ var Body = __webpack_require__(4);
         }
 
         // update body speed and velocity properties
-        Engine._bodiesUpdateVelocities(allBodies);
+        Engine._bodiesUpdateVelocities(moverBodies);
 
         // trigger collision events
         if (pairs.collisionActive.length > 0) {
@@ -7849,22 +7967,74 @@ var Bounds = __webpack_require__(1);
 
     /**
      * Prepare pairs for position solving.
+     *
+     * When the optional `container` (the engine's `pairs` structure) is given,
+     * the bodies touched by active pairs are also collected into a persistent
+     * per-engine scratch list (`container._solverBodies`), and each body's
+     * `totalContacts` is zeroed on first touch here rather than by a full
+     * all-bodies reset in `postSolvePosition`. This lets `postSolvePosition`
+     * visit only the bodies the solver can have affected instead of scanning
+     * the whole world (dense static pages make that scan the cost).
      * @method preSolvePosition
      * @param {pair[]} pairs
+     * @param {pairs} [container] The engine's pairs structure for scratch state
      */
-    Resolver.preSolvePosition = function(pairs) {
+    Resolver.preSolvePosition = function(pairs, container) {
         var i,
             pair,
             contactCount,
             pairsLength = pairs.length;
 
+        if (container) {
+            var solverBodies = container._solverBodies || (container._solverBodies = []),
+                epoch = (container._solverEpoch || 0) + 1,
+                solverBodyCount = 0;
+
+            container._solverEpoch = epoch;
+
+            // find total contacts on each body, collecting each touched body
+            // once (epoch stamp) and zeroing its contact count on first touch
+            for (i = 0; i < pairsLength; i++) {
+                pair = pairs[i];
+
+                if (!pair.isActive)
+                    continue;
+
+                contactCount = pair.contactCount;
+
+                var parentA = pair.collision.parentA,
+                    parentB = pair.collision.parentB;
+
+                if (parentA._solverStamp !== epoch) {
+                    parentA._solverStamp = epoch;
+                    parentA.totalContacts = 0;
+                    solverBodies[solverBodyCount++] = parentA;
+                }
+
+                if (parentB._solverStamp !== epoch) {
+                    parentB._solverStamp = epoch;
+                    parentB.totalContacts = 0;
+                    solverBodies[solverBodyCount++] = parentB;
+                }
+
+                parentA.totalContacts += contactCount;
+                parentB.totalContacts += contactCount;
+            }
+
+            if (solverBodies.length !== solverBodyCount) {
+                solverBodies.length = solverBodyCount;
+            }
+
+            return;
+        }
+
         // find total contacts on each body
         for (i = 0; i < pairsLength; i++) {
             pair = pairs[i];
-            
+
             if (!pair.isActive)
                 continue;
-            
+
             contactCount = pair.contactCount;
             pair.collision.parentA.totalContacts += contactCount;
             pair.collision.parentB.totalContacts += contactCount;
@@ -7939,17 +8109,124 @@ var Bounds = __webpack_require__(1);
     };
 
     /**
+     * Applies the accumulated position impulse to a single body and either
+     * clears it or decays it to warm the next step. Identical math to the
+     * classic full-scan path; shared by both `postSolvePosition` modes.
+     * @private
+     * @method _postSolveBody
+     * @param {body} body
+     * @return {boolean} `true` when the body still carries a non-zero impulse
+     */
+    Resolver._postSolveBody = function(body) {
+        var positionImpulse = body.positionImpulse,
+            positionImpulseX = positionImpulse.x,
+            positionImpulseY = positionImpulse.y,
+            velocity = body.velocity;
+
+        if (positionImpulseX === 0 && positionImpulseY === 0) {
+            return false;
+        }
+
+        // update body geometry
+        for (var j = 0; j < body.parts.length; j++) {
+            var part = body.parts[j];
+            Vertices.translate(part.vertices, positionImpulse);
+            Bounds.update(part.bounds, part.vertices, velocity);
+            part.position.x += positionImpulseX;
+            part.position.y += positionImpulseY;
+        }
+
+        // move the body without changing velocity
+        body.positionPrev.x += positionImpulseX;
+        body.positionPrev.y += positionImpulseY;
+
+        if (positionImpulseX * velocity.x + positionImpulseY * velocity.y < 0) {
+            // reset cached impulse if the body has velocity along it
+            positionImpulse.x = 0;
+            positionImpulse.y = 0;
+            return false;
+        }
+
+        // warm the next iteration
+        positionImpulse.x *= Resolver._positionWarming;
+        positionImpulse.y *= Resolver._positionWarming;
+
+        // the warming decay only asymptotes towards zero; below this magnitude
+        // the remaining translation is far under any observable simulation
+        // scale, so clear it outright to let carried bodies retire
+        if (positionImpulse.x < 1e-9 && positionImpulse.x > -1e-9
+            && positionImpulse.y < 1e-9 && positionImpulse.y > -1e-9) {
+            positionImpulse.x = 0;
+            positionImpulse.y = 0;
+            return false;
+        }
+
+        return true;
+    };
+
+    /**
      * Apply position resolution.
+     *
+     * When the optional `container` (the engine's `pairs` structure, as passed
+     * to `preSolvePosition`) is given, only the bodies collected there plus any
+     * bodies still carrying a warmed impulse from earlier steps are visited,
+     * instead of scanning every body in the world. A body whose pair ended but
+     * whose warmed impulse is still decaying stays in a persistent carry list
+     * until the impulse clears, preserving the classic path's decay behaviour.
      * @method postSolvePosition
      * @param {body[]} bodies
+     * @param {pairs} [container] The engine's pairs structure for scratch state
      */
-    Resolver.postSolvePosition = function(bodies) {
+    Resolver.postSolvePosition = function(bodies, container) {
         var positionWarming = Resolver._positionWarming,
-            bodiesLength = bodies.length,
             verticesTranslate = Vertices.translate,
-            boundsUpdate = Bounds.update;
+            boundsUpdate = Bounds.update,
+            i;
 
-        for (var i = 0; i < bodiesLength; i++) {
+        if (container) {
+            var solverBodies = container._solverBodies || (container._solverBodies = []),
+                solverBodiesLength = solverBodies.length,
+                carry = container._impulseCarry || (container._impulseCarry = []),
+                carryLength = carry.length,
+                epoch = container._solverEpoch,
+                postSolveBody = Resolver._postSolveBody,
+                carryCount = 0;
+
+            // bodies from earlier steps still decaying a warmed impulse, first:
+            // this loop compacts the carry list in place, and must finish its
+            // reads before the solver-bodies loop below appends into the same
+            // array. Bodies also touched by this step's pairs are skipped here
+            // (the stamp matches) and handled in the second loop instead.
+            for (i = 0; i < carryLength; i++) {
+                var carryBody = carry[i];
+                if (carryBody._solverStamp === epoch) {
+                    continue;
+                }
+                if (postSolveBody(carryBody)) {
+                    // in-place compaction: carryCount <= i always holds here
+                    carry[carryCount++] = carryBody;
+                }
+            }
+
+            // bodies touched by this step's pairs; append any that finish the
+            // step still carrying a warmed impulse
+            for (i = 0; i < solverBodiesLength; i++) {
+                var solverBody = solverBodies[i];
+                if (postSolveBody(solverBody)) {
+                    carry[carryCount++] = solverBody;
+                }
+            }
+
+            if (carry.length !== carryCount) {
+                carry.length = carryCount;
+            }
+
+            return;
+        }
+
+        var bodiesLength = bodies.length;
+
+        for (i = 0; i < bodiesLength; i++) {
             var body = bodies[i],
                 positionImpulse = body.positionImpulse,
                 positionImpulseX = positionImpulse.x,
