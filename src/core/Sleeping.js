@@ -107,6 +107,13 @@ var Common = require('./Common');
             // invalidate the cached mover lists in Engine and the gridStatic
             // broadphase (see Common._bodyStaticEpoch)
             Common._bodyStaticEpoch++;
+
+            // Engine clears force buffers for moving bodies only, so a force
+            // applied while this body was asleep must be dropped here rather
+            // than surviving into the step after it wakes
+            body.force.x = 0;
+            body.force.y = 0;
+            body.torque = 0;
         }
 
         if (isSleeping) {

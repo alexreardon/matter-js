@@ -81,17 +81,43 @@ describe('Engine resting-body passes', () => {
         expect(body.force).toEqual({ x: 0, y: 0 });
     });
 
-    test('a static body still has its force buffer cleared each step', () => {
-        // the velocity pass is skipped for resting bodies, but the force pass is
-        // not: a static body must still be cleared so a stale force cannot wake a
-        // neighbour through Sleeping.update or detonate if it is later un-static'd
+    test('a force applied while static cannot survive into a release', () => {
+        // The per-step force pass covers moving bodies only: clearing every body
+        // in the world meant writing to a force buffer for every intact tile of
+        // a dense static page, and those scattered writes cost more across the
+        // step than the pass itself shows. A resting body is never integrated,
+        // so its buffer cannot affect the simulation while it rests; what must
+        // not happen is a force applied while it rested detonating it on release,
+        // so Body.setStatic zeroes the buffer on both transitions.
         const engine = Engine.create();
+        engine.gravity.y = 0;
         const body = Bodies.rectangle(0, 0, 50, 50, { isStatic: true });
         Composite.add(engine.world, body);
 
         Body.applyForce(body, body.position, { x: 10, y: 10 });
         Engine.update(engine, DELTA);
 
+        Body.setStatic(body, false);
         expect(body.force).toEqual({ x: 0, y: 0 });
+
+        Engine.update(engine, DELTA);
+        expect(body.velocity).toEqual({ x: 0, y: 0 });
+    });
+
+    test('a force applied while asleep cannot survive into a wake', () => {
+        const engine = Engine.create({ enableSleeping: true });
+        engine.gravity.y = 0;
+        const body = Bodies.rectangle(0, 0, 50, 50);
+        Composite.add(engine.world, body);
+
+        Sleeping.set(body, true);
+        Body.applyForce(body, body.position, { x: 10, y: 10 });
+        Engine.update(engine, DELTA);
+
+        Sleeping.set(body, false);
+        expect(body.force).toEqual({ x: 0, y: 0 });
+
+        Engine.update(engine, DELTA);
+        expect(body.velocity).toEqual({ x: 0, y: 0 });
     });
 });

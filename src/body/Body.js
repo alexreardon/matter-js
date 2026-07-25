@@ -330,6 +330,13 @@ var Axes = require('../geometry/Axes');
                 part._original = null;
             }
 
+            // Engine clears force buffers for moving bodies only, so a force
+            // applied while this body was resting must be dropped here rather
+            // than surviving into the step after a release
+            part.force.x = 0;
+            part.force.y = 0;
+            part.torque = 0;
+
             part.isStatic = isStatic;
         }
 

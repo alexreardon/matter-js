@@ -275,8 +275,11 @@ var Body = require('../body/Body');
             });
         }
 
-        // clear force buffers
-        Engine._bodiesClearForces(allBodies);
+        // clear force buffers. Movers only: a resting body is not integrated, so
+        // its force buffer cannot affect the simulation, and `Body.setStatic`
+        // zeroes the buffer on both transitions so nothing applied while resting
+        // can survive into a release.
+        Engine._bodiesClearForces(moverBodies);
 
         Events.trigger(engine, 'afterUpdate', event);
 
