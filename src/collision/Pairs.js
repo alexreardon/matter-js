@@ -19,13 +19,35 @@ var Common = require('../core/Common');
      * @param {object} options
      * @return {pairs} A new pairs structure
      */
+    /**
+     * Slot count of the collision record cache (see `Pairs.create`). A power of
+     * two so the hash masks; sized well above a typical live pair count so
+     * eviction is rare.
+     */
+    Pairs._cacheMask = 4095;
+
     Pairs.create = function(options) {
         return Common.extend({
             table: new Map(),
             list: [],
             collisionStart: [],
             collisionActive: [],
-            collisionEnd: []
+            collisionEnd: [],
+            // Direct-mapped cache from pair id to the collision record the pair
+            // reuses, read by `Collision.collides` on every overlapping
+            // candidate. The table lookup it replaces was one of the larger
+            // per-candidate costs; the cache turns it into a masked array read.
+            //
+            // It is only ever a hint, so it needs no invalidation: a pair id
+            // identifies its two bodies for the life of the world (body ids are
+            // never reused), a stored key can only ever be matched by that same
+            // body pair, and the record itself is scratch that the collision
+            // rewrites in full. It holds records for pairs that have since
+            // ended, which is what lets a re-collision reuse the old record
+            // instead of allocating a new one.
+            _recordKeys: new Float64Array(Pairs._cacheMask + 1),
+            _recordValues: new Array(Pairs._cacheMask + 1),
+            _recordMask: Pairs._cacheMask
         }, options);
     };
 
@@ -100,6 +122,11 @@ var Common = require('../core/Common');
                     // remove inactive pairs if either body awake
                     collisionEnd[collisionEndIndex++] = pair;
                     pairsTable.delete(pair.id);
+                    // the record outlives the pair (the collision record cache
+                    // hands it straight back if these bodies collide again), so
+                    // drop the back reference or the next `Pairs.update` would
+                    // take it for a live pair and never re-add it
+                    pair.collision.pair = null;
                 }
             }
         }
@@ -130,6 +157,9 @@ var Common = require('../core/Common');
      */
     Pairs.clear = function(pairs) {
         pairs.table = new Map();
+        pairs._recordKeys.fill(0);
+        pairs._recordValues.length = 0;
+        pairs._recordValues.length = Pairs._cacheMask + 1;
         pairs.list.length = 0;
         pairs.collisionStart.length = 0;
         pairs.collisionActive.length = 0;

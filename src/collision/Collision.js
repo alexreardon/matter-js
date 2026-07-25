@@ -73,19 +73,55 @@ var Pair = require('./Pair');
             return null;
         }
 
-        // reuse collision records for gc efficiency
-        var pair = pairs && pairs.table.get(Pair.id(bodyA, bodyB)),
-            collision;
+        // Reuse collision records for gc efficiency. The record for this body
+        // pair is looked up in the pairs structure's direct-mapped cache first
+        // (see Pairs.create): the record is scratch that the rest of this
+        // function overwrites in full, so a hit is as good as the table lookup
+        // and costs a masked array read instead. A hit for a pair that has since
+        // ended is not only safe but preferable, since it recycles that record
+        // rather than allocating a new one.
+        var collision = null,
+            recordSlot = -1,
+            pairId = 0;
 
-        if (!pair) {
+        if (pairs) {
+            var idA = bodyA.id,
+                idB = bodyB.id;
+
+            pairId = idA < idB ? idA * Pair._idShift + idB : idB * Pair._idShift + idA;
+            recordSlot = Pair.hash(idA, idB) & pairs._recordMask;
+
+            if (pairs._recordKeys[recordSlot] === pairId) {
+                var cached = pairs._recordValues[recordSlot];
+
+                // a live pair still points back at its record, so this alone
+                // proves the cached record is the one the table would return
+                if (cached.pair !== null) {
+                    collision = cached;
+                }
+            }
+
+            if (collision === null) {
+                var pair = pairs.table.get(pairId);
+
+                if (pair) {
+                    collision = pair.collision;
+                }
+            }
+        }
+
+        if (collision === null) {
             collision = Collision.create(bodyA, bodyB);
             collision.collided = true;
             collision.bodyA = bodyA.id < bodyB.id ? bodyA : bodyB;
             collision.bodyB = bodyA.id < bodyB.id ? bodyB : bodyA;
             collision.parentA = collision.bodyA.parent;
             collision.parentB = collision.bodyB.parent;
-        } else {
-            collision = pair.collision;
+        }
+
+        if (recordSlot >= 0) {
+            pairs._recordKeys[recordSlot] = pairId;
+            pairs._recordValues[recordSlot] = collision;
         }
 
         bodyA = collision.bodyA;

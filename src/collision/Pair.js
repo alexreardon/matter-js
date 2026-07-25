@@ -128,4 +128,19 @@ var Contact = require('./Contact');
             : bodyB.id * Pair._idShift + bodyA.id;
     };
 
+    /**
+     * Hashes the two body ids of a pair for the collision record cache (see
+     * `Pairs.create`). Mixes both ids: the packed `Pair.id` has the lower id
+     * entirely in its high bits, so masking it directly would drop every pair a
+     * body has into one slot.
+     * @method hash
+     * @param {number} idA
+     * @param {number} idB
+     * @return {number} A non-negative hash of the id pair
+     */
+    Pair.hash = function(idA, idB) {
+        var mixed = (Math.imul(idA, 0x9E3779B1) ^ Math.imul(idB, 0x85EBCA77)) | 0;
+        return (mixed ^ (mixed >>> 15)) | 0;
+    };
+
 })();
