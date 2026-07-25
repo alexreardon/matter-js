@@ -206,10 +206,12 @@ var Body = require('../body/Body');
         
         // pass the pairs container so the resolver can collect the touched
         // bodies and apply position impulses to only those (plus any bodies
-        // still decaying a warmed impulse), not the whole world
+        // still decaying a warmed impulse), not the whole world. The container
+        // also carries the flat solver snapshot the position iterations run
+        // over (built in preSolvePosition, written back in postSolvePosition)
         Resolver.preSolvePosition(pairs.list, pairs);
         for (i = 0; i < engine.positionIterations; i++) {
-            Resolver.solvePosition(pairs.list, delta, positionDamping);
+            Resolver.solvePosition(pairs.list, delta, positionDamping, pairs);
         }
         Resolver.postSolvePosition(allBodies, pairs);
 

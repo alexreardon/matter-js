@@ -52,6 +52,28 @@ var Bounds = require('../geometry/Bounds');
 
             container._solverEpoch = epoch;
 
+            // flat (structure-of-arrays) snapshot of the active non-sensor
+            // pairs, built once per step so the position iterations read and
+            // write compact numeric arrays instead of chasing
+            // pair -> collision -> parent -> positionImpulse chains six times
+            // over. Arrays persist on the container and are reused each step.
+            var soa = container._soa || (container._soa = {
+                    idxA: [], idxB: [], nx: [], ny: [], depth: [], slop: [],
+                    mul2: [], sep: [], pairRefs: [],
+                    impX: [], impY: [], tc: [], canMove: [],
+                    pairCount: 0, bodyCount: 0, epoch: 0,
+                    sepValid: false, dirty: false
+                }),
+                soaIdxA = soa.idxA,
+                soaIdxB = soa.idxB,
+                soaNx = soa.nx,
+                soaNy = soa.ny,
+                soaDepth = soa.depth,
+                soaSlop = soa.slop,
+                soaMul2 = soa.mul2,
+                soaPairRefs = soa.pairRefs,
+                soaPairCount = 0;
+
             // find total contacts on each body, collecting each touched body
             // once (epoch stamp) and zeroing its contact count on first touch
             for (i = 0; i < pairsLength; i++) {
@@ -62,28 +84,70 @@ var Bounds = require('../geometry/Bounds');
 
                 contactCount = pair.contactCount;
 
-                var parentA = pair.collision.parentA,
-                    parentB = pair.collision.parentB;
+                var collision = pair.collision,
+                    parentA = collision.parentA,
+                    parentB = collision.parentB;
 
                 if (parentA._solverStamp !== epoch) {
                     parentA._solverStamp = epoch;
+                    parentA._solverIndex = solverBodyCount;
                     parentA.totalContacts = 0;
                     solverBodies[solverBodyCount++] = parentA;
                 }
 
                 if (parentB._solverStamp !== epoch) {
                     parentB._solverStamp = epoch;
+                    parentB._solverIndex = solverBodyCount;
                     parentB.totalContacts = 0;
                     solverBodies[solverBodyCount++] = parentB;
                 }
 
                 parentA.totalContacts += contactCount;
                 parentB.totalContacts += contactCount;
+
+                // sensor pairs contribute contacts above but are never solved
+                if (pair.isSensor)
+                    continue;
+
+                var normal = collision.normal;
+                soaIdxA[soaPairCount] = parentA._solverIndex;
+                soaIdxB[soaPairCount] = parentB._solverIndex;
+                soaNx[soaPairCount] = normal.x;
+                soaNy[soaPairCount] = normal.y;
+                soaDepth[soaPairCount] = collision.depth;
+                soaSlop[soaPairCount] = pair.slop;
+                soaMul2[soaPairCount] = (parentA.isStatic || parentB.isStatic) ? 2 : 1;
+                soaPairRefs[soaPairCount] = pair;
+                soaPairCount++;
             }
 
             if (solverBodies.length !== solverBodyCount) {
                 solverBodies.length = solverBodyCount;
             }
+            if (soaPairRefs.length !== soaPairCount) {
+                soaPairRefs.length = soaPairCount;
+            }
+
+            // per-body snapshot: warm-start impulses, contact totals and the
+            // can-move flag (totalContacts is only final after the pair loop)
+            var soaImpX = soa.impX,
+                soaImpY = soa.impY,
+                soaTc = soa.tc,
+                soaCanMove = soa.canMove;
+            for (i = 0; i < solverBodyCount; i++) {
+                var solverBody = solverBodies[i],
+                    solverBodyImpulse = solverBody.positionImpulse;
+                soaImpX[i] = solverBodyImpulse.x;
+                soaImpY[i] = solverBodyImpulse.y;
+                soaTc[i] = solverBody.totalContacts;
+                soaCanMove[i] = (solverBody.isStatic || solverBody.isSleeping) ? 0 : 1;
+            }
+
+            soa.pairCount = soaPairCount;
+            soa.bodyCount = solverBodyCount;
+            soa.epoch = epoch;
+            soa.sepValid = false;
+            soa.dirty = false;
 
             return;
         }
@@ -103,12 +167,19 @@ var Bounds = require('../geometry/Bounds');
 
     /**
      * Find a solution for pair positions.
+     *
+     * When the optional `container` (the engine's `pairs` structure, prepared
+     * by `preSolvePosition`) is given, the iteration runs over the flat
+     * structure-of-arrays snapshot built there: identical math in identical
+     * order over compact numeric arrays, with the results written back to the
+     * pairs and bodies in `postSolvePosition`.
      * @method solvePosition
      * @param {pair[]} pairs
      * @param {number} delta
      * @param {number} [damping=1]
+     * @param {pairs} [container] The engine's pairs structure for scratch state
      */
-    Resolver.solvePosition = function(pairs, delta, damping) {
+    Resolver.solvePosition = function(pairs, delta, damping, container) {
         var i,
             pair,
             collision,
@@ -120,6 +191,64 @@ var Bounds = require('../geometry/Bounds');
             positionDampen = Resolver._positionDampen * (damping || 1),
             slopDampen = Common.clamp(delta / Common._baseDelta, 0, 1),
             pairsLength = pairs.length;
+
+        var soa = container && container._soa;
+        if (soa && soa.epoch === container._solverEpoch) {
+            var pairCount = soa.pairCount,
+                idxA = soa.idxA,
+                idxB = soa.idxB,
+                nxArr = soa.nx,
+                nyArr = soa.ny,
+                depthArr = soa.depth,
+                slopArr = soa.slop,
+                mul2Arr = soa.mul2,
+                sepArr = soa.sep,
+                impX = soa.impX,
+                impY = soa.impY,
+                tcArr = soa.tc,
+                canMove = soa.canMove,
+                p,
+                ia,
+                ib;
+
+            // get current separation between body edges involved in collision
+            for (p = 0; p < pairCount; p++) {
+                ia = idxA[p];
+                ib = idxB[p];
+                sepArr[p] = depthArr[p]
+                    + nxArr[p] * (impX[ib] - impX[ia])
+                    + nyArr[p] * (impY[ib] - impY[ia]);
+            }
+
+            soa.sepValid = true;
+            soa.dirty = true;
+
+            // find impulses required to resolve penetration
+            for (p = 0; p < pairCount; p++) {
+                ia = idxA[p];
+                ib = idxB[p];
+
+                // multiplying by the pre-snapshotted 1-or-2 static factor is
+                // exact, so this matches the classic conditional doubling
+                var soaImpulse = (sepArr[p] - slopArr[p] * slopDampen) * mul2Arr[p],
+                    soaNormalX = nxArr[p],
+                    soaNormalY = nyArr[p];
+
+                if (canMove[ia] === 1) {
+                    contactShare = positionDampen / tcArr[ia];
+                    impX[ia] += soaNormalX * soaImpulse * contactShare;
+                    impY[ia] += soaNormalY * soaImpulse * contactShare;
+                }
+
+                if (canMove[ib] === 1) {
+                    contactShare = positionDampen / tcArr[ib];
+                    impX[ib] -= soaNormalX * soaImpulse * contactShare;
+                    impY[ib] -= soaNormalY * soaImpulse * contactShare;
+                }
+            }
+
+            return;
+        }
 
         // find impulses required to resolve penetration
         for (i = 0; i < pairsLength; i++) {
@@ -251,6 +380,34 @@ var Bounds = require('../geometry/Bounds');
                 epoch = container._solverEpoch,
                 postSolveBody = Resolver._postSolveBody,
                 carryCount = 0;
+
+            // write the flat solver snapshot back to the pairs and bodies
+            // before the per-body impulse application below reads them. Only
+            // when the SoA path actually ran this step (dirty): a caller that
+            // ran the classic solvePosition instead has already mutated the
+            // real objects, and stale array values must not clobber that.
+            var soaBack = container._soa;
+            if (soaBack && soaBack.dirty && soaBack.epoch === epoch) {
+                var backPairRefs = soaBack.pairRefs,
+                    backSep = soaBack.sep,
+                    backImpX = soaBack.impX,
+                    backImpY = soaBack.impY,
+                    backPairCount = soaBack.pairCount,
+                    backBodyCount = soaBack.bodyCount,
+                    back;
+
+                if (soaBack.sepValid) {
+                    for (back = 0; back < backPairCount; back++) {
+                        backPairRefs[back].separation = backSep[back];
+                    }
+                }
+
+                for (back = 0; back < backBodyCount; back++) {
+                    var backImpulse = solverBodies[back].positionImpulse;
+                    backImpulse.x = backImpX[back];
+                    backImpulse.y = backImpY[back];
+                }
+            }
 
             // bodies from earlier steps still decaying a warmed impulse, first:
             // this loop compacts the carry list in place, and must finish its

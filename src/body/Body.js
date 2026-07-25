@@ -115,6 +115,9 @@ var Axes = require('../geometry/Axes');
             _ovD: false,
             _gridDynamic: false,
             _solverStamp: 0,
+            // slot index into the resolver's flat solver arrays (valid only
+            // while _solverStamp matches the current solver epoch)
+            _solverIndex: 0,
             // gridStatic static-candidate cache (see Detector._collisionsGridStatic)
             _scEpoch: 0,
             _scStatic: false,
