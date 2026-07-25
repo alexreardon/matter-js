@@ -482,20 +482,188 @@ var Bounds = require('../geometry/Bounds');
 
     /**
      * Prepare pairs for velocity solving.
+     *
+     * When the optional `container` (the engine's `pairs` structure, already
+     * prepared by `preSolvePosition` this step) is given, a flat
+     * structure-of-arrays snapshot of the velocity solve is built here: body
+     * state per `_solverIndex` slot, per-pair constants (normal, tangent,
+     * friction products, restitution, separation, contact share) and per-
+     * contact state (vertex, warm-start impulses). The warm-start application
+     * below then runs against the flat arrays, `solveVelocity` iterates them,
+     * and `postSolveVelocity` writes the mutated state back. Everything the
+     * iterations read besides `positionPrev` / `anglePrev` and the contact
+     * impulses is constant across them, which is what makes the snapshot
+     * sound; the math is identical in identical order.
      * @method preSolveVelocity
      * @param {pair[]} pairs
+     * @param {pairs} [container] The engine's pairs structure for scratch state
      */
-    Resolver.preSolveVelocity = function(pairs) {
+    Resolver.preSolveVelocity = function(pairs, container) {
         var pairsLength = pairs.length,
             i,
             j;
-        
+
+        if (container) {
+            var soaV = container._soaV || (container._soaV = {
+                    idxA: [], idxB: [], nx: [], ny: [], tx: [], ty: [],
+                    invMassTotal: [], frictionTimesStatic: [], friction: [],
+                    restitutionPlus1: [], separation: [], contactShare: [],
+                    contactStart: [], contactCounts: [],
+                    cVx: [], cVy: [], cNormalImpulse: [], cTangentImpulse: [], cRefs: [],
+                    bPosX: [], bPosY: [], bPosPrevX: [], bPosPrevY: [],
+                    bAngle: [], bAnglePrev: [], bInvMass: [], bInvInertia: [], bCanMove: [],
+                    pairCount: 0, contactTotal: 0, bodyCount: 0, epoch: 0, dirty: false
+                }),
+                solverBodies = container._solverBodies || (container._solverBodies = []),
+                bodyCount = solverBodies.length,
+                vIdxA = soaV.idxA,
+                vIdxB = soaV.idxB,
+                vNx = soaV.nx,
+                vNy = soaV.ny,
+                vTx = soaV.tx,
+                vTy = soaV.ty,
+                vInvMassTotal = soaV.invMassTotal,
+                vFrictionTimesStatic = soaV.frictionTimesStatic,
+                vFriction = soaV.friction,
+                vRestitutionPlus1 = soaV.restitutionPlus1,
+                vSeparation = soaV.separation,
+                vContactShare = soaV.contactShare,
+                vContactStart = soaV.contactStart,
+                vContactCounts = soaV.contactCounts,
+                cVx = soaV.cVx,
+                cVy = soaV.cVy,
+                cNormalImpulse = soaV.cNormalImpulse,
+                cTangentImpulse = soaV.cTangentImpulse,
+                cRefs = soaV.cRefs,
+                bPosX = soaV.bPosX,
+                bPosY = soaV.bPosY,
+                bPosPrevX = soaV.bPosPrevX,
+                bPosPrevY = soaV.bPosPrevY,
+                bAngle = soaV.bAngle,
+                bAnglePrev = soaV.bAnglePrev,
+                bInvMass = soaV.bInvMass,
+                bInvInertia = soaV.bInvInertia,
+                bCanMove = soaV.bCanMove,
+                vPairCount = 0,
+                vContactIndex = 0;
+
+            // per-body snapshot into the slots assigned by preSolvePosition
+            // (same epoch, same _solverIndex ordering as _solverBodies)
+            for (i = 0; i < bodyCount; i++) {
+                var vBody = solverBodies[i],
+                    vBodyPosition = vBody.position,
+                    vBodyPositionPrev = vBody.positionPrev;
+                bPosX[i] = vBodyPosition.x;
+                bPosY[i] = vBodyPosition.y;
+                bPosPrevX[i] = vBodyPositionPrev.x;
+                bPosPrevY[i] = vBodyPositionPrev.y;
+                bAngle[i] = vBody.angle;
+                bAnglePrev[i] = vBody.anglePrev;
+                bInvMass[i] = vBody.inverseMass;
+                bInvInertia[i] = vBody.inverseInertia;
+                bCanMove[i] = (vBody.isStatic || vBody.isSleeping) ? 0 : 1;
+            }
+
+            // per-pair and per-contact snapshot, with the classic warm-start
+            // application fused in (identical order: pair by pair, contact by
+            // contact, mutating the flat body state)
+            for (i = 0; i < pairsLength; i++) {
+                var vPair = pairs[i];
+
+                if (!vPair.isActive || vPair.isSensor)
+                    continue;
+
+                var vContacts = vPair.contacts,
+                    vContactCount = vPair.contactCount,
+                    vCollision = vPair.collision,
+                    vParentA = vCollision.parentA,
+                    vParentB = vCollision.parentB,
+                    vNormal = vCollision.normal,
+                    vTangent = vCollision.tangent,
+                    slotA = vParentA._solverIndex,
+                    slotB = vParentB._solverIndex,
+                    vNormalX = vNormal.x,
+                    vNormalY = vNormal.y,
+                    vTangentX = vTangent.x,
+                    vTangentY = vTangent.y;
+
+                vIdxA[vPairCount] = slotA;
+                vIdxB[vPairCount] = slotB;
+                vNx[vPairCount] = vNormalX;
+                vNy[vPairCount] = vNormalY;
+                vTx[vPairCount] = vTangentX;
+                vTy[vPairCount] = vTangentY;
+                vInvMassTotal[vPairCount] = vPair.inverseMass;
+                // first factor of the classic left-associated triple product
+                vFrictionTimesStatic[vPairCount] = vPair.friction * vPair.frictionStatic;
+                vFriction[vPairCount] = vPair.friction;
+                vRestitutionPlus1[vPairCount] = 1 + vPair.restitution;
+                vSeparation[vPairCount] = vPair.separation;
+                vContactShare[vPairCount] = 1 / vContactCount;
+                vContactStart[vPairCount] = vContactIndex;
+                vContactCounts[vPairCount] = vContactCount;
+                vPairCount++;
+
+                for (j = 0; j < vContactCount; j++) {
+                    var vContact = vContacts[j],
+                        vContactVertex = vContact.vertex,
+                        vNormalImpulse = vContact.normalImpulse,
+                        vTangentImpulse = vContact.tangentImpulse;
+
+                    cVx[vContactIndex] = vContactVertex.x;
+                    cVy[vContactIndex] = vContactVertex.y;
+                    cNormalImpulse[vContactIndex] = vNormalImpulse;
+                    cTangentImpulse[vContactIndex] = vTangentImpulse;
+                    cRefs[vContactIndex] = vContact;
+
+                    if (vNormalImpulse !== 0 || vTangentImpulse !== 0) {
+                        // total impulse from contact
+                        var vImpulseX = vNormalX * vNormalImpulse + vTangentX * vTangentImpulse,
+                            vImpulseY = vNormalY * vNormalImpulse + vTangentY * vTangentImpulse;
+
+                        // apply impulse from contact
+                        if (bCanMove[slotA] === 1) {
+                            bPosPrevX[slotA] += vImpulseX * bInvMass[slotA];
+                            bPosPrevY[slotA] += vImpulseY * bInvMass[slotA];
+                            bAnglePrev[slotA] += bInvInertia[slotA] * (
+                                (cVx[vContactIndex] - bPosX[slotA]) * vImpulseY
+                                - (cVy[vContactIndex] - bPosY[slotA]) * vImpulseX
+                            );
+                        }
+
+                        if (bCanMove[slotB] === 1) {
+                            bPosPrevX[slotB] -= vImpulseX * bInvMass[slotB];
+                            bPosPrevY[slotB] -= vImpulseY * bInvMass[slotB];
+                            bAnglePrev[slotB] -= bInvInertia[slotB] * (
+                                (cVx[vContactIndex] - bPosX[slotB]) * vImpulseY
+                                - (cVy[vContactIndex] - bPosY[slotB]) * vImpulseX
+                            );
+                        }
+                    }
+
+                    vContactIndex++;
+                }
+            }
+
+            if (cRefs.length !== vContactIndex) {
+                cRefs.length = vContactIndex;
+            }
+
+            soaV.pairCount = vPairCount;
+            soaV.contactTotal = vContactIndex;
+            soaV.bodyCount = bodyCount;
+            soaV.epoch = container._solverEpoch;
+            soaV.dirty = true;
+
+            return;
+        }
+
         for (i = 0; i < pairsLength; i++) {
             var pair = pairs[i];
-            
+
             if (!pair.isActive || pair.isSensor)
                 continue;
-            
+
             var contacts = pair.contacts,
                 contactCount = pair.contactCount,
                 collision = pair.collision,
@@ -503,19 +671,19 @@ var Bounds = require('../geometry/Bounds');
                 bodyB = collision.parentB,
                 normal = collision.normal,
                 tangent = collision.tangent;
-    
+
             // resolve each contact
             for (j = 0; j < contactCount; j++) {
                 var contact = contacts[j],
                     contactVertex = contact.vertex,
                     normalImpulse = contact.normalImpulse,
                     tangentImpulse = contact.tangentImpulse;
-    
+
                 if (normalImpulse !== 0 || tangentImpulse !== 0) {
                     // total impulse from contact
                     var impulseX = normal.x * normalImpulse + tangent.x * tangentImpulse,
                         impulseY = normal.y * normalImpulse + tangent.y * tangentImpulse;
-                    
+
                     // apply impulse from contact
                     if (!(bodyA.isStatic || bodyA.isSleeping)) {
                         bodyA.positionPrev.x += impulseX * bodyA.inverseMass;
@@ -525,12 +693,12 @@ var Bounds = require('../geometry/Bounds');
                             - (contactVertex.y - bodyA.position.y) * impulseX
                         );
                     }
-    
+
                     if (!(bodyB.isStatic || bodyB.isSleeping)) {
                         bodyB.positionPrev.x -= impulseX * bodyB.inverseMass;
                         bodyB.positionPrev.y -= impulseY * bodyB.inverseMass;
                         bodyB.anglePrev -= bodyB.inverseInertia * (
-                            (contactVertex.x - bodyB.position.x) * impulseY 
+                            (contactVertex.x - bodyB.position.x) * impulseY
                             - (contactVertex.y - bodyB.position.y) * impulseX
                         );
                     }
@@ -540,12 +708,62 @@ var Bounds = require('../geometry/Bounds');
     };
 
     /**
+     * Applies the velocity-solve results captured in the flat snapshot back to
+     * the bodies (positionPrev, anglePrev) and contacts (warm-start impulses).
+     * Only meaningful after a container-path `preSolveVelocity` /
+     * `solveVelocity` sequence; a no-op otherwise.
+     * @method postSolveVelocity
+     * @param {pairs} container The engine's pairs structure for scratch state
+     */
+    Resolver.postSolveVelocity = function(container) {
+        var soaV = container._soaV;
+
+        if (!soaV || !soaV.dirty || soaV.epoch !== container._solverEpoch) {
+            return;
+        }
+
+        var solverBodies = container._solverBodies,
+            bodyCount = soaV.bodyCount,
+            bPosPrevX = soaV.bPosPrevX,
+            bPosPrevY = soaV.bPosPrevY,
+            bAnglePrev = soaV.bAnglePrev,
+            contactTotal = soaV.contactTotal,
+            cRefs = soaV.cRefs,
+            cNormalImpulse = soaV.cNormalImpulse,
+            cTangentImpulse = soaV.cTangentImpulse,
+            i;
+
+        soaV.dirty = false;
+
+        // untouched bodies (sensor-only, static) write back their unchanged
+        // snapshot: a no-op by value
+        for (i = 0; i < bodyCount; i++) {
+            var writeBody = solverBodies[i],
+                writeBodyPositionPrev = writeBody.positionPrev;
+            writeBodyPositionPrev.x = bPosPrevX[i];
+            writeBodyPositionPrev.y = bPosPrevY[i];
+            writeBody.anglePrev = bAnglePrev[i];
+        }
+
+        for (i = 0; i < contactTotal; i++) {
+            var writeContact = cRefs[i];
+            writeContact.normalImpulse = cNormalImpulse[i];
+            writeContact.tangentImpulse = cTangentImpulse[i];
+        }
+    };
+
+    /**
      * Find a solution for pair velocities.
+     *
+     * When the optional `container` (prepared by the container-path
+     * `preSolveVelocity` this step) is given, the iteration runs over the flat
+     * snapshot built there; `postSolveVelocity` writes the results back.
      * @method solveVelocity
      * @param {pair[]} pairs
      * @param {number} delta
+     * @param {pairs} [container] The engine's pairs structure for scratch state
      */
-    Resolver.solveVelocity = function(pairs, delta) {
+    Resolver.solveVelocity = function(pairs, delta, container) {
         var timeScale = delta / Common._baseDelta,
             timeScaleSquared = timeScale * timeScale,
             timeScaleCubed = timeScaleSquared * timeScale,
@@ -558,6 +776,173 @@ var Bounds = require('../geometry/Bounds');
             maxFriction,
             i,
             j;
+
+        var soaV = container && container._soaV;
+        if (soaV && soaV.dirty && soaV.epoch === container._solverEpoch) {
+            var pairCount = soaV.pairCount,
+                vIdxA = soaV.idxA,
+                vIdxB = soaV.idxB,
+                vNx = soaV.nx,
+                vNy = soaV.ny,
+                vTx = soaV.tx,
+                vTy = soaV.ty,
+                vInvMassTotal = soaV.invMassTotal,
+                vFrictionTimesStatic = soaV.frictionTimesStatic,
+                vFriction = soaV.friction,
+                vRestitutionPlus1 = soaV.restitutionPlus1,
+                vSeparation = soaV.separation,
+                vContactShare = soaV.contactShare,
+                vContactStart = soaV.contactStart,
+                vContactCounts = soaV.contactCounts,
+                cVx = soaV.cVx,
+                cVy = soaV.cVy,
+                cNormalImpulse = soaV.cNormalImpulse,
+                cTangentImpulse = soaV.cTangentImpulse,
+                bPosX = soaV.bPosX,
+                bPosY = soaV.bPosY,
+                bPosPrevX = soaV.bPosPrevX,
+                bPosPrevY = soaV.bPosPrevY,
+                bAngle = soaV.bAngle,
+                bAnglePrev = soaV.bAnglePrev,
+                bInvMass = soaV.bInvMass,
+                bInvInertia = soaV.bInvInertia,
+                bCanMove = soaV.bCanMove;
+
+            for (var p = 0; p < pairCount; p++) {
+                var ia = vIdxA[p],
+                    ib = vIdxB[p],
+                    normalX = vNx[p],
+                    normalY = vNy[p],
+                    tangentX = vTx[p],
+                    tangentY = vTy[p],
+                    inverseMassTotal = vInvMassTotal[p],
+                    friction = vFrictionTimesStatic[p] * frictionNormalMultiplier,
+                    pairSeparation = vSeparation[p],
+                    pairFriction = vFriction[p],
+                    restitutionPlus1 = vRestitutionPlus1[p],
+                    contactShare = vContactShare[p],
+                    contactStart = vContactStart[p],
+                    contactEnd = contactStart + vContactCounts[p];
+
+                // cache body properties that are invariant across the contact loop
+                var bodyAPositionX = bPosX[ia],
+                    bodyAPositionY = bPosY[ia],
+                    bodyBPositionX = bPosX[ib],
+                    bodyBPositionY = bPosY[ib],
+                    bodyAInverseMass = bInvMass[ia],
+                    bodyBInverseMass = bInvMass[ib],
+                    bodyAInverseInertia = bInvInertia[ia],
+                    bodyBInverseInertia = bInvInertia[ib],
+                    bodyACanMove = bCanMove[ia] === 1,
+                    bodyBCanMove = bCanMove[ib] === 1;
+
+                // get body velocities
+                var bodyAVelocityX = bodyAPositionX - bPosPrevX[ia],
+                    bodyAVelocityY = bodyAPositionY - bPosPrevY[ia],
+                    bodyAAngularVelocity = bAngle[ia] - bAnglePrev[ia],
+                    bodyBVelocityX = bodyBPositionX - bPosPrevX[ib],
+                    bodyBVelocityY = bodyBPositionY - bPosPrevY[ib],
+                    bodyBAngularVelocity = bAngle[ib] - bAnglePrev[ib];
+
+                // resolve each contact
+                for (var c = contactStart; c < contactEnd; c++) {
+                    var contactVertexX = cVx[c],
+                        contactVertexY = cVy[c];
+
+                    var offsetAX = contactVertexX - bodyAPositionX,
+                        offsetAY = contactVertexY - bodyAPositionY,
+                        offsetBX = contactVertexX - bodyBPositionX,
+                        offsetBY = contactVertexY - bodyBPositionY;
+
+                    var velocityPointAX = bodyAVelocityX - offsetAY * bodyAAngularVelocity,
+                        velocityPointAY = bodyAVelocityY + offsetAX * bodyAAngularVelocity,
+                        velocityPointBX = bodyBVelocityX - offsetBY * bodyBAngularVelocity,
+                        velocityPointBY = bodyBVelocityY + offsetBX * bodyBAngularVelocity;
+
+                    var relativeVelocityX = velocityPointAX - velocityPointBX,
+                        relativeVelocityY = velocityPointAY - velocityPointBY;
+
+                    var normalVelocity = normalX * relativeVelocityX + normalY * relativeVelocityY,
+                        tangentVelocity = tangentX * relativeVelocityX + tangentY * relativeVelocityY;
+
+                    // coulomb friction
+                    var normalOverlap = pairSeparation + normalVelocity;
+                    var normalForce = normalOverlap < 1 ? normalOverlap : 1;
+                    normalForce = normalOverlap < 0 ? 0 : normalForce;
+
+                    var frictionLimit = normalForce * friction;
+
+                    if (tangentVelocity < -frictionLimit || tangentVelocity > frictionLimit) {
+                        maxFriction = (tangentVelocity > 0 ? tangentVelocity : -tangentVelocity);
+                        tangentImpulse = pairFriction * (tangentVelocity > 0 ? 1 : -1) * timeScaleCubed;
+
+                        if (tangentImpulse < -maxFriction) {
+                            tangentImpulse = -maxFriction;
+                        } else if (tangentImpulse > maxFriction) {
+                            tangentImpulse = maxFriction;
+                        }
+                    } else {
+                        tangentImpulse = tangentVelocity;
+                        maxFriction = frictionMaxStatic;
+                    }
+
+                    // account for mass, inertia and contact offset
+                    var oAcN = offsetAX * normalY - offsetAY * normalX,
+                        oBcN = offsetBX * normalY - offsetBY * normalX,
+                        share = contactShare / (inverseMassTotal + bodyAInverseInertia * oAcN * oAcN + bodyBInverseInertia * oBcN * oBcN);
+
+                    // raw impulses
+                    var normalImpulse = restitutionPlus1 * normalVelocity * share;
+                    tangentImpulse *= share;
+
+                    // handle high velocity and resting collisions separately
+                    if (normalVelocity < restingThresh) {
+                        // high normal velocity so clear cached contact normal impulse
+                        cNormalImpulse[c] = 0;
+                    } else {
+                        // solve resting collision constraints using Erin Catto's method (GDC08)
+                        // impulse constraint tends to 0
+                        var contactNormalImpulse = cNormalImpulse[c];
+                        cNormalImpulse[c] = contactNormalImpulse + normalImpulse;
+                        if (cNormalImpulse[c] > 0) cNormalImpulse[c] = 0;
+                        normalImpulse = cNormalImpulse[c] - contactNormalImpulse;
+                    }
+
+                    // handle high velocity and resting collisions separately
+                    if (tangentVelocity < -restingThreshTangent || tangentVelocity > restingThreshTangent) {
+                        // high tangent velocity so clear cached contact tangent impulse
+                        cTangentImpulse[c] = 0;
+                    } else {
+                        // solve resting collision constraints using Erin Catto's method (GDC08)
+                        // tangent impulse tends to -tangentSpeed or +tangentSpeed
+                        var contactTangentImpulse = cTangentImpulse[c];
+                        cTangentImpulse[c] = contactTangentImpulse + tangentImpulse;
+                        if (cTangentImpulse[c] < -maxFriction) cTangentImpulse[c] = -maxFriction;
+                        if (cTangentImpulse[c] > maxFriction) cTangentImpulse[c] = maxFriction;
+                        tangentImpulse = cTangentImpulse[c] - contactTangentImpulse;
+                    }
+
+                    // total impulse from contact
+                    var impulseX = normalX * normalImpulse + tangentX * tangentImpulse,
+                        impulseY = normalY * normalImpulse + tangentY * tangentImpulse;
+
+                    // apply impulse from contact
+                    if (bodyACanMove) {
+                        bPosPrevX[ia] += impulseX * bodyAInverseMass;
+                        bPosPrevY[ia] += impulseY * bodyAInverseMass;
+                        bAnglePrev[ia] += (offsetAX * impulseY - offsetAY * impulseX) * bodyAInverseInertia;
+                    }
+
+                    if (bodyBCanMove) {
+                        bPosPrevX[ib] -= impulseX * bodyBInverseMass;
+                        bPosPrevY[ib] -= impulseY * bodyBInverseMass;
+                        bAnglePrev[ib] -= (offsetBX * impulseY - offsetBY * impulseX) * bodyBInverseInertia;
+                    }
+                }
+            }
+
+            return;
+        }
 
         for (i = 0; i < pairsLength; i++) {
             var pair = pairs[i];

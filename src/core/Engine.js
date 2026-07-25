@@ -224,11 +224,13 @@ var Body = require('../body/Body');
             Constraint.postSolveAll(allBodies);
         }
 
-        // iteratively resolve velocity between collisions
-        Resolver.preSolveVelocity(pairs.list);
+        // iteratively resolve velocity between collisions, over the flat
+        // snapshot built by preSolveVelocity and written back afterwards
+        Resolver.preSolveVelocity(pairs.list, pairs);
         for (i = 0; i < engine.velocityIterations; i++) {
-            Resolver.solveVelocity(pairs.list, delta);
+            Resolver.solveVelocity(pairs.list, delta, pairs);
         }
+        Resolver.postSolveVelocity(pairs);
 
         // update body speed and velocity properties
         Engine._bodiesUpdateVelocities(moverBodies);
