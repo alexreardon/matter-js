@@ -26,6 +26,22 @@ What changed, and the rough benefit:
   impulses apply only to solver-touched bodies, and constraint passes are
   skipped when the world has no constraints. Tens of percent off whole-step cost
   on the target workload (-14% to -31% across the perf8 regimes).
+- **No per-step whole-world walk at all.** The movers list itself was still
+  rebuilt every step by both `Engine.update` and the broadphase, and force
+  buffers were still cleared for every body. Those walks are memory-bound over
+  thousands of fat body objects and cost far more than their own profile share,
+  since they evict the cache the rest of the step needs. The lists are now
+  cached behind `Common._bodyStaticEpoch` (bumped by `Body.setStatic`,
+  `Sleeping.set` and `Detector.setGridDynamic`) and force clearing is scoped to
+  movers when sleeping is disabled. Another -24% whole-step on the 5000-static
+  game regime, and the win grows with page size (-19% at 2000 statics, -36% at
+  8000) because what was removed scaled with body count.
+- **Flat data in the hot loops.** The mover cell index is a direct-addressed
+  array of chain heads rather than a hash table (it is rebuilt every step, so
+  per-insert cost dominates), candidate bounds and dedup stamps live in typed
+  arrays so a candidate is only dereferenced once it survives its bounds test,
+  and a direct-mapped cache in front of the pairs table replaces the numeric
+  `Map` lookup `Collision.collides` did per overlapping candidate.
 - **Hidden-class hygiene.** All per-body scratch fields are pre-declared in
   `Body.create`; lazily added properties were splitting body object shapes and
   slowing every hot property access engine-wide (measured up to several times
