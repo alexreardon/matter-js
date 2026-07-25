@@ -50,6 +50,22 @@ What changed, and the rough benefit:
   of string keys, a quad-unrolled SAT fast path for the box-vs-box common case,
   resting-body skips, fused `Body.setPositionAndAngle`. Less per-frame garbage
   (about a third less allocation per update) and a few percent step time.
+- **Behaviour and API differences from stock**, all of them consequences of the
+  above:
+  - `Detector.setGridDynamic(body)` is new, and is the only supported way to
+    tag a static body that MOVES (the `gridStatic` broadphase must re-index it
+    every step). Assigning `body._gridDynamic` by hand no longer suffices,
+    because it has to invalidate the cached mover lists.
+  - `body.isStatic` / `body.isSleeping` must be changed through
+    `Body.setStatic` / `Sleeping.set`, which is what upstream documents anyway.
+    A direct assignment leaves the cached mover lists stale.
+  - A resting body's `force` / `torque` buffer is no longer zeroed on every
+    step, only from the moment it starts moving again (`Body.setStatic` and
+    `Sleeping.set` zero it on both transitions). Engines with sleeping enabled
+    keep the whole-world pass, since `Sleeping.update` reads that buffer.
+  - `pair.id` is a number rather than a string, and `pairs` carries a
+    direct-mapped collision record cache alongside its `table`. `Pairs.update`
+    now clears `collision.pair` when it drops a pair.
 - **Correctness gates.** A tiered determinism spec (`test/Determinism.spec.js`)
   pins settle scenes within a tight epsilon and holds chaotic scenes to physical
   invariants, alongside upstream's example suite. The simulation is
