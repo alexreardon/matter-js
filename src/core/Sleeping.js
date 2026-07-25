@@ -103,6 +103,12 @@ var Common = require('./Common');
     Sleeping.set = function(body, isSleeping) {
         var wasSleeping = body.isSleeping;
 
+        if (wasSleeping !== isSleeping) {
+            // invalidate the cached mover lists in Engine and the gridStatic
+            // broadphase (see Common._bodyStaticEpoch)
+            Common._bodyStaticEpoch++;
+        }
+
         if (isSleeping) {
             body.isSleeping = true;
             body.sleepCounter = body.sleepThreshold;

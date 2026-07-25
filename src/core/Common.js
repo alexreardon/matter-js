@@ -16,6 +16,28 @@ module.exports = Common;
     Common._nowStartTime = +(new Date());
     Common._warnedOnce = {};
     Common._decomp = null;
+
+    /**
+     * Counter bumped whenever any body's moving-vs-resting classification
+     * changes: `Body.setStatic`, `Sleeping.set` and `Detector.setGridDynamic`.
+     *
+     * `Engine.update` and the `gridStatic` broadphase both need the list of
+     * moving bodies each step, and building it means touching every body in the
+     * world. On a dense static page (thousands of intact tiles, a few hundred
+     * movers) that walk is memory-bound and became one of the largest single
+     * costs in the step. Both now cache their list and rebuild it only when this
+     * counter moves (or when the world's body set itself changes), which is rare
+     * in normal play.
+     *
+     * This lives on `Common` because it is read by modules that must not depend
+     * on each other (`Engine`, `Detector`) and written by `Body` / `Sleeping`.
+     *
+     * Contract: code that flips `body.isStatic` or `body.isSleeping` by direct
+     * assignment instead of through those methods will leave the cached lists
+     * stale (the body keeps its old moving/resting role until the next genuine
+     * change). Matter has always documented those flags as setter-owned.
+     */
+    Common._bodyStaticEpoch = 0;
     
     /**
      * Extends the object in the first argument using the object in the second argument.

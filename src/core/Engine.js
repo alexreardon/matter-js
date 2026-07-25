@@ -65,6 +65,13 @@ var Body = require('../body/Body');
         engine.detector = options.detector || Detector.create();
         engine.detector.pairs = engine.pairs;
 
+        // mover-list cache (see the classification pass in Engine.update);
+        // declared here so the engine object's shape is stable
+        engine._moverBodies = [];
+        engine._moverSource = null;
+        engine._moverSourceLength = -1;
+        engine._moverEpoch = -1;
+
         // for temporary back compatibility only
         engine.grid = { buckets: [] };
         engine.world.gravity = engine.gravity;
@@ -141,18 +148,34 @@ var Body = require('../body/Body');
         // velocity explicitly anyway. Force clearing deliberately stays a
         // full-body pass (a stale force on a static body must not survive
         // into a later release).
+        // The walk itself touches every body in the world, so on a dense static
+        // page it is memory-bound and one of the largest single costs in the
+        // step, while its answer almost never changes. Rebuild it only when it
+        // can have changed: a different `allBodies` array (Composite nulls its
+        // cache and rebuilds the array on any add / remove) or a bumped static
+        // epoch (`Body.setStatic` / `Sleeping.set`; see Common._bodyStaticEpoch).
         var moverBodies = engine._moverBodies || (engine._moverBodies = []),
-            allBodiesLength = allBodies.length,
-            moverCount = 0;
+            staticEpoch = Common._bodyStaticEpoch,
+            allBodiesLength = allBodies.length;
 
-        for (i = 0; i < allBodiesLength; i++) {
-            var classifyBody = allBodies[i];
-            if (!(classifyBody.isStatic || classifyBody.isSleeping)) {
-                moverBodies[moverCount++] = classifyBody;
+        if (engine._moverSource !== allBodies
+            || engine._moverSourceLength !== allBodiesLength
+            || engine._moverEpoch !== staticEpoch) {
+            engine._moverSource = allBodies;
+            engine._moverSourceLength = allBodiesLength;
+            engine._moverEpoch = staticEpoch;
+
+            var moverCount = 0;
+
+            for (i = 0; i < allBodiesLength; i++) {
+                var classifyBody = allBodies[i];
+                if (!(classifyBody.isStatic || classifyBody.isSleeping)) {
+                    moverBodies[moverCount++] = classifyBody;
+                }
             }
-        }
-        if (moverBodies.length !== moverCount) {
-            moverBodies.length = moverCount;
+            if (moverBodies.length !== moverCount) {
+                moverBodies.length = moverCount;
+            }
         }
 
         // apply gravity to all moving bodies

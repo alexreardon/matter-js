@@ -332,6 +332,10 @@ var Axes = require('../geometry/Axes');
 
             part.isStatic = isStatic;
         }
+
+        // invalidate the cached mover lists in Engine and the gridStatic
+        // broadphase (see Common._bodyStaticEpoch)
+        Common._bodyStaticEpoch++;
     };
 
     /**

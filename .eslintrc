@@ -22,6 +22,7 @@
     "globals": {
         "Map": false,
         "Float64Array": false,
+        "Int32Array": false,
         "Matter": false,
         "window": true,
         "document": false,
