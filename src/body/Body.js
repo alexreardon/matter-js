@@ -125,7 +125,11 @@ var Axes = require('../geometry/Axes');
             _scCx1: 0,
             _scCy0: 0,
             _scCy1: 0,
-            _scList: null
+            _scList: null,
+            // the candidate bounds captured alongside _scList, so the per-step
+            // test loop reads contiguous memory instead of dereferencing every
+            // candidate's bounds objects
+            _scBounds: null
         };
 
         var body = Common.extend(defaults, options);

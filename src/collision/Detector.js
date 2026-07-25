@@ -515,6 +515,19 @@ var Collision = require('./Collision');
     Detector._maxCellShift = 7;
 
     /**
+     * Returns a `Float64Array` of at least `minLength` holding `existing`'s
+     * values. Used to grow a mover's captured static-candidate bounds while its
+     * candidate list is being collected.
+     * @private
+     * @method _growFloats
+     */
+    Detector._growFloats = function(existing, minLength) {
+        var grown = new Float64Array(Math.max(minLength, existing.length * 2));
+        grown.set(existing);
+        return grown;
+    };
+
+    /**
      * Smallest shift `s` (capped at `_maxCellShift`) with `1 << s >= extent`,
      * i.e. the power-of-two axis size that covers `extent` cells.
      * @private
@@ -669,6 +682,11 @@ var Collision = require('./Collision');
                 dHead: new Int32Array(0), dNext: new Int32Array(0),
                 dItem: new Int32Array(0), dKey: new Float64Array(0),
                 dSpan: new Float64Array(0), dOver: [],
+                // the movers' own bounds and visited stamps, flattened off the
+                // body objects so the generation pass tests candidates against
+                // contiguous memory
+                mBounds: new Float64Array(0), mStamp: new Int32Array(0),
+                mOver: new Int32Array(0),
                 // static-index build epoch: bumped on every rebuild so each
                 // mover's cached static-candidate list can be validated cheaply
                 epoch: 0,
@@ -830,9 +848,23 @@ var Collision = require('./Collision');
         // does not recompute them. It must hold floats: a body with NaN bounds
         // yields a NaN span whose cell loops iterate zero times, and coercing
         // that to an integer would index real cells instead.
-        var dSpan = g.dSpan;
+        var dSpan = g.dSpan,
+            mBounds = g.mBounds,
+            mStamp = g.mStamp,
+            mOver = g.mOver;
+
         if (dSpan.length < moversLength * 4) {
-            dSpan = g.dSpan = new Float64Array((moversLength * 4 + 64) * 2);
+            var moverCapacity = (moversLength + 16) * 2;
+            dSpan = g.dSpan = new Float64Array(moverCapacity * 4);
+            // the movers' own bounds, flattened. The generation pass below runs
+            // every bounds test against these instead of chasing
+            // body -> bounds -> min / max, so it reaches a body object only for
+            // a candidate that survives its bounds test
+            mBounds = g.mBounds = new Float64Array(moverCapacity * 4);
+            // the visited stamp that dedups a mover reached through several
+            // cells, likewise flattened off the body
+            mStamp = g.mStamp = new Int32Array(moverCapacity);
+            mOver = g.mOver = new Int32Array(moverCapacity);
         }
 
         var minCx = Infinity,
@@ -847,23 +879,34 @@ var Collision = require('./Collision');
             var di = movers[mIns],
                 dbody = bodies[di],
                 dBounds = dbody.bounds,
-                dcx0 = Math.floor(dBounds.min.x * invCell),
-                dcx1 = Math.floor(dBounds.max.x * invCell),
-                dcy0 = Math.floor(dBounds.min.y * invCell),
-                dcy1 = Math.floor(dBounds.max.y * invCell);
+                dMinX = dBounds.min.x,
+                dMaxX = dBounds.max.x,
+                dMinY = dBounds.min.y,
+                dMaxY = dBounds.max.y,
+                dcx0 = Math.floor(dMinX * invCell),
+                dcx1 = Math.floor(dMaxX * invCell),
+                dcy0 = Math.floor(dMinY * invCell),
+                dcy1 = Math.floor(dMaxY * invCell);
 
             spanBase = mIns * 4;
+            mBounds[spanBase] = dMinX;
+            mBounds[spanBase + 1] = dMaxX;
+            mBounds[spanBase + 2] = dMinY;
+            mBounds[spanBase + 3] = dMaxY;
+            mStamp[mIns] = -1;
 
             if ((dcx1 - dcx0 + 1) * (dcy1 - dcy0 + 1) > maxCells) {
                 dbody._ovD = true;
-                dOver.push(di);
+                mOver[mIns] = 1;
+                dOver.push(mIns);
                 // an unwalkable span, so the insert pass skips this mover
-                // without having to re-read `_ovD`
+                // without having to re-read the oversize flag
                 dSpan[spanBase] = NaN;
                 continue;
             }
 
             dbody._ovD = false;
+            mOver[mIns] = 0;
             dSpan[spanBase] = dcx0;
             dSpan[spanBase + 1] = dcx1;
             dSpan[spanBase + 2] = dcy0;
@@ -915,8 +958,7 @@ var Collision = require('./Collision');
             spanBase = mIns * 4;
             var iSpanCx1 = dSpan[spanBase + 1],
                 iSpanCy0 = dSpan[spanBase + 2],
-                iSpanCy1 = dSpan[spanBase + 3],
-                iMover = movers[mIns];
+                iSpanCy1 = dSpan[spanBase + 3];
 
             for (cx = dSpan[spanBase]; cx <= iSpanCx1; cx++) {
                 var iKeyX = (cx + keyOffset) * keyStride,
@@ -925,7 +967,10 @@ var Collision = require('./Collision');
                 for (cy = iSpanCy0; cy <= iSpanCy1; cy++) {
                     var iSlot = iSlotX | (((cy - minCy) & dMaskH) << dShiftW);
                     dKeyArr[dEntry] = iKeyX + (cy + keyOffset);
-                    dItem[dEntry] = iMover;
+                    // the mover's ORDINAL in `movers`, not its index in
+                    // `bodies`: it addresses the flat mover arrays directly and
+                    // orders identically (movers are collected in body order)
+                    dItem[dEntry] = mIns;
                     dNext[dEntry] = dHead[iSlot];
                     dHead[iSlot] = dEntry;
                     dEntry++;
@@ -942,11 +987,10 @@ var Collision = require('./Collision');
             sFlatLength = sFlat.length,
             dOverLength = dOver.length;
         for (var mGen = 0; mGen < moversLength; mGen++) {
-            var ii = movers[mGen],
-                m = bodies[ii],
-                mBounds = m.bounds,
-                mMinX = mBounds.min.x, mMaxX = mBounds.max.x,
-                mMinY = mBounds.min.y, mMaxY = mBounds.max.y,
+            var mBoundsBase = mGen * 4,
+                m = bodies[movers[mGen]],
+                mMinX = mBounds[mBoundsBase], mMaxX = mBounds[mBoundsBase + 1],
+                mMinY = mBounds[mBoundsBase + 2], mMaxY = mBounds[mBoundsBase + 3],
                 mFilter = m.collisionFilter,
                 // a tagged moving-static surface is a mover here but must still
                 // not generate static-static pairs (the sweep skips those)
@@ -968,7 +1012,7 @@ var Collision = require('./Collision');
             // in dOver); oversized statics/movers are handled by the sOver/dOver
             // passes below. Skipped for a static (tagged moving) mover, since
             // static-static never resolves.
-            if (m._ovD) {
+            if (mOver[mGen] === 1) {
                 if (!mStatic) {
                     for (var sfi = 0; sfi < sFlatLength; sfi++) {
                         var fsBody = sFlat[sfi],
@@ -1007,6 +1051,9 @@ var Collision = require('./Collision');
                         scList = m._scList = [];
                     }
                     scList.length = 0;
+                    if (m._scBounds === null) {
+                        m._scBounds = new Float64Array(32);
+                    }
                     m._scEpoch = g.epoch;
                     m._scStatic = mStatic;
                     m._scCx0 = mcx0;
@@ -1039,32 +1086,46 @@ var Collision = require('./Collision');
                                         continue;
                                     }
                                     sBody._gsStamp = localStamp;
+
+                                    // capture the candidate's bounds alongside
+                                    // it, so the per-step test loop never
+                                    // dereferences a static that misses
+                                    var scSlot = scList.length * 4,
+                                        scStore = m._scBounds;
+                                    if (scStore.length <= scSlot) {
+                                        scStore = m._scBounds = Detector._growFloats(scStore, scSlot + 4);
+                                    }
+                                    var scSourceBounds = sBody.bounds;
+                                    scStore[scSlot] = scSourceBounds.min.x;
+                                    scStore[scSlot + 1] = scSourceBounds.max.x;
+                                    scStore[scSlot + 2] = scSourceBounds.min.y;
+                                    scStore[scSlot + 3] = scSourceBounds.max.y;
                                     scList.push(sBody);
                                 }
                             }
                         }
 
-                        // mover vs mover (dedup by index, so emit only once).
+                        // mover vs mover (dedup by ordinal, so emit only once).
                         // Chain entries carry their cell key because the slot
-                        // address wraps on a pathological mover spread
+                        // address wraps on a pathological mover spread. Every
+                        // test here reads the flat mover arrays, so a candidate
+                        // that fails costs no body access at all
                         for (var dgi = dHead[mSlotX | (((cy - minCy) & dMaskH) << dShiftW)]; dgi !== -1; dgi = dNext[dgi]) {
                             if (dKeyArr[dgi] !== key) {
                                 continue;
                             }
                             var dj = dItem[dgi];
-                            if (dj <= ii) {
+                            if (dj <= mGen || mStamp[dj] === localStamp) {
                                 continue;
                             }
-                            var dBody = bodies[dj];
-                            if (dBody._gsStamp === localStamp) {
+                            mStamp[dj] = localStamp;
+                            var dBoundsBase = dj * 4;
+                            if (mMaxX < mBounds[dBoundsBase] || mMinX > mBounds[dBoundsBase + 1]
+                                || mMaxY < mBounds[dBoundsBase + 2] || mMinY > mBounds[dBoundsBase + 3]) {
                                 continue;
                             }
-                            dBody._gsStamp = localStamp;
+                            var dBody = bodies[movers[dj]];
                             if (mStatic && (dBody.isStatic || dBody.isSleeping)) {
-                                continue;
-                            }
-                            var dbnd = dBody.bounds;
-                            if (mMaxX < dbnd.min.x || mMinX > dbnd.max.x || mMaxY < dbnd.min.y || mMinY > dbnd.max.y) {
                                 continue;
                             }
                             if (!canCollide(mFilter, dBody.collisionFilter)) {
@@ -1075,14 +1136,21 @@ var Collision = require('./Collision');
                     }
                 }
 
-                // mover vs its static candidates (cached or just collected)
+                // mover vs its static candidates (cached or just collected).
+                // Their bounds were captured with the list: a body in the static
+                // index does not move (one that does must be tagged with
+                // Detector.setGridDynamic, which makes it a mover instead), so
+                // the test runs off contiguous memory and only a candidate that
+                // overlaps is ever dereferenced
                 if (!mStatic) {
+                    var scBounds = m._scBounds;
                     for (var sci = 0, scListLength = scList.length; sci < scListLength; sci++) {
-                        var scBody = scList[sci],
-                            scBounds = scBody.bounds;
-                        if (mMaxX < scBounds.min.x || mMinX > scBounds.max.x || mMaxY < scBounds.min.y || mMinY > scBounds.max.y) {
+                        var scBase = sci * 4;
+                        if (mMaxX < scBounds[scBase] || mMinX > scBounds[scBase + 1]
+                            || mMaxY < scBounds[scBase + 2] || mMinY > scBounds[scBase + 3]) {
                             continue;
                         }
+                        var scBody = scList[sci];
                         if (!canCollide(mFilter, scBody.collisionFilter)) {
                             continue;
                         }
@@ -1107,25 +1175,26 @@ var Collision = require('./Collision');
                 }
             }
 
-            // mover vs oversized movers. The index dedup (emit an
-            // oversized-oversized pair once, from the lower-index outer) applies
-            // ONLY when the outer is itself oversized. A non-oversized mover
-            // never appears in dOver, so the pair is emitted here exactly once
-            // with it as the outer; without the `m._ovD` guard a normal mover
-            // whose index is higher than an oversized mover's would wrongly skip
-            // the pair, and it would be lost entirely (the oversized mover no
-            // longer cell-walks to find normal movers).
+            // mover vs oversized movers. The ordinal dedup (emit an
+            // oversized-oversized pair once, from the lower-ordinal outer)
+            // applies ONLY when the outer is itself oversized. A non-oversized
+            // mover never appears in dOver, so the pair is emitted here exactly
+            // once with it as the outer; without the oversize guard a normal
+            // mover ordered after an oversized one would wrongly skip the pair,
+            // and it would be lost entirely (the oversized mover no longer
+            // cell-walks to find normal movers).
             for (var doi = 0; doi < dOverLength; doi++) {
-                var doIdx = dOver[doi];
-                if (m._ovD && doIdx <= ii) {
+                var doOrdinal = dOver[doi];
+                if (mOver[mGen] === 1 && doOrdinal <= mGen) {
                     continue;
                 }
-                var doBody = bodies[doIdx],
-                    doBounds = doBody.bounds;
+                var doBoundsBase = doOrdinal * 4;
+                if (mMaxX < mBounds[doBoundsBase] || mMinX > mBounds[doBoundsBase + 1]
+                    || mMaxY < mBounds[doBoundsBase + 2] || mMinY > mBounds[doBoundsBase + 3]) {
+                    continue;
+                }
+                var doBody = bodies[movers[doOrdinal]];
                 if (mStatic && (doBody.isStatic || doBody.isSleeping)) {
-                    continue;
-                }
-                if (mMaxX < doBounds.min.x || mMinX > doBounds.max.x || mMaxY < doBounds.min.y || mMinY > doBounds.max.y) {
                     continue;
                 }
                 if (!canCollide(mFilter, doBody.collisionFilter)) {
