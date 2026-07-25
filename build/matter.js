@@ -143,6 +143,28 @@ module.exports = Common;
     Common._nowStartTime = +(new Date());
     Common._warnedOnce = {};
     Common._decomp = null;
+
+    /**
+     * Counter bumped whenever any body's moving-vs-resting classification
+     * changes: `Body.setStatic`, `Sleeping.set` and `Detector.setGridDynamic`.
+     *
+     * `Engine.update` and the `gridStatic` broadphase both need the list of
+     * moving bodies each step, and building it means touching every body in the
+     * world. On a dense static page (thousands of intact tiles, a few hundred
+     * movers) that walk is memory-bound and became one of the largest single
+     * costs in the step. Both now cache their list and rebuild it only when this
+     * counter moves (or when the world's body set itself changes), which is rare
+     * in normal play.
+     *
+     * This lives on `Common` because it is read by modules that must not depend
+     * on each other (`Engine`, `Detector`) and written by `Body` / `Sleeping`.
+     *
+     * Contract: code that flips `body.isStatic` or `body.isSleeping` by direct
+     * assignment instead of through those methods will leave the cached lists
+     * stale (the body keeps its old moving/resting role until the next genuine
+     * change). Matter has always documented those flags as setter-owned.
+     */
+    Common._bodyStaticEpoch = 0;
     
     /**
      * Extends the object in the first argument using the object in the second argument.
@@ -1728,7 +1750,11 @@ var Axes = __webpack_require__(11);
             _scCx1: 0,
             _scCy0: 0,
             _scCy1: 0,
-            _scList: null
+            _scList: null,
+            // the candidate bounds captured alongside _scList, so the per-step
+            // test loop reads contiguous memory instead of dereferencing every
+            // candidate's bounds objects
+            _scBounds: null
         };
 
         var body = Common.extend(defaults, options);
@@ -1933,8 +1959,19 @@ var Axes = __webpack_require__(11);
                 part._original = null;
             }
 
+            // Engine clears force buffers for moving bodies only, so a force
+            // applied while this body was resting must be dropped here rather
+            // than surviving into the step after a release
+            part.force.x = 0;
+            part.force.y = 0;
+            part.torque = 0;
+
             part.isStatic = isStatic;
         }
+
+        // invalidate the cached mover lists in Engine and the gridStatic
+        // broadphase (see Common._bodyStaticEpoch)
+        Common._bodyStaticEpoch++;
     };
 
     /**
@@ -4216,6 +4253,19 @@ var Common = __webpack_require__(0);
     Sleeping.set = function(body, isSleeping) {
         var wasSleeping = body.isSleeping;
 
+        if (wasSleeping !== isSleeping) {
+            // invalidate the cached mover lists in Engine and the gridStatic
+            // broadphase (see Common._bodyStaticEpoch)
+            Common._bodyStaticEpoch++;
+
+            // Engine clears force buffers for moving bodies only, so a force
+            // applied while this body was asleep must be dropped here rather
+            // than surviving into the step after it wakes
+            body.force.x = 0;
+            body.force.y = 0;
+            body.torque = 0;
+        }
+
         if (isSleeping) {
             body.isSleeping = true;
             body.sleepCounter = body.sleepThreshold;
@@ -4330,19 +4380,55 @@ var Pair = __webpack_require__(9);
             return null;
         }
 
-        // reuse collision records for gc efficiency
-        var pair = pairs && pairs.table.get(Pair.id(bodyA, bodyB)),
-            collision;
+        // Reuse collision records for gc efficiency. The record for this body
+        // pair is looked up in the pairs structure's direct-mapped cache first
+        // (see Pairs.create): the record is scratch that the rest of this
+        // function overwrites in full, so a hit is as good as the table lookup
+        // and costs a masked array read instead. A hit for a pair that has since
+        // ended is not only safe but preferable, since it recycles that record
+        // rather than allocating a new one.
+        var collision = null,
+            recordSlot = -1,
+            pairId = 0;
 
-        if (!pair) {
+        if (pairs) {
+            var idA = bodyA.id,
+                idB = bodyB.id;
+
+            pairId = idA < idB ? idA * Pair._idShift + idB : idB * Pair._idShift + idA;
+            recordSlot = Pair.hash(idA, idB) & pairs._recordMask;
+
+            if (pairs._recordKeys[recordSlot] === pairId) {
+                var cached = pairs._recordValues[recordSlot];
+
+                // a live pair still points back at its record, so this alone
+                // proves the cached record is the one the table would return
+                if (cached.pair !== null) {
+                    collision = cached;
+                }
+            }
+
+            if (collision === null) {
+                var pair = pairs.table.get(pairId);
+
+                if (pair) {
+                    collision = pair.collision;
+                }
+            }
+        }
+
+        if (collision === null) {
             collision = Collision.create(bodyA, bodyB);
             collision.collided = true;
             collision.bodyA = bodyA.id < bodyB.id ? bodyA : bodyB;
             collision.bodyB = bodyA.id < bodyB.id ? bodyB : bodyA;
             collision.parentA = collision.bodyA.parent;
             collision.parentB = collision.bodyB.parent;
-        } else {
-            collision = pair.collision;
+        }
+
+        if (recordSlot >= 0) {
+            pairs._recordKeys[recordSlot] = pairId;
+            pairs._recordValues[recordSlot] = collision;
         }
 
         bodyA = collision.bodyA;
@@ -4852,6 +4938,21 @@ var Contact = __webpack_require__(16);
         return bodyA.id < bodyB.id
             ? bodyA.id * Pair._idShift + bodyB.id
             : bodyB.id * Pair._idShift + bodyA.id;
+    };
+
+    /**
+     * Hashes the two body ids of a pair for the collision record cache (see
+     * `Pairs.create`). Mixes both ids: the packed `Pair.id` has the lower id
+     * entirely in its high bits, so masking it directly would drop every pair a
+     * body has into one slot.
+     * @method hash
+     * @param {number} idA
+     * @param {number} idB
+     * @return {number} A non-negative hash of the id pair
+     */
+    Pair.hash = function(idA, idB) {
+        var mixed = (Math.imul(idA, 0x9E3779B1) ^ Math.imul(idB, 0x85EBCA77)) | 0;
+        return (mixed ^ (mixed >>> 15)) | 0;
     };
 
 })();
@@ -5873,6 +5974,32 @@ var Collision = __webpack_require__(8);
     };
 
     /**
+     * Tags a body as grid-dynamic, meaning the `gridStatic` broadphase treats it
+     * as a mover (re-indexed every step) even while `isStatic` is `true`. This is
+     * what a static body that MOVES (an inner-scroll surface tracking the page)
+     * needs, since the persistent static index would otherwise hold it at its
+     * old position.
+     *
+     * Use this rather than assigning `body._gridDynamic` directly: the flag
+     * changes the body's moving-vs-resting role, so it has to invalidate the
+     * cached mover lists (see `Common._bodyStaticEpoch`). Repeat calls with the
+     * flag already set are free, so a caller may re-tag every step.
+     * @method setGridDynamic
+     * @param {body} body
+     * @param {bool} [isGridDynamic=true]
+     */
+    Detector.setGridDynamic = function(body, isGridDynamic) {
+        var flag = isGridDynamic !== false;
+
+        if (body._gridDynamic === flag) {
+            return;
+        }
+
+        body._gridDynamic = flag;
+        Common._bodyStaticEpoch++;
+    };
+
+    /**
      * Efficiently finds all collisions among all the bodies in `detector.bodies` using a broadphase algorithm.
      * 
      * _Note:_ The specific ordering of collisions returned is not guaranteed between releases and may change for performance reasons.
@@ -6303,6 +6430,45 @@ var Collision = __webpack_require__(8);
     };
 
     /**
+     * Per-axis cap on the mover cell index (see the insert pass in
+     * `_collisionsGridStatic`): `1 << _maxCellShift` cells, so the flat index is
+     * never larger than `1 << (2 * _maxCellShift)` slots. A mover spread wider
+     * than this wraps into the same slots, which stays correct because chain
+     * entries carry their cell key.
+     */
+    Detector._maxCellShift = 7;
+
+    /**
+     * Returns a `Float64Array` of at least `minLength` holding `existing`'s
+     * values. Used to grow a mover's captured static-candidate bounds while its
+     * candidate list is being collected.
+     * @private
+     * @method _growFloats
+     */
+    Detector._growFloats = function(existing, minLength) {
+        var grown = new Float64Array(Math.max(minLength, existing.length * 2));
+        grown.set(existing);
+        return grown;
+    };
+
+    /**
+     * Smallest shift `s` (capped at `_maxCellShift`) with `1 << s >= extent`,
+     * i.e. the power-of-two axis size that covers `extent` cells.
+     * @private
+     * @method _cellShiftFor
+     */
+    Detector._cellShiftFor = function(extent) {
+        var maxShift = Detector._maxCellShift,
+            shift = 0;
+
+        while (shift < maxShift && (1 << shift) < extent) {
+            shift++;
+        }
+
+        return shift;
+    };
+
+    /**
      * Doubles a cell table's capacity and reinserts every live key (hashes are
      * re-derived from the packed keys). Rare: only on load-factor growth.
      * @private
@@ -6422,12 +6588,29 @@ var Collision = __webpack_require__(8);
         var g = detector._sgrid;
         if (!g) {
             g = detector._sgrid = {
-                // open-addressing cell tables (see _createCellTable); the used
-                // lists hold BUCKET REFERENCES so the per-step reset loops
-                // clear them without any table lookups
+                // static index: an open-addressing cell table (see
+                // _createCellTable) whose used list holds BUCKET REFERENCES so
+                // the rebuild reset loop clears them without any table lookups
                 sTable: Detector._createCellTable(), sUsed: [], sOver: [], sFlat: [],
-                dTable: Detector._createCellTable(), dUsed: [], dOver: [],
                 movers: [], stamp: 1, built: false, indexedStaticCount: -1,
+                // classification cache: the movers list and static count are
+                // only recomputed when the body set or any body's
+                // moving-vs-resting role actually changed
+                classifyBodies: null, classifyLength: -1, classifyEpoch: -1,
+                staticCount: 0,
+                // mover cell index, rebuilt every step: per-cell chain heads
+                // over a flat entry list (`dNext` / `dItem` / `dKey`) addressed
+                // by arithmetic over the movers' bounding cell rectangle, plus
+                // the per-mover cell spans `dSpan` shared by its two passes.
+                // Reused buffers, so the steady state does not allocate
+                dHead: new Int32Array(0), dNext: new Int32Array(0),
+                dItem: new Int32Array(0), dKey: new Float64Array(0),
+                dSpan: new Float64Array(0), dOver: [],
+                // the movers' own bounds and visited stamps, flattened off the
+                // body objects so the generation pass tests candidates against
+                // contiguous memory
+                mBounds: new Float64Array(0), mStamp: new Int32Array(0),
+                mOver: new Int32Array(0),
                 // static-index build epoch: bumped on every rebuild so each
                 // mover's cached static-candidate list can be validated cheaply
                 epoch: 0,
@@ -6450,28 +6633,55 @@ var Collision = __webpack_require__(8);
 
         // 1) classify bodies into movers (dynamic) vs static, detecting any
         // change to the static set (release, add, remove) so the static index
-        // is only rebuilt when it actually changed
-        var movers = g.movers;
-        movers.length = 0;
-        var staticDirty = !g.built;
-        var staticCount = 0;
-        for (i = 0; i < n; i++) {
-            var body = bodies[i],
-                // a body tagged `_gridDynamic` (e.g. an inner-scroll surface
-                // that is static but moves each tick) is treated as a mover so
-                // it is re-bucketed every step and never goes stale in the
-                // static index
-                isStaticNow = (body.isStatic || body.isSleeping) && body._gridDynamic !== true;
-            if (body._sPrev !== isStaticNow) {
-                body._sPrev = isStaticNow;
-                staticDirty = true;
+        // is only rebuilt when it actually changed.
+        //
+        // This walk touches every body in the world, and on a dense static page
+        // (thousands of intact tiles) it is memory-bound and one of the largest
+        // single costs in the step, while its ANSWER almost never changes: the
+        // mover set only moves when the body set changes (add / remove, which
+        // hands the detector a NEW array via `Detector.setBodies`) or when some
+        // body's moving-vs-resting role flips (`Body.setStatic`,
+        // `Sleeping.set`, `Detector.setGridDynamic`, each of which bumps the
+        // epoch). So cache the result and rebuild only on those signals.
+        //
+        // The body-set signal is the identity and length of `detector.bodies`
+        // rather than a flag set by `setBodies`, so a caller that assigns the
+        // array directly (rather than through the setter) is still correct:
+        // the cached movers list holds INDICES into it, and a stale index can
+        // read past the end of a shrunken array.
+        var movers = g.movers,
+            staticDirty = !g.built,
+            staticCount = g.staticCount,
+            classifyEpoch = Common._bodyStaticEpoch;
+
+        if (g.classifyBodies !== bodies || g.classifyLength !== n || g.classifyEpoch !== classifyEpoch) {
+            g.classifyBodies = bodies;
+            g.classifyLength = n;
+            g.classifyEpoch = classifyEpoch;
+            movers.length = 0;
+            staticCount = 0;
+
+            for (i = 0; i < n; i++) {
+                var body = bodies[i],
+                    // a body tagged `_gridDynamic` (e.g. an inner-scroll surface
+                    // that is static but moves each tick) is treated as a mover so
+                    // it is re-bucketed every step and never goes stale in the
+                    // static index
+                    isStaticNow = (body.isStatic || body.isSleeping) && body._gridDynamic !== true;
+                if (body._sPrev !== isStaticNow) {
+                    body._sPrev = isStaticNow;
+                    staticDirty = true;
+                }
+                if (isStaticNow) {
+                    staticCount++;
+                } else {
+                    movers.push(i);
+                }
             }
-            if (isStaticNow) {
-                staticCount++;
-            } else {
-                movers.push(i);
-            }
+
+            g.staticCount = staticCount;
         }
+
         // A change in static count means a static body was added to or removed
         // from the world (windowing add/remove, etc.). The _sPrev check cannot
         // see a body that has LEFT detector.bodies, so this count guards against
@@ -6537,41 +6747,157 @@ var Collision = __webpack_require__(8);
             g.epoch += 1;
         }
 
-        // 3) rebuild the dynamic index each step from the movers
-        var dTable = g.dTable,
-            dUsed = g.dUsed,
-            dOver = g.dOver,
-            dUsedLength = dUsed.length,
+        // 3) rebuild the mover cell index each step.
+        //
+        // Unlike the static index this one is thrown away and rebuilt every
+        // step, so its per-insert cost is paid ~movers * cellsPerMover times per
+        // step and was one of the larger single costs in a calm scene. It is
+        // therefore NOT a hash table: the movers of one step occupy a small
+        // bounding rectangle of cells, so the index is a flat array of per-cell
+        // chain heads addressed by plain arithmetic, with the chains threaded
+        // through parallel entry arrays. No hashing, no probing, no per-cell
+        // bucket array, no touched-key list.
+        //
+        // The rectangle is masked to a power of two per axis and capped, so a
+        // pathological spread (one mover at the top of a very long page, one at
+        // the bottom) wraps into the same slots instead of allocating a huge
+        // grid; each entry therefore carries its packed cell key and chain walks
+        // verify it. Unwrapped (the normal case) every check passes.
+        var dOver = g.dOver,
             moversLength = movers.length;
-        for (u = 0; u < dUsedLength; u++) {
-            dUsed[u].length = 0;
-        }
-        dUsed.length = 0;
         dOver.length = 0;
-        for (var mIns = 0; mIns < moversLength; mIns++) {
+
+        // pass A: per-mover cell span, oversize classification, and the bounding
+        // cell rectangle. Spans are kept in a scratch array so the insert pass
+        // does not recompute them. It must hold floats: a body with NaN bounds
+        // yields a NaN span whose cell loops iterate zero times, and coercing
+        // that to an integer would index real cells instead.
+        var dSpan = g.dSpan,
+            mBounds = g.mBounds,
+            mStamp = g.mStamp,
+            mOver = g.mOver;
+
+        if (dSpan.length < moversLength * 4) {
+            var moverCapacity = (moversLength + 16) * 2;
+            dSpan = g.dSpan = new Float64Array(moverCapacity * 4);
+            // the movers' own bounds, flattened. The generation pass below runs
+            // every bounds test against these instead of chasing
+            // body -> bounds -> min / max, so it reaches a body object only for
+            // a candidate that survives its bounds test
+            mBounds = g.mBounds = new Float64Array(moverCapacity * 4);
+            // the visited stamp that dedups a mover reached through several
+            // cells, likewise flattened off the body
+            mStamp = g.mStamp = new Int32Array(moverCapacity);
+            mOver = g.mOver = new Int32Array(moverCapacity);
+        }
+
+        var minCx = Infinity,
+            maxCx = -Infinity,
+            minCy = Infinity,
+            maxCy = -Infinity,
+            dEntryCount = 0,
+            mIns,
+            spanBase;
+
+        for (mIns = 0; mIns < moversLength; mIns++) {
             var di = movers[mIns],
                 dbody = bodies[di],
                 dBounds = dbody.bounds,
-                dcx0 = Math.floor(dBounds.min.x * invCell),
-                dcx1 = Math.floor(dBounds.max.x * invCell),
-                dcy0 = Math.floor(dBounds.min.y * invCell),
-                dcy1 = Math.floor(dBounds.max.y * invCell);
+                dMinX = dBounds.min.x,
+                dMaxX = dBounds.max.x,
+                dMinY = dBounds.min.y,
+                dMaxY = dBounds.max.y,
+                dcx0 = Math.floor(dMinX * invCell),
+                dcx1 = Math.floor(dMaxX * invCell),
+                dcy0 = Math.floor(dMinY * invCell),
+                dcy1 = Math.floor(dMaxY * invCell);
+
+            spanBase = mIns * 4;
+            mBounds[spanBase] = dMinX;
+            mBounds[spanBase + 1] = dMaxX;
+            mBounds[spanBase + 2] = dMinY;
+            mBounds[spanBase + 3] = dMaxY;
+            mStamp[mIns] = -1;
+
             if ((dcx1 - dcx0 + 1) * (dcy1 - dcy0 + 1) > maxCells) {
                 dbody._ovD = true;
-                dOver.push(di);
+                mOver[mIns] = 1;
+                dOver.push(mIns);
+                // an unwalkable span, so the insert pass skips this mover
+                // without having to re-read the oversize flag
+                dSpan[spanBase] = NaN;
                 continue;
             }
+
             dbody._ovD = false;
-            for (cx = dcx0; cx <= dcx1; cx++) {
-                var dKeyX = (cx + keyOffset) * keyStride,
-                    dCxOffset = cx + keyOffset;
-                for (cy = dcy0; cy <= dcy1; cy++) {
-                    key = dKeyX + (cy + keyOffset);
-                    var dBucket = cellGetOrCreate(dTable, key, cellHash(dCxOffset, cy + keyOffset));
-                    if (dBucket.length === 0) {
-                        dUsed.push(dBucket);
-                    }
-                    dBucket.push(di);
+            mOver[mIns] = 0;
+            dSpan[spanBase] = dcx0;
+            dSpan[spanBase + 1] = dcx1;
+            dSpan[spanBase + 2] = dcy0;
+            dSpan[spanBase + 3] = dcy1;
+
+            // NaN spans fail every comparison, so they neither widen the
+            // rectangle nor contribute entries, matching the zero cell loops
+            // they produce below
+            if (dcx0 < minCx) { minCx = dcx0; }
+            if (dcx1 > maxCx) { maxCx = dcx1; }
+            if (dcy0 < minCy) { minCy = dcy0; }
+            if (dcy1 > maxCy) { maxCy = dcy1; }
+            dEntryCount += (dcx1 - dcx0 + 1) * (dcy1 - dcy0 + 1) || 0;
+        }
+
+        var dShiftW = 0,
+            dShiftH = 0;
+
+        if (dEntryCount > 0) {
+            dShiftW = Detector._cellShiftFor(maxCx - minCx + 1);
+            dShiftH = Detector._cellShiftFor(maxCy - minCy + 1);
+        }
+
+        var dMaskW = (1 << dShiftW) - 1,
+            dMaskH = (1 << dShiftH) - 1,
+            dSlots = 1 << (dShiftW + dShiftH),
+            dHead = g.dHead,
+            dNext = g.dNext,
+            dItem = g.dItem,
+            dKeyArr = g.dKey;
+
+        if (dHead.length < dSlots) {
+            dHead = g.dHead = new Int32Array(dSlots);
+        }
+        if (dNext.length < dEntryCount) {
+            var entryCapacity = (dEntryCount + 64) * 2;
+            dNext = g.dNext = new Int32Array(entryCapacity);
+            dItem = g.dItem = new Int32Array(entryCapacity);
+            dKeyArr = g.dKey = new Float64Array(entryCapacity);
+        }
+
+        dHead.fill(-1, 0, dSlots);
+
+        // pass B: insert. Walked in DESCENDING mover order and pushed onto the
+        // front of each chain, so a chain reads back in ascending mover order,
+        // exactly the order the previous per-cell bucket arrays produced.
+        var dEntry = 0;
+        for (mIns = moversLength - 1; mIns >= 0; mIns--) {
+            spanBase = mIns * 4;
+            var iSpanCx1 = dSpan[spanBase + 1],
+                iSpanCy0 = dSpan[spanBase + 2],
+                iSpanCy1 = dSpan[spanBase + 3];
+
+            for (cx = dSpan[spanBase]; cx <= iSpanCx1; cx++) {
+                var iKeyX = (cx + keyOffset) * keyStride,
+                    iSlotX = (cx - minCx) & dMaskW;
+
+                for (cy = iSpanCy0; cy <= iSpanCy1; cy++) {
+                    var iSlot = iSlotX | (((cy - minCy) & dMaskH) << dShiftW);
+                    dKeyArr[dEntry] = iKeyX + (cy + keyOffset);
+                    // the mover's ORDINAL in `movers`, not its index in
+                    // `bodies`: it addresses the flat mover arrays directly and
+                    // orders identically (movers are collected in body order)
+                    dItem[dEntry] = mIns;
+                    dNext[dEntry] = dHead[iSlot];
+                    dHead[iSlot] = dEntry;
+                    dEntry++;
                 }
             }
         }
@@ -6585,11 +6911,10 @@ var Collision = __webpack_require__(8);
             sFlatLength = sFlat.length,
             dOverLength = dOver.length;
         for (var mGen = 0; mGen < moversLength; mGen++) {
-            var ii = movers[mGen],
-                m = bodies[ii],
-                mBounds = m.bounds,
-                mMinX = mBounds.min.x, mMaxX = mBounds.max.x,
-                mMinY = mBounds.min.y, mMaxY = mBounds.max.y,
+            var mBoundsBase = mGen * 4,
+                m = bodies[movers[mGen]],
+                mMinX = mBounds[mBoundsBase], mMaxX = mBounds[mBoundsBase + 1],
+                mMinY = mBounds[mBoundsBase + 2], mMaxY = mBounds[mBoundsBase + 3],
                 mFilter = m.collisionFilter,
                 // a tagged moving-static surface is a mover here but must still
                 // not generate static-static pairs (the sweep skips those)
@@ -6611,7 +6936,7 @@ var Collision = __webpack_require__(8);
             // in dOver); oversized statics/movers are handled by the sOver/dOver
             // passes below. Skipped for a static (tagged moving) mover, since
             // static-static never resolves.
-            if (m._ovD) {
+            if (mOver[mGen] === 1) {
                 if (!mStatic) {
                     for (var sfi = 0; sfi < sFlatLength; sfi++) {
                         var fsBody = sFlat[sfi],
@@ -6650,6 +6975,9 @@ var Collision = __webpack_require__(8);
                         scList = m._scList = [];
                     }
                     scList.length = 0;
+                    if (m._scBounds === null) {
+                        m._scBounds = new Float64Array(32);
+                    }
                     m._scEpoch = g.epoch;
                     m._scStatic = mStatic;
                     m._scCx0 = mcx0;
@@ -6660,18 +6988,21 @@ var Collision = __webpack_require__(8);
 
                 for (cx = mcx0; cx <= mcx1; cx++) {
                     var mKeyX = (cx + keyOffset) * keyStride,
-                        mCxOffset = cx + keyOffset;
+                        mCxOffset = cx + keyOffset,
+                        mSlotX = (cx - minCx) & dMaskW;
+
                     for (cy = mcy0; cy <= mcy1; cy++) {
-                        var cyOffset = cy + keyOffset,
-                            mCellHash = cellHash(mCxOffset, cyOffset);
+                        var cyOffset = cy + keyOffset;
                         key = mKeyX + cyOffset;
 
                         // collect static candidates on a cache miss (tested
                         // from the list after the walk; skipped when the outer
                         // body is itself static, as a tagged moving surface vs
-                        // the static page is static-static and never resolves)
+                        // the static page is static-static and never resolves).
+                        // The cell hash is only needed here, so a mover holding
+                        // its cached list pays no hashing at all
                         if (!scValid) {
-                            var sOcc = mStatic ? undefined : cellGet(g.sTable, key, mCellHash);
+                            var sOcc = mStatic ? undefined : cellGet(g.sTable, key, cellHash(mCxOffset, cyOffset));
                             if (sOcc !== undefined) {
                                 for (var si = 0; si < sOcc.length; si++) {
                                     var sBody = sOcc[si];
@@ -6679,48 +7010,71 @@ var Collision = __webpack_require__(8);
                                         continue;
                                     }
                                     sBody._gsStamp = localStamp;
+
+                                    // capture the candidate's bounds alongside
+                                    // it, so the per-step test loop never
+                                    // dereferences a static that misses
+                                    var scSlot = scList.length * 4,
+                                        scStore = m._scBounds;
+                                    if (scStore.length <= scSlot) {
+                                        scStore = m._scBounds = Detector._growFloats(scStore, scSlot + 4);
+                                    }
+                                    var scSourceBounds = sBody.bounds;
+                                    scStore[scSlot] = scSourceBounds.min.x;
+                                    scStore[scSlot + 1] = scSourceBounds.max.x;
+                                    scStore[scSlot + 2] = scSourceBounds.min.y;
+                                    scStore[scSlot + 3] = scSourceBounds.max.y;
                                     scList.push(sBody);
                                 }
                             }
                         }
 
-                        // mover vs mover (dedup by index, so emit only once)
-                        var dOcc = cellGet(dTable, key, mCellHash);
-                        if (dOcc !== undefined) {
-                            for (var dgi = 0; dgi < dOcc.length; dgi++) {
-                                var dj = dOcc[dgi];
-                                if (dj <= ii) {
-                                    continue;
-                                }
-                                var dBody = bodies[dj];
-                                if (dBody._gsStamp === localStamp) {
-                                    continue;
-                                }
-                                dBody._gsStamp = localStamp;
-                                if (mStatic && (dBody.isStatic || dBody.isSleeping)) {
-                                    continue;
-                                }
-                                var dbnd = dBody.bounds;
-                                if (mMaxX < dbnd.min.x || mMinX > dbnd.max.x || mMaxY < dbnd.min.y || mMinY > dbnd.max.y) {
-                                    continue;
-                                }
-                                if (!canCollide(mFilter, dBody.collisionFilter)) {
-                                    continue;
-                                }
-                                collisionIndex = Detector._testPair(m, dBody, pairs, collisions, collisionIndex);
+                        // mover vs mover (dedup by ordinal, so emit only once).
+                        // Chain entries carry their cell key because the slot
+                        // address wraps on a pathological mover spread. Every
+                        // test here reads the flat mover arrays, so a candidate
+                        // that fails costs no body access at all
+                        for (var dgi = dHead[mSlotX | (((cy - minCy) & dMaskH) << dShiftW)]; dgi !== -1; dgi = dNext[dgi]) {
+                            if (dKeyArr[dgi] !== key) {
+                                continue;
                             }
+                            var dj = dItem[dgi];
+                            if (dj <= mGen || mStamp[dj] === localStamp) {
+                                continue;
+                            }
+                            mStamp[dj] = localStamp;
+                            var dBoundsBase = dj * 4;
+                            if (mMaxX < mBounds[dBoundsBase] || mMinX > mBounds[dBoundsBase + 1]
+                                || mMaxY < mBounds[dBoundsBase + 2] || mMinY > mBounds[dBoundsBase + 3]) {
+                                continue;
+                            }
+                            var dBody = bodies[movers[dj]];
+                            if (mStatic && (dBody.isStatic || dBody.isSleeping)) {
+                                continue;
+                            }
+                            if (!canCollide(mFilter, dBody.collisionFilter)) {
+                                continue;
+                            }
+                            collisionIndex = Detector._testPair(m, dBody, pairs, collisions, collisionIndex);
                         }
                     }
                 }
 
-                // mover vs its static candidates (cached or just collected)
+                // mover vs its static candidates (cached or just collected).
+                // Their bounds were captured with the list: a body in the static
+                // index does not move (one that does must be tagged with
+                // Detector.setGridDynamic, which makes it a mover instead), so
+                // the test runs off contiguous memory and only a candidate that
+                // overlaps is ever dereferenced
                 if (!mStatic) {
+                    var scBounds = m._scBounds;
                     for (var sci = 0, scListLength = scList.length; sci < scListLength; sci++) {
-                        var scBody = scList[sci],
-                            scBounds = scBody.bounds;
-                        if (mMaxX < scBounds.min.x || mMinX > scBounds.max.x || mMaxY < scBounds.min.y || mMinY > scBounds.max.y) {
+                        var scBase = sci * 4;
+                        if (mMaxX < scBounds[scBase] || mMinX > scBounds[scBase + 1]
+                            || mMaxY < scBounds[scBase + 2] || mMinY > scBounds[scBase + 3]) {
                             continue;
                         }
+                        var scBody = scList[sci];
                         if (!canCollide(mFilter, scBody.collisionFilter)) {
                             continue;
                         }
@@ -6745,25 +7099,26 @@ var Collision = __webpack_require__(8);
                 }
             }
 
-            // mover vs oversized movers. The index dedup (emit an
-            // oversized-oversized pair once, from the lower-index outer) applies
-            // ONLY when the outer is itself oversized. A non-oversized mover
-            // never appears in dOver, so the pair is emitted here exactly once
-            // with it as the outer; without the `m._ovD` guard a normal mover
-            // whose index is higher than an oversized mover's would wrongly skip
-            // the pair, and it would be lost entirely (the oversized mover no
-            // longer cell-walks to find normal movers).
+            // mover vs oversized movers. The ordinal dedup (emit an
+            // oversized-oversized pair once, from the lower-ordinal outer)
+            // applies ONLY when the outer is itself oversized. A non-oversized
+            // mover never appears in dOver, so the pair is emitted here exactly
+            // once with it as the outer; without the oversize guard a normal
+            // mover ordered after an oversized one would wrongly skip the pair,
+            // and it would be lost entirely (the oversized mover no longer
+            // cell-walks to find normal movers).
             for (var doi = 0; doi < dOverLength; doi++) {
-                var doIdx = dOver[doi];
-                if (m._ovD && doIdx <= ii) {
+                var doOrdinal = dOver[doi];
+                if (mOver[mGen] === 1 && doOrdinal <= mGen) {
                     continue;
                 }
-                var doBody = bodies[doIdx],
-                    doBounds = doBody.bounds;
+                var doBoundsBase = doOrdinal * 4;
+                if (mMaxX < mBounds[doBoundsBase] || mMinX > mBounds[doBoundsBase + 1]
+                    || mMaxY < mBounds[doBoundsBase + 2] || mMinY > mBounds[doBoundsBase + 3]) {
+                    continue;
+                }
+                var doBody = bodies[movers[doOrdinal]];
                 if (mStatic && (doBody.isStatic || doBody.isSleeping)) {
-                    continue;
-                }
-                if (mMaxX < doBounds.min.x || mMinX > doBounds.max.x || mMaxY < doBounds.min.y || mMinY > doBounds.max.y) {
                     continue;
                 }
                 if (!canCollide(mFilter, doBody.collisionFilter)) {
@@ -7508,6 +7863,13 @@ var Body = __webpack_require__(4);
         engine.detector = options.detector || Detector.create();
         engine.detector.pairs = engine.pairs;
 
+        // mover-list cache (see the classification pass in Engine.update);
+        // declared here so the engine object's shape is stable
+        engine._moverBodies = [];
+        engine._moverSource = null;
+        engine._moverSourceLength = -1;
+        engine._moverEpoch = -1;
+
         // for temporary back compatibility only
         engine.grid = { buckets: [] };
         engine.world.gravity = engine.gravity;
@@ -7584,18 +7946,34 @@ var Body = __webpack_require__(4);
         // velocity explicitly anyway. Force clearing deliberately stays a
         // full-body pass (a stale force on a static body must not survive
         // into a later release).
+        // The walk itself touches every body in the world, so on a dense static
+        // page it is memory-bound and one of the largest single costs in the
+        // step, while its answer almost never changes. Rebuild it only when it
+        // can have changed: a different `allBodies` array (Composite nulls its
+        // cache and rebuilds the array on any add / remove) or a bumped static
+        // epoch (`Body.setStatic` / `Sleeping.set`; see Common._bodyStaticEpoch).
         var moverBodies = engine._moverBodies || (engine._moverBodies = []),
-            allBodiesLength = allBodies.length,
-            moverCount = 0;
+            staticEpoch = Common._bodyStaticEpoch,
+            allBodiesLength = allBodies.length;
 
-        for (i = 0; i < allBodiesLength; i++) {
-            var classifyBody = allBodies[i];
-            if (!(classifyBody.isStatic || classifyBody.isSleeping)) {
-                moverBodies[moverCount++] = classifyBody;
+        if (engine._moverSource !== allBodies
+            || engine._moverSourceLength !== allBodiesLength
+            || engine._moverEpoch !== staticEpoch) {
+            engine._moverSource = allBodies;
+            engine._moverSourceLength = allBodiesLength;
+            engine._moverEpoch = staticEpoch;
+
+            var moverCount = 0;
+
+            for (i = 0; i < allBodiesLength; i++) {
+                var classifyBody = allBodies[i];
+                if (!(classifyBody.isStatic || classifyBody.isSleeping)) {
+                    moverBodies[moverCount++] = classifyBody;
+                }
             }
-        }
-        if (moverBodies.length !== moverCount) {
-            moverBodies.length = moverCount;
+            if (moverBodies.length !== moverCount) {
+                moverBodies.length = moverCount;
+            }
         }
 
         // apply gravity to all moving bodies
@@ -7695,8 +8073,17 @@ var Body = __webpack_require__(4);
             });
         }
 
-        // clear force buffers
-        Engine._bodiesClearForces(allBodies);
+        // Clear force buffers. Movers only when sleeping is disabled: a resting
+        // body is not integrated, so its buffer cannot reach the simulation, and
+        // `Body.setStatic` / `Sleeping.set` zero it on both transitions so
+        // nothing applied while resting survives into a release. Clearing every
+        // body meant a scattered write per intact tile of a dense static page.
+        //
+        // With sleeping ENABLED the full pass is kept, because `Sleeping.update`
+        // reads a resting body's force to decide whether to wake it: it is the
+        // one place the buffer is observable while a body rests, and leaving a
+        // value there would hold that body awake.
+        Engine._bodiesClearForces(engine.enableSleeping ? allBodies : moverBodies);
 
         Events.trigger(engine, 'afterUpdate', event);
 
@@ -9194,13 +9581,35 @@ var Common = __webpack_require__(0);
      * @param {object} options
      * @return {pairs} A new pairs structure
      */
+    /**
+     * Slot count of the collision record cache (see `Pairs.create`). A power of
+     * two so the hash masks; sized well above a typical live pair count so
+     * eviction is rare.
+     */
+    Pairs._cacheMask = 4095;
+
     Pairs.create = function(options) {
         return Common.extend({
             table: new Map(),
             list: [],
             collisionStart: [],
             collisionActive: [],
-            collisionEnd: []
+            collisionEnd: [],
+            // Direct-mapped cache from pair id to the collision record the pair
+            // reuses, read by `Collision.collides` on every overlapping
+            // candidate. The table lookup it replaces was one of the larger
+            // per-candidate costs; the cache turns it into a masked array read.
+            //
+            // It is only ever a hint, so it needs no invalidation: a pair id
+            // identifies its two bodies for the life of the world (body ids are
+            // never reused), a stored key can only ever be matched by that same
+            // body pair, and the record itself is scratch that the collision
+            // rewrites in full. It holds records for pairs that have since
+            // ended, which is what lets a re-collision reuse the old record
+            // instead of allocating a new one.
+            _recordKeys: new Float64Array(Pairs._cacheMask + 1),
+            _recordValues: new Array(Pairs._cacheMask + 1),
+            _recordMask: Pairs._cacheMask
         }, options);
     };
 
@@ -9275,6 +9684,11 @@ var Common = __webpack_require__(0);
                     // remove inactive pairs if either body awake
                     collisionEnd[collisionEndIndex++] = pair;
                     pairsTable.delete(pair.id);
+                    // the record outlives the pair (the collision record cache
+                    // hands it straight back if these bodies collide again), so
+                    // drop the back reference or the next `Pairs.update` would
+                    // take it for a live pair and never re-add it
+                    pair.collision.pair = null;
                 }
             }
         }
@@ -9305,6 +9719,9 @@ var Common = __webpack_require__(0);
      */
     Pairs.clear = function(pairs) {
         pairs.table = new Map();
+        pairs._recordKeys.fill(0);
+        pairs._recordValues.length = 0;
+        pairs._recordValues.length = Pairs._cacheMask + 1;
         pairs.list.length = 0;
         pairs.collisionStart.length = 0;
         pairs.collisionActive.length = 0;

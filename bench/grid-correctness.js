@@ -159,7 +159,7 @@ function makeMovingStaticCase() {
             }
         }
         bar = Bodies.rectangle(400, 560, 280, 18, { isStatic: true });
-        bar._gridDynamic = true;
+        Detector.setGridDynamic(bar);
         Composite.add(world, bar);
         for (let i = 0; i < 40; i++) {
             Composite.add(world, Bodies.rectangle(280 + rand() * 360, 350 + rand() * 150, 13, 13, { friction: 0.3, restitution: 0.2 }));
