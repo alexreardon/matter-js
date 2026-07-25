@@ -424,6 +424,134 @@ var Collision = require('./Collision');
     };
 
     /**
+     * Creates an open-addressing hash table mapping packed cell keys to bucket
+     * arrays, replacing `Map` for the gridStatic cell indexes. Linear probing
+     * over two flat parallel arrays: `keys` (Float64Array; the packed cell key
+     * `(cx + offset) * stride + (cy + offset)` is always positive within the
+     * coordinate contract, so `0` marks an empty slot) and `vals` (the bucket
+     * arrays). Keys are never deleted (buckets persist per cell, matching the
+     * previous Map behaviour), so no tombstones are needed. Lookup order never
+     * affects emission order, so this is purely mechanical: bit-identical.
+     * @private
+     * @method _createCellTable
+     */
+    Detector._createCellTable = function() {
+        return {
+            keys: new Float64Array(2048),
+            vals: new Array(2048),
+            mask: 2047,
+            count: 0
+        };
+    };
+
+    /**
+     * Looks up the bucket for a packed cell key, or `undefined` when the cell
+     * has never been touched. `hash` is the caller-computed cell hash.
+     * @private
+     * @method _cellGet
+     */
+    Detector._cellGet = function(table, key, hash) {
+        var keys = table.keys,
+            mask = table.mask,
+            probe = hash & mask,
+            stored = keys[probe];
+        while (stored !== key && stored !== 0) {
+            probe = (probe + 1) & mask;
+            stored = keys[probe];
+        }
+        if (stored === key) {
+            return table.vals[probe];
+        }
+        return undefined;
+    };
+
+    /**
+     * Computes the hash for a cell from its OFFSET coordinates (the
+     * `cx + keyOffset` / `cy + keyOffset` values, so a rehash can re-derive it
+     * from the packed key alone).
+     * @private
+     * @method _cellHash
+     */
+    Detector._cellHash = function(cxOffset, cyOffset) {
+        // Fibonacci-style mixing; the xor-fold spreads high bits into the
+        // masked low bits
+        var mixed = (Math.imul(cxOffset, 0x9E3779B1) ^ Math.imul(cyOffset, 0x85EBCA77)) | 0;
+        return (mixed ^ (mixed >>> 15)) | 0;
+    };
+
+    /**
+     * Doubles a cell table's capacity and reinserts every live key (hashes are
+     * re-derived from the packed keys). Rare: only on load-factor growth.
+     * @private
+     * @method _cellTableGrow
+     */
+    Detector._cellTableGrow = function(table) {
+        var oldKeys = table.keys,
+            oldVals = table.vals,
+            oldCapacity = oldKeys.length,
+            newCapacity = oldCapacity * 2,
+            newKeys = new Float64Array(newCapacity),
+            newVals = new Array(newCapacity),
+            newMask = newCapacity - 1,
+            keyStride = 0x200000;
+
+        for (var slot = 0; slot < oldCapacity; slot++) {
+            var liveKey = oldKeys[slot];
+            if (liveKey === 0) {
+                continue;
+            }
+            var cxOffset = Math.floor(liveKey / keyStride),
+                cyOffset = liveKey - cxOffset * keyStride,
+                probe = Detector._cellHash(cxOffset, cyOffset) & newMask;
+            while (newKeys[probe] !== 0) {
+                probe = (probe + 1) & newMask;
+            }
+            newKeys[probe] = liveKey;
+            newVals[probe] = oldVals[slot];
+        }
+
+        table.keys = newKeys;
+        table.vals = newVals;
+        table.mask = newMask;
+    };
+
+    /**
+     * Looks up the bucket for a packed cell key, creating (and inserting) an
+     * empty bucket when the cell is new. Grows the table at half load.
+     * @private
+     * @method _cellGetOrCreate
+     */
+    Detector._cellGetOrCreate = function(table, key, hash) {
+        var keys = table.keys,
+            mask = table.mask,
+            probe = hash & mask,
+            stored = keys[probe];
+        while (stored !== key && stored !== 0) {
+            probe = (probe + 1) & mask;
+            stored = keys[probe];
+        }
+        if (stored === key) {
+            return table.vals[probe];
+        }
+
+        if ((table.count + 1) * 2 > mask + 1) {
+            Detector._cellTableGrow(table);
+            keys = table.keys;
+            mask = table.mask;
+            probe = hash & mask;
+            while (keys[probe] !== 0) {
+                probe = (probe + 1) & mask;
+            }
+        }
+
+        var bucket = [];
+        keys[probe] = key;
+        table.vals[probe] = bucket;
+        table.count++;
+        return bucket;
+    };
+
+    /**
      * Static-index uniform-grid broadphase. The win over `_collisionsGrid`: the
      * static field (intact page) is bucketed ONCE and reused; only dynamic
      * bodies (movers) are re-bucketed each step, and only movers drive candidate
@@ -471,8 +599,11 @@ var Collision = require('./Collision');
         var g = detector._sgrid;
         if (!g) {
             g = detector._sgrid = {
-                sBuckets: new Map(), sUsed: [], sOver: [], sFlat: [],
-                dBuckets: new Map(), dUsed: [], dOver: [],
+                // open-addressing cell tables (see _createCellTable); the used
+                // lists hold BUCKET REFERENCES so the per-step reset loops
+                // clear them without any table lookups
+                sTable: Detector._createCellTable(), sUsed: [], sOver: [], sFlat: [],
+                dTable: Detector._createCellTable(), dUsed: [], dOver: [],
                 movers: [], stamp: 1, built: false, indexedStaticCount: -1,
                 // static-index build epoch: bumped on every rebuild so each
                 // mover's cached static-candidate list can be validated cheaply
@@ -480,6 +611,10 @@ var Collision = require('./Collision');
                 cellSize: 0
             };
         }
+
+        var cellHash = Detector._cellHash,
+            cellGet = Detector._cellGet,
+            cellGetOrCreate = Detector._cellGetOrCreate;
 
         // a cell-size change invalidates every bucket key, including the
         // persistent static index built under the old size; force a rebuild
@@ -526,14 +661,11 @@ var Collision = require('./Collision');
 
         // 2) (re)build the persistent static index only when membership changed
         if (staticDirty) {
-            var sBuckets = g.sBuckets,
+            var sTable = g.sTable,
                 sUsed = g.sUsed,
                 sUsedLength = sUsed.length;
             for (u = 0; u < sUsedLength; u++) {
-                var staleS = sBuckets.get(sUsed[u]);
-                if (staleS !== undefined) {
-                    staleS.length = 0;
-                }
+                sUsed[u].length = 0;
             }
             sUsed.length = 0;
             g.sOver.length = 0;
@@ -557,16 +689,13 @@ var Collision = require('./Collision');
                 }
                 g.sFlat.push(sb);
                 for (cx = scx0; cx <= scx1; cx++) {
-                    var sKeyX = (cx + keyOffset) * keyStride;
+                    var sKeyX = (cx + keyOffset) * keyStride,
+                        sCxOffset = cx + keyOffset;
                     for (cy = scy0; cy <= scy1; cy++) {
                         key = sKeyX + (cy + keyOffset);
-                        var sBucket = sBuckets.get(key);
-                        if (sBucket === undefined) {
-                            sBucket = [];
-                            sBuckets.set(key, sBucket);
-                        }
+                        var sBucket = cellGetOrCreate(sTable, key, cellHash(sCxOffset, cy + keyOffset));
                         if (sBucket.length === 0) {
-                            sUsed.push(key);
+                            sUsed.push(sBucket);
                         }
                         // store the body reference, not its index into
                         // detector.bodies: the static index persists across
@@ -586,16 +715,13 @@ var Collision = require('./Collision');
         }
 
         // 3) rebuild the dynamic index each step from the movers
-        var dBuckets = g.dBuckets,
+        var dTable = g.dTable,
             dUsed = g.dUsed,
             dOver = g.dOver,
             dUsedLength = dUsed.length,
             moversLength = movers.length;
         for (u = 0; u < dUsedLength; u++) {
-            var staleD = dBuckets.get(dUsed[u]);
-            if (staleD !== undefined) {
-                staleD.length = 0;
-            }
+            dUsed[u].length = 0;
         }
         dUsed.length = 0;
         dOver.length = 0;
@@ -614,16 +740,13 @@ var Collision = require('./Collision');
             }
             dbody._ovD = false;
             for (cx = dcx0; cx <= dcx1; cx++) {
-                var dKeyX = (cx + keyOffset) * keyStride;
+                var dKeyX = (cx + keyOffset) * keyStride,
+                    dCxOffset = cx + keyOffset;
                 for (cy = dcy0; cy <= dcy1; cy++) {
                     key = dKeyX + (cy + keyOffset);
-                    var dBucket = dBuckets.get(key);
-                    if (dBucket === undefined) {
-                        dBucket = [];
-                        dBuckets.set(key, dBucket);
-                    }
+                    var dBucket = cellGetOrCreate(dTable, key, cellHash(dCxOffset, cy + keyOffset));
                     if (dBucket.length === 0) {
-                        dUsed.push(key);
+                        dUsed.push(dBucket);
                     }
                     dBucket.push(di);
                 }
@@ -713,16 +836,19 @@ var Collision = require('./Collision');
                 }
 
                 for (cx = mcx0; cx <= mcx1; cx++) {
-                    var mKeyX = (cx + keyOffset) * keyStride;
+                    var mKeyX = (cx + keyOffset) * keyStride,
+                        mCxOffset = cx + keyOffset;
                     for (cy = mcy0; cy <= mcy1; cy++) {
-                        key = mKeyX + (cy + keyOffset);
+                        var cyOffset = cy + keyOffset,
+                            mCellHash = cellHash(mCxOffset, cyOffset);
+                        key = mKeyX + cyOffset;
 
                         // collect static candidates on a cache miss (tested
                         // from the list after the walk; skipped when the outer
                         // body is itself static, as a tagged moving surface vs
                         // the static page is static-static and never resolves)
                         if (!scValid) {
-                            var sOcc = mStatic ? undefined : g.sBuckets.get(key);
+                            var sOcc = mStatic ? undefined : cellGet(g.sTable, key, mCellHash);
                             if (sOcc !== undefined) {
                                 for (var si = 0; si < sOcc.length; si++) {
                                     var sBody = sOcc[si];
@@ -736,7 +862,7 @@ var Collision = require('./Collision');
                         }
 
                         // mover vs mover (dedup by index, so emit only once)
-                        var dOcc = dBuckets.get(key);
+                        var dOcc = cellGet(dTable, key, mCellHash);
                         if (dOcc !== undefined) {
                             for (var dgi = 0; dgi < dOcc.length; dgi++) {
                                 var dj = dOcc[dgi];
