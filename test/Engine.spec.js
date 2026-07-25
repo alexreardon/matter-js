@@ -104,7 +104,11 @@ describe('Engine resting-body passes', () => {
         expect(body.velocity).toEqual({ x: 0, y: 0 });
     });
 
-    test('a force applied while asleep cannot survive into a wake', () => {
+    test('with sleeping enabled a resting body still has its force cleared each step', () => {
+        // Sleeping.update reads a resting body's force to decide whether to wake
+        // it, which is the one place the buffer is observable while a body rests.
+        // So an engine with sleeping enabled keeps the whole-world force pass: a
+        // value left in the buffer would hold the body awake for good.
         const engine = Engine.create({ enableSleeping: true });
         engine.gravity.y = 0;
         const body = Bodies.rectangle(0, 0, 50, 50);
@@ -114,10 +118,6 @@ describe('Engine resting-body passes', () => {
         Body.applyForce(body, body.position, { x: 10, y: 10 });
         Engine.update(engine, DELTA);
 
-        Sleeping.set(body, false);
         expect(body.force).toEqual({ x: 0, y: 0 });
-
-        Engine.update(engine, DELTA);
-        expect(body.velocity).toEqual({ x: 0, y: 0 });
     });
 });

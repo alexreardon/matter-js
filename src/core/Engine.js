@@ -275,11 +275,17 @@ var Body = require('../body/Body');
             });
         }
 
-        // clear force buffers. Movers only: a resting body is not integrated, so
-        // its force buffer cannot affect the simulation, and `Body.setStatic`
-        // zeroes the buffer on both transitions so nothing applied while resting
-        // can survive into a release.
-        Engine._bodiesClearForces(moverBodies);
+        // Clear force buffers. Movers only when sleeping is disabled: a resting
+        // body is not integrated, so its buffer cannot reach the simulation, and
+        // `Body.setStatic` / `Sleeping.set` zero it on both transitions so
+        // nothing applied while resting survives into a release. Clearing every
+        // body meant a scattered write per intact tile of a dense static page.
+        //
+        // With sleeping ENABLED the full pass is kept, because `Sleeping.update`
+        // reads a resting body's force to decide whether to wake it: it is the
+        // one place the buffer is observable while a body rests, and leaving a
+        // value there would hold that body awake.
+        Engine._bodiesClearForces(engine.enableSleeping ? allBodies : moverBodies);
 
         Events.trigger(engine, 'afterUpdate', event);
 
