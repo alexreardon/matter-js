@@ -164,6 +164,18 @@ var Common = require('../core/Common');
         pairs.collisionStart.length = 0;
         pairs.collisionActive.length = 0;
         pairs.collisionEnd.length = 0;
+
+        // solver scratch hung off the container by Resolver.preSolvePosition /
+        // postSolvePosition. Clearing the pairs means the solver is starting
+        // over, so it must not keep holding bodies from the previous world
+        if (pairs._impulseCarry) {
+            pairs._impulseCarry.length = 0;
+        }
+
+        if (pairs._solverBodies) {
+            pairs._solverBodies.length = 0;
+        }
+
         return pairs;
     };
 

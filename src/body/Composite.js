@@ -255,6 +255,29 @@ var Body = require('./Body');
         if (position !== -1) {
             Composite.removeBodyAt(composite, position);
             body.sleepCounter = 0;
+
+            // Drop any warmed position impulse the body was still carrying.
+            //
+            // `Resolver.postSolvePosition`'s scoped path keeps a persistent
+            // carry list of bodies whose impulse is still decaying, so that a
+            // body whose pair ended still finishes its decay without the
+            // solver having to scan the whole world. Nothing in that list is
+            // otherwise told when a body LEAVES the world, so a removed body
+            // stayed in it, having its vertices translated and bounds
+            // recomputed every step until the impulse decayed out (~90 steps).
+            // The classic all-bodies path never touched an out-of-world body,
+            // so this both restores that behaviour and stops the list filling
+            // with dead bodies on a world with heavy removal churn.
+            body.positionImpulse.x = 0;
+            body.positionImpulse.y = 0;
+
+            // Tell the gridStatic broadphase this body left the world. It
+            // notices a departure on its own by stamping bodies as it walks
+            // them, but that cannot see a body removed and added back before
+            // the next walk, which keeps its place in the static index while
+            // its position in the body array (and so its place in bucket
+            // order) changes. See Detector._staticIndexInsert.
+            body._sDeparted = true;
         }
 
         if (deep) {
@@ -348,6 +371,17 @@ var Body = require('./Body');
             }
         }
         
+        // same reason as Composite.removeBody: a body leaving the world must not
+        // stay in the resolver's warmed-impulse carry list
+        for (var b = 0; b < composite.bodies.length; b++) {
+            var clearedBody = composite.bodies[b];
+            if (!keepStatic || !clearedBody.isStatic) {
+                clearedBody.positionImpulse.x = 0;
+                clearedBody.positionImpulse.y = 0;
+                clearedBody._sDeparted = true;
+            }
+        }
+
         if (keepStatic) {
             composite.bodies = composite.bodies.filter(function(body) { return body.isStatic; });
         } else {
