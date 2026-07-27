@@ -1754,7 +1754,24 @@ var Axes = __webpack_require__(11);
             // the candidate bounds captured alongside _scList, so the per-step
             // test loop reads contiguous memory instead of dereferencing every
             // candidate's bounds objects
-            _scBounds: null
+            _scBounds: null,
+            // gridStatic static-index membership (see
+            // Detector._staticIndexInsert). _sBuckets holds the cell buckets
+            // this body's reference sits in, so it can be removed from them
+            // without recomputing anything; an EMPTY array means an oversized
+            // static, which occupies no cells. _sIndexed is whether it is in
+            // the index at all, _sWalk the stamp of the last classification
+            // walk that saw it (a stale stamp means it has left the world),
+            // _sWorldIndex its position in that walk, which is the sort key
+            // that keeps bucket contents in world order, and _sDeparted a
+            // one-shot set by Composite.removeBody so a body removed and
+            // re-added within a single step is re-indexed at its new position
+            _sBuckets: null,
+            _sIndexed: false,
+            _sIndexedAt: -1,
+            _sWalk: 0,
+            _sWorldIndex: 0,
+            _sDeparted: false
         };
 
         var body = Common.extend(defaults, options);
@@ -3667,6 +3684,29 @@ var Body = __webpack_require__(4);
         if (position !== -1) {
             Composite.removeBodyAt(composite, position);
             body.sleepCounter = 0;
+
+            // Drop any warmed position impulse the body was still carrying.
+            //
+            // `Resolver.postSolvePosition`'s scoped path keeps a persistent
+            // carry list of bodies whose impulse is still decaying, so that a
+            // body whose pair ended still finishes its decay without the
+            // solver having to scan the whole world. Nothing in that list is
+            // otherwise told when a body LEAVES the world, so a removed body
+            // stayed in it, having its vertices translated and bounds
+            // recomputed every step until the impulse decayed out (~90 steps).
+            // The classic all-bodies path never touched an out-of-world body,
+            // so this both restores that behaviour and stops the list filling
+            // with dead bodies on a world with heavy removal churn.
+            body.positionImpulse.x = 0;
+            body.positionImpulse.y = 0;
+
+            // Tell the gridStatic broadphase this body left the world. It
+            // notices a departure on its own by stamping bodies as it walks
+            // them, but that cannot see a body removed and added back before
+            // the next walk, which keeps its place in the static index while
+            // its position in the body array (and so its place in bucket
+            // order) changes. See Detector._staticIndexInsert.
+            body._sDeparted = true;
         }
 
         if (deep) {
@@ -3760,6 +3800,17 @@ var Body = __webpack_require__(4);
             }
         }
         
+        // same reason as Composite.removeBody: a body leaving the world must not
+        // stay in the resolver's warmed-impulse carry list
+        for (var b = 0; b < composite.bodies.length; b++) {
+            var clearedBody = composite.bodies[b];
+            if (!keepStatic || !clearedBody.isStatic) {
+                clearedBody.positionImpulse.x = 0;
+                clearedBody.positionImpulse.y = 0;
+                clearedBody._sDeparted = true;
+            }
+        }
+
         if (keepStatic) {
             composite.bodies = composite.bodies.filter(function(body) { return body.isStatic; });
         } else {
@@ -6541,6 +6592,248 @@ var Collision = __webpack_require__(8);
     };
 
     /**
+     * Inserts a static body into the cell buckets it occupies, in world order.
+     *
+     * Bucket contents are kept sorted by `_sWorldIndex` so they read back in the
+     * same order a full rebuild (a walk of `detector.bodies`) would produce.
+     * Restamping every body's index on each classification walk keeps that key
+     * meaningful: `Composite` add and remove preserve the relative order of
+     * everything else, so an already-sorted bucket stays sorted across them.
+     * @private
+     * @method _staticIndexInsert
+     */
+    Detector._staticIndexInsert = function(g, body, cellSize, invCell, maxCells) {
+        var bounds = body.bounds,
+            cx0 = Math.floor(bounds.min.x * invCell),
+            cx1 = Math.floor(bounds.max.x * invCell),
+            cy0 = Math.floor(bounds.min.y * invCell),
+            cy1 = Math.floor(bounds.max.y * invCell),
+            worldIndex = body._sWorldIndex,
+            buckets = body._sBuckets,
+            keyOffset = 0x100000,
+            keyStride = 0x200000,
+            cx,
+            cy,
+            at;
+
+        if (buckets === null) {
+            buckets = body._sBuckets = [];
+        } else {
+            buckets.length = 0;
+        }
+
+        body._sIndexed = true;
+        body._sIndexedAt = g.indexed.length;
+        g.indexed.push(body);
+        g.sFlatValid = false;
+
+        // an oversized static spans too many cells to bucket; it goes on the
+        // list every mover scans instead, and holds no buckets (which is what
+        // an empty `_sBuckets` means)
+        if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) > maxCells) {
+            at = g.sOver.length;
+            while (at > 0 && g.sOver[at - 1]._sWorldIndex > worldIndex) {
+                at--;
+            }
+            g.sOver.splice(at, 0, body);
+            return;
+        }
+
+        for (cx = cx0; cx <= cx1; cx++) {
+            var keyX = (cx + keyOffset) * keyStride,
+                cxOffset = cx + keyOffset;
+
+            for (cy = cy0; cy <= cy1; cy++) {
+                // store the body reference, not its index into detector.bodies:
+                // Matter re-slices that array on world.isModified, which
+                // reorders and shrinks it, so a stored index can dangle
+                var bucket = Detector._cellGetOrCreate(
+                    g.sTable, keyX + (cy + keyOffset), Detector._cellHash(cxOffset, cy + keyOffset)
+                );
+
+                at = bucket.length;
+                while (at > 0 && bucket[at - 1]._sWorldIndex > worldIndex) {
+                    at--;
+                }
+
+                if (at === bucket.length) {
+                    bucket.push(body);
+                } else {
+                    bucket.splice(at, 0, body);
+                }
+
+                buckets.push(bucket);
+            }
+        }
+    };
+
+    /**
+     * Removes a static body's reference from every bucket it was inserted into.
+     * Splicing (rather than a swap-remove) is what keeps the remaining contents
+     * in world order.
+     * @private
+     * @method _staticIndexUnbucket
+     */
+    Detector._staticIndexUnbucket = function(g, body) {
+        var buckets = body._sBuckets,
+            i,
+            at;
+
+        g.sFlatValid = false;
+
+        if (buckets === null) {
+            return;
+        }
+
+        // no buckets means an oversized static, which lives on the list every
+        // mover scans instead of in cells
+        if (buckets.length === 0) {
+            at = g.sOver.indexOf(body);
+            if (at !== -1) {
+                g.sOver.splice(at, 1);
+            }
+            return;
+        }
+
+        for (i = 0; i < buckets.length; i++) {
+            var bucket = buckets[i];
+            at = bucket.indexOf(body);
+            if (at !== -1) {
+                bucket.splice(at, 1);
+            }
+        }
+
+        buckets.length = 0;
+    };
+
+    /**
+     * Removes a static body from the index entirely: out of the membership
+     * list, and out of every bucket it was inserted into.
+     * @private
+     * @method _staticIndexRemove
+     */
+    Detector._staticIndexRemove = function(g, body) {
+        var indexed = g.indexed,
+            slot = body._sIndexedAt;
+
+        // swap-remove from the membership list. Its order carries no meaning
+        // (bucket order is what the simulation depends on, and sFlat is rebuilt
+        // from the body array), so this stays O(1) and keeps a release off any
+        // whole-list walk
+        if (slot >= 0 && indexed[slot] === body) {
+            var last = indexed[indexed.length - 1];
+            indexed[slot] = last;
+            last._sIndexedAt = slot;
+            indexed.length--;
+        }
+
+        body._sIndexed = false;
+        body._sIndexedAt = -1;
+
+        Detector._staticIndexUnbucket(g, body);
+    };
+
+    /**
+     * Builds the static index from scratch. Only runs on the first step and
+     * after a cell-size change (which invalidates every bucket key); every other
+     * membership change is applied as a difference by `_staticIndexApply`.
+     * @private
+     * @method _staticIndexRebuild
+     */
+    Detector._staticIndexRebuild = function(g, bodies, n, cellSize, invCell, maxCells) {
+        var table = g.sTable,
+            keys = table.keys,
+            vals = table.vals,
+            i;
+
+        // empty every live bucket. Walking the table (rather than a maintained
+        // list of touched buckets) costs one pass over its slots, which is fine
+        // for a path this rare and means the incremental path never has to keep
+        // such a list in sync
+        for (i = 0; i < keys.length; i++) {
+            if (keys[i] !== 0) {
+                vals[i].length = 0;
+            }
+        }
+
+        g.sOver.length = 0;
+        g.sFlat.length = 0;
+        g.sFlatValid = false;
+        g.indexed.length = 0;
+
+        for (i = 0; i < n; i++) {
+            var body = bodies[i];
+
+            body._sIndexed = false;
+
+            if (!(body.isStatic || body.isSleeping) || body._gridDynamic === true) {
+                continue;
+            }
+
+            Detector._staticIndexInsert(g, body, cellSize, invCell, maxCells);
+        }
+
+        g.built = true;
+        g.epoch += 1;
+    };
+
+    /**
+     * Applies this step's static membership difference to the index: bodies that
+     * left the world or stopped being static are removed, bodies that became
+     * static or entered the world are inserted.
+     * @private
+     * @method _staticIndexApply
+     */
+    Detector._staticIndexApply = function(g, cellSize, invCell, maxCells, staticCount) {
+        var indexed = g.indexed,
+            pendingAdd = g.pendingAdd,
+            pendingAddLength = pendingAdd.length,
+            walkStamp = g.walkStamp,
+            i;
+
+        // A static that LEFT the world is the one change no per-body flag can
+        // report, and finding it costs a walk of the whole membership list. But
+        // it always shows up as a count mismatch first: releases already
+        // unindexed themselves during the classification walk, so once this
+        // step's insertions land, the membership list should be exactly the
+        // statics the walk counted. Only when it is not does anything need
+        // searching for.
+        if (indexed.length + pendingAddLength !== staticCount) {
+            var keep = 0,
+                indexedLength = indexed.length;
+
+            for (i = 0; i < indexedLength; i++) {
+                var body = indexed[i];
+
+                if (body._sWalk !== walkStamp) {
+                    // gone from the world. Removing by hand rather than through
+                    // _staticIndexRemove, since this loop is already compacting
+                    // the membership list it would swap-remove from
+                    Detector._staticIndexUnbucket(g, body);
+                    body._sIndexed = false;
+                    body._sIndexedAt = -1;
+                    continue;
+                }
+
+                indexed[keep] = body;
+                body._sIndexedAt = keep;
+                keep++;
+            }
+
+            if (indexed.length !== keep) {
+                indexed.length = keep;
+            }
+        }
+
+        for (i = 0; i < pendingAddLength; i++) {
+            Detector._staticIndexInsert(g, pendingAdd[i], cellSize, invCell, maxCells);
+        }
+
+        pendingAdd.length = 0;
+        g.epoch += 1;
+    };
+
+    /**
      * Static-index uniform-grid broadphase. The win over `_collisionsGrid`: the
      * static field (intact page) is bucketed ONCE and reused; only dynamic
      * bodies (movers) are re-bucketed each step, and only movers drive candidate
@@ -6563,9 +6856,16 @@ var Collision = __webpack_require__(8);
      * wrong body or past the array end on a later step; a reference cannot.
      *
      * Every per-body field this path writes (`_sPrev`, `_gsStamp`, `_ovD`,
-     * `_gridDynamic`, `_sc*`) is pre-declared in `Body.create`; see the rule
-     * there before introducing a new one (a lazily added field splits body
-     * hidden classes and slows the whole engine, measured 1.3-4.8x).
+     * `_gridDynamic`, `_sc*`, `_s*` index membership) is pre-declared in
+     * `Body.create`; see the rule there before introducing a new one (a lazily
+     * added field splits body hidden classes and slows the whole engine,
+     * measured 1.3-4.8x).
+     *
+     * Because that state lives on the BODY rather than on the detector, a body
+     * belongs to one gridStatic detector at a time. Sharing bodies between two
+     * engines was already unsupported here (the candidate cache and the
+     * broadphase stamps have the same constraint); the static index membership
+     * simply makes it explicit.
      * @private
      * @method _collisionsGridStatic
      * @param {detector} detector
@@ -6589,9 +6889,18 @@ var Collision = __webpack_require__(8);
         if (!g) {
             g = detector._sgrid = {
                 // static index: an open-addressing cell table (see
-                // _createCellTable) whose used list holds BUCKET REFERENCES so
-                // the rebuild reset loop clears them without any table lookups
-                sTable: Detector._createCellTable(), sUsed: [], sOver: [], sFlat: [],
+                // _createCellTable) holding body REFERENCES per cell, kept in
+                // world order, and maintained as a difference across steps
+                // (see _staticIndexApply) rather than rebuilt
+                sTable: Detector._createCellTable(), sOver: [], sFlat: [],
+                // every body currently in the index, so a departure from the
+                // world (which no per-body flag can report) is found by
+                // scanning for a stale walk stamp; plus this step's insertions
+                indexed: [], pendingAdd: [], walkStamp: 0,
+                // sFlat is the flat list of non-oversized statics that only an
+                // OVERSIZED MOVER reads, so it is rebuilt lazily, on the rare
+                // steps one exists, instead of maintained on every change
+                sFlatValid: false,
                 movers: [], stamp: 1, built: false, indexedStaticCount: -1,
                 // classification cache: the movers list and static count are
                 // only recomputed when the body set or any body's
@@ -6661,6 +6970,14 @@ var Collision = __webpack_require__(8);
             movers.length = 0;
             staticCount = 0;
 
+            // this walk is also where the static index learns what changed, so
+            // it stamps every body it sees. A body still in the index whose
+            // stamp is stale on the next pass has LEFT the world, which is the
+            // one kind of change no per-body flag can report
+            var walkStamp = ++g.walkStamp,
+                pendingAdd = g.pendingAdd;
+            pendingAdd.length = 0;
+
             for (i = 0; i < n; i++) {
                 var body = bodies[i],
                     // a body tagged `_gridDynamic` (e.g. an inner-scroll surface
@@ -6668,84 +6985,95 @@ var Collision = __webpack_require__(8);
                     // it is re-bucketed every step and never goes stale in the
                     // static index
                     isStaticNow = (body.isStatic || body.isSleeping) && body._gridDynamic !== true;
+
+                body._sWalk = walkStamp;
+                body._sWorldIndex = i;
+
+                // removed from the world and added back before this walk ran,
+                // so it is still indexed but may now sit at a different place in
+                // the body array. Drop it from the index and let the pass below
+                // re-insert it at its new position, or bucket order would no
+                // longer match the order a full rebuild produces
+                if (body._sDeparted) {
+                    body._sDeparted = false;
+                    if (body._sIndexed) {
+                        Detector._staticIndexRemove(g, body);
+                        staticDirty = true;
+                    }
+                }
+
                 if (body._sPrev !== isStaticNow) {
                     body._sPrev = isStaticNow;
                     staticDirty = true;
                 }
+
                 if (isStaticNow) {
                     staticCount++;
+                    if (!body._sIndexed) {
+                        pendingAdd.push(body);
+                        staticDirty = true;
+                    }
                 } else {
                     movers.push(i);
+                    if (body._sIndexed) {
+                        // released into a mover: unindex it here, so the apply
+                        // pass below never has to walk the membership list
+                        // looking for it
+                        Detector._staticIndexRemove(g, body);
+                        staticDirty = true;
+                    }
                 }
             }
 
             g.staticCount = staticCount;
+
+            // A change in static count means a static body was added to or
+            // removed from the world (windowing add/remove, etc.). A removal is
+            // invisible to every per-body flag above, so the count is what says
+            // the indexed list needs re-scanning for departures.
+            if (staticCount !== g.indexedStaticCount) {
+                staticDirty = true;
+            }
         }
 
-        // A change in static count means a static body was added to or removed
-        // from the world (windowing add/remove, etc.). The _sPrev check cannot
-        // see a body that has LEFT detector.bodies, so this count guards against
-        // a stale index entry for a removed static. Dynamic churn (bullets,
-        // debris, shatter children) does not change the static count, so normal
-        // play does not force a needless rebuild.
-        if (staticCount !== g.indexedStaticCount) {
-            staticDirty = true;
+        // 2) maintain the persistent static index.
+        //
+        // The index is only ever WRONG for the statics that actually changed:
+        // one released tile, one windowed add or remove. Everything else sits in
+        // exactly the buckets it was already in. So instead of clearing every
+        // bucket and re-filling it from a full walk of the world, apply just the
+        // difference.
+        //
+        // This is what makes destruction affordable. A full rebuild is triggered
+        // by ANY static membership change, which on a page being actively
+        // destroyed is EVERY step, and it costs a cell-span computation plus a
+        // hash and probe of a table far larger than L2 for every (static, cell)
+        // pair in the world. Measured on `bench/profile-churn.js` it was 781us
+        // of a 1427us step, with the answer already correct for 99.8% of the
+        // statics it recomputed.
+        //
+        // Bucket contents stay in `detector.bodies` order (the order a full
+        // rebuild produces, and so the candidate emission order the simulation
+        // is baselined on) because inserts go in at the position given by
+        // `_sWorldIndex`, restamped for every body by the classification walk
+        // above whenever the body array can have changed. Removals splice, which
+        // preserves the order of what remains.
+        if (staticDirty && !g.built) {
+            Detector._staticIndexRebuild(g, bodies, n, cellSize, invCell, maxCells);
+        } else if (staticDirty) {
+            Detector._staticIndexApply(g, cellSize, invCell, maxCells, staticCount);
+
+            // Safety net. `indexed` should hold exactly the bodies counted as
+            // static by the walk above; if the two ever disagree, some mutation
+            // reached the world by a route this pass cannot see, so fall back to
+            // a full rebuild on the next step rather than querying a wrong
+            // index (which would silently drop collisions).
+            if (g.indexed.length !== staticCount) {
+                g.built = false;
+            }
         }
 
-        // 2) (re)build the persistent static index only when membership changed
-        if (staticDirty) {
-            var sTable = g.sTable,
-                sUsed = g.sUsed,
-                sUsedLength = sUsed.length;
-            for (u = 0; u < sUsedLength; u++) {
-                sUsed[u].length = 0;
-            }
-            sUsed.length = 0;
-            g.sOver.length = 0;
-            // flat list of non-oversized statics, rebuilt with the index. An
-            // oversized mover scans this instead of walking its (unbounded)
-            // cell span; see the candidate-generation pass below.
-            g.sFlat.length = 0;
-            for (i = 0; i < n; i++) {
-                var sb = bodies[i];
-                if (!(sb.isStatic || sb.isSleeping) || sb._gridDynamic === true) {
-                    continue;
-                }
-                var sBounds = sb.bounds,
-                    scx0 = Math.floor(sBounds.min.x * invCell),
-                    scx1 = Math.floor(sBounds.max.x * invCell),
-                    scy0 = Math.floor(sBounds.min.y * invCell),
-                    scy1 = Math.floor(sBounds.max.y * invCell);
-                if ((scx1 - scx0 + 1) * (scy1 - scy0 + 1) > maxCells) {
-                    g.sOver.push(sb);
-                    continue;
-                }
-                g.sFlat.push(sb);
-                for (cx = scx0; cx <= scx1; cx++) {
-                    var sKeyX = (cx + keyOffset) * keyStride,
-                        sCxOffset = cx + keyOffset;
-                    for (cy = scy0; cy <= scy1; cy++) {
-                        key = sKeyX + (cy + keyOffset);
-                        var sBucket = cellGetOrCreate(sTable, key, cellHash(sCxOffset, cy + keyOffset));
-                        if (sBucket.length === 0) {
-                            sUsed.push(sBucket);
-                        }
-                        // store the body reference, not its index into
-                        // detector.bodies: the static index persists across
-                        // steps, but Matter re-slices detector.bodies on
-                        // world.isModified (add/remove of ANY body), which
-                        // reorders/shrinks the array. The dirty-check only
-                        // rebuilds on static-membership changes, so a stored
-                        // index can dangle into a shifted array (or past its
-                        // end) and read undefined. A body ref stays valid.
-                        sBucket.push(sb);
-                    }
-                }
-            }
-            g.built = true;
-            g.indexedStaticCount = staticCount;
-            g.epoch += 1;
-        }
+        g.indexedStaticCount = staticCount;
 
         // 3) rebuild the mover cell index each step.
         //
@@ -6908,8 +7236,24 @@ var Collision = __webpack_require__(8);
         var sOver = g.sOver,
             sOverLength = sOver.length,
             sFlat = g.sFlat,
-            sFlatLength = sFlat.length,
             dOverLength = dOver.length;
+
+        // sFlat is read by nothing but the oversized-mover branch below, so it
+        // is built here, only on a step that actually has one, rather than
+        // being kept in sync by every index change. It is built in body order,
+        // which is the order the branch needs
+        if (dOverLength > 0 && !g.sFlatValid) {
+            sFlat.length = 0;
+            for (i = 0; i < n; i++) {
+                var flatBody = bodies[i];
+                if (flatBody._sIndexed && flatBody._sBuckets.length > 0) {
+                    sFlat.push(flatBody);
+                }
+            }
+            g.sFlatValid = true;
+        }
+
+        var sFlatLength = sFlat.length;
         for (var mGen = 0; mGen < moversLength; mGen++) {
             var mBoundsBase = mGen * 4,
                 m = bodies[movers[mGen]],
@@ -9726,6 +10070,18 @@ var Common = __webpack_require__(0);
         pairs.collisionStart.length = 0;
         pairs.collisionActive.length = 0;
         pairs.collisionEnd.length = 0;
+
+        // solver scratch hung off the container by Resolver.preSolvePosition /
+        // postSolvePosition. Clearing the pairs means the solver is starting
+        // over, so it must not keep holding bodies from the previous world
+        if (pairs._impulseCarry) {
+            pairs._impulseCarry.length = 0;
+        }
+
+        if (pairs._solverBodies) {
+            pairs._solverBodies.length = 0;
+        }
+
         return pairs;
     };
 

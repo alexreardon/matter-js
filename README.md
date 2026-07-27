@@ -36,6 +36,16 @@ What changed, and the rough benefit:
   movers when sleeping is disabled. Another -24% whole-step on the 5000-static
   game regime, and the win grows with page size (-19% at 2000 statics, -36% at
   8000) because what was removed scaled with body count.
+- **The static index is maintained, not rebuilt.** A full rebuild fired on ANY
+  static membership change: one tile released, one body windowed in or out. On a
+  scene being actively destroyed that is every step, recomputing an answer that
+  was already correct for 99.8% of the statics it walked. Changes are now applied
+  as a difference (`Detector._staticIndexInsert` / `_staticIndexRemove`), with a
+  full rebuild only on the first step and on a cell-size change. Bucket contents
+  stay in world order, so candidate emission order is unchanged and the
+  simulation is bit-identical. **-45% whole-step** on a sustained
+  release-and-remove workload (`bench/profile-churn.js`), neutral on steady
+  scenes, which had no rebuilds to skip.
 - **Flat data in the hot loops.** The mover cell index is a direct-addressed
   array of chain heads rather than a hash table (it is rebuilt every step, so
   per-insert cost dominates), candidate bounds and dedup stamps live in typed
@@ -66,6 +76,15 @@ What changed, and the rough benefit:
   - `pair.id` is a number rather than a string, and `pairs` carries a
     direct-mapped collision record cache alongside its `table`. `Pairs.update`
     now clears `collision.pair` when it drops a pair.
+  - A body removed from a composite has its `positionImpulse` cleared. The
+    resolver keeps a carry list of bodies whose warmed impulse is still
+    decaying, and nothing otherwise told it when a body left the world, so a
+    removed body went on having its vertices translated for dozens of steps.
+    Stock's all-bodies pass never touched an out-of-world body, so this restores
+    that behaviour rather than changing it.
+  - A body belongs to one `gridStatic` detector at a time: its static-index
+    membership lives on the body, as the broadphase stamps and candidate cache
+    already did.
 - **Correctness gates.** A tiered determinism spec (`test/Determinism.spec.js`)
   pins settle scenes within a tight epsilon and holds chaotic scenes to physical
   invariants, alongside upstream's example suite. The simulation is
