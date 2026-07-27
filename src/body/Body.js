@@ -129,7 +129,24 @@ var Axes = require('../geometry/Axes');
             // the candidate bounds captured alongside _scList, so the per-step
             // test loop reads contiguous memory instead of dereferencing every
             // candidate's bounds objects
-            _scBounds: null
+            _scBounds: null,
+            // gridStatic static-index membership (see
+            // Detector._staticIndexInsert). _sBuckets holds the cell buckets
+            // this body's reference sits in, so it can be removed from them
+            // without recomputing anything; an EMPTY array means an oversized
+            // static, which occupies no cells. _sIndexed is whether it is in
+            // the index at all, _sWalk the stamp of the last classification
+            // walk that saw it (a stale stamp means it has left the world),
+            // _sWorldIndex its position in that walk, which is the sort key
+            // that keeps bucket contents in world order, and _sDeparted a
+            // one-shot set by Composite.removeBody so a body removed and
+            // re-added within a single step is re-indexed at its new position
+            _sBuckets: null,
+            _sIndexed: false,
+            _sIndexedAt: -1,
+            _sWalk: 0,
+            _sWorldIndex: 0,
+            _sDeparted: false
         };
 
         var body = Common.extend(defaults, options);
