@@ -25,7 +25,17 @@ function build() {
     const tiles = [];
     for (let r = 0; r < 70; r++) {
         for (let c = 0; c < 80; c++) {
-            const b = Bodies.rectangle(20 + c * 16, 20 + r * 16, 15, 15, { isStatic: true });
+            // built DYNAMIC and then made static, NOT born static. Body.setStatic
+            // only captures the mass and inertia it has to restore (`_original`)
+            // on the dynamic -> static transition, so releasing a born-static
+            // body leaves mass at Infinity, the solver divides by a zero inverse
+            // mass, and every released tile goes NaN within a few steps. This
+            // bench did exactly that until 2026-07-27: all 1200 released bodies
+            // were NaN, they were bucketed into no cells (a NaN cell span
+            // iterates zero times) so they generated no candidates, and the
+            // eviction below never fired because NaN fails every comparison.
+            const b = Bodies.rectangle(20 + c * 16, 20 + r * 16, 15, 15);
+            Body.setStatic(b, true);
             Composite.add(world, b);
             tiles.push(b);
         }
@@ -76,6 +86,28 @@ for (let f = 0; f < TOTAL_FRAMES; f++) {
     perFrame.push((hr() - t) / 1e3);
 }
 
+// Guard, because this bench shipped for months measuring a scene whose every
+// released body was NaN, and nothing in its output said so. A non-finite body
+// is bucketed into no cells and collides with nothing, so the numbers look
+// plausible while measuring almost none of the intended work.
+let nonFinite = 0;
+let liveMovers = 0;
+const finalBodies = Composite.allBodies(world);
+for (let i = 0; i < finalBodies.length; i++) {
+    const body = finalBodies[i];
+    if (body.isStatic) {
+        continue;
+    }
+    liveMovers++;
+    if (!Number.isFinite(body.position.x) || !Number.isFinite(body.position.y)) {
+        nonFinite++;
+    }
+}
+if (nonFinite > 0) {
+    console.error(`FAIL: ${nonFinite}/${liveMovers} movers are non-finite; these timings are meaningless`);
+    process.exitCode = 1;
+}
+
 function stats(arr) {
     const s = arr.slice().sort((a, b) => a - b);
     const sum = arr.reduce((a, b) => a + b, 0);
@@ -87,7 +119,7 @@ const burst = phase(0, BURST_FRAMES);
 const settle = phase(BURST_FRAMES, TOTAL_FRAMES);
 const overall = phase(0, TOTAL_FRAMES);
 console.log(
-    `mode=${MODE} cell=${CELL} released=${released} maxBodies=${maxBodies}\n` +
+    `mode=${MODE} cell=${CELL} released=${released} maxBodies=${maxBodies} liveMovers=${liveMovers} nonFinite=${nonFinite}\n` +
     `  burst  (0-${BURST_FRAMES})   avg ${burst.avg.toFixed(0).padStart(4)} us  max ${burst.max.toFixed(0).padStart(4)} us\n` +
     `  settle (${BURST_FRAMES}-${TOTAL_FRAMES}) avg ${settle.avg.toFixed(0).padStart(4)} us  max ${settle.max.toFixed(0).padStart(4)} us\n` +
     `  overall          avg ${overall.avg.toFixed(0).padStart(4)} us  max ${overall.max.toFixed(0).padStart(4)} us`
