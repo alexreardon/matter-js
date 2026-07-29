@@ -6,7 +6,7 @@
 // consumer get by taking the fork instead of stock `matter-js@0.20.0`? It runs a
 // fixed set of scenarios, half of them ordinary matter workloads (so a
 // regression outside the target regime is visible) and half of them the
-// page-destroyer regime the fork is tuned for.
+// Page Rage regime the fork is tuned for.
 //
 // Three arms per scenario, all in one process against identical scenes, timed in
 // alternating short blocks (the `bench/ab-inline.js` method: interference has to
@@ -395,7 +395,7 @@ const scenarios = [
     {
         key: 'page-calm',
         title: 'Page, calm',
-        group: 'Page destroyer',
+        group: 'Page Rage',
         note: '5000 static tiles, 300 settled debris (the traversal regime)',
         warmup: 600,
         blockUpdates: 10,
@@ -406,7 +406,7 @@ const scenarios = [
     {
         key: 'page-settle',
         title: 'Page, debris raining',
-        group: 'Page destroyer',
+        group: 'Page Rage',
         note: '5000 static tiles, 300 debris falling and piling',
         warmup: 240,
         blockUpdates: 10,
@@ -417,7 +417,7 @@ const scenarios = [
     {
         key: 'page-firing',
         title: 'Page, firing',
-        group: 'Page destroyer',
+        group: 'Page Rage',
         note: 'calm page plus 8 fast sensor bullets streaking through the field',
         warmup: 600,
         blockUpdates: 10,
@@ -428,7 +428,7 @@ const scenarios = [
     {
         key: 'page-storm',
         title: 'Page, 800-mover storm',
-        group: 'Page destroyer',
+        group: 'Page Rage',
         note: '5000 static tiles with 800 debris bodies in flight',
         warmup: 300,
         blockUpdates: 10,
@@ -439,7 +439,7 @@ const scenarios = [
     {
         key: 'page-churn',
         title: 'Page, being destroyed',
-        group: 'Page destroyer',
+        group: 'Page Rage',
         note: '12 tiles released, evicted and replaced every frame, so every cached body set is invalidated every step',
         warmup: 240,
         blockUpdates: 10,
@@ -450,7 +450,7 @@ const scenarios = [
     {
         key: 'page-2k',
         title: 'Page, calm (2000 tiles)',
-        group: 'Page destroyer',
+        group: 'Page Rage',
         note: 'the calm page at a smaller page size',
         warmup: 600,
         blockUpdates: 10,
@@ -461,7 +461,7 @@ const scenarios = [
     {
         key: 'page-8k',
         title: 'Page, calm (8000 tiles)',
-        group: 'Page destroyer',
+        group: 'Page Rage',
         note: 'the calm page at a larger page size',
         warmup: 600,
         blockUpdates: 10,
@@ -696,29 +696,37 @@ function formatPercent(value) {
     return sign + value.toFixed(0) + '%';
 }
 
-// each fork column carries its own delta against upstream, so the two of them
-// can be read independently rather than through a single shared change column
-function formatAgainst(value, baseline, unit) {
-    return '(' + value.toFixed(unit === 'us' ? 0 : 1) + unit + ') **' +
-        formatPercent(100 * (value - baseline) / baseline) + '**';
+// every figure is its own code span, and each fork column carries its own delta
+// against upstream, so the two of them can be read independently rather than
+// through a single shared change column
+function figure(value) {
+    return '`' + value + '`';
 }
+
+function formatAgainst(value, baseline, unit) {
+    return figure(value.toFixed(unit === 'us' ? 0 : 1) + unit) +
+        ' (' + figure(formatPercent(100 * (value - baseline) / baseline)) + ')';
+}
+
+const GROUP_LINKS = { 'Page Rage': 'https://page-rage.com' };
 
 function buildTable(rows) {
     const lines = [];
-    lines.push('| Scenario | Bodies | Upstream ' + BASELINE_REF + ' | Fork | Fork (new gridStatic algorithm) |');
+    lines.push('| Scenario | Bodies | Upstream ' + figure(BASELINE_REF) + ' | Fork | Fork (new gridStatic algorithm) |');
     lines.push('| --- | --- | --- | --- | --- |');
     let group = null;
     for (const row of rows) {
         if (row.group !== group) {
             group = row.group;
-            lines.push('| **' + group + '** | | | | |');
+            const label = GROUP_LINKS[group] ? '[' + group + '](' + GROUP_LINKS[group] + ')' : group;
+            lines.push('| **' + label + '** | | | | |');
         }
         const upstream = row.results.find(result => result.key === 'upstream');
         const forkSweep = row.results.find(result => result.key === 'fork-sweep');
         const forkGrid = row.results.find(result => result.key === 'fork-grid');
         lines.push('| ' + row.title +
-            ' | ' + row.bodies.toLocaleString('en-US') +
-            ' | ' + upstream.best.toFixed(0) + 'us' +
+            ' | ' + figure(row.bodies.toLocaleString('en-US')) +
+            ' | ' + figure(upstream.best.toFixed(0) + 'us') +
             ' | ' + formatAgainst(forkSweep.best, upstream.best, 'us') +
             ' | ' + formatAgainst(forkGrid.best, upstream.best, 'us') + ' |');
     }
@@ -732,14 +740,14 @@ function formatAllocRow(row) {
         return { upstream: 'n/a', fork: 'n/a' };
     }
     return {
-        upstream: (upstream.bytesPerStep / 1024).toFixed(1) + ' KB',
+        upstream: figure((upstream.bytesPerStep / 1024).toFixed(1) + ' KB'),
         fork: formatAgainst(forkGrid.bytesPerStep / 1024, upstream.bytesPerStep / 1024, ' KB')
     };
 }
 
 function buildAllocTable(rows) {
     const lines = [];
-    lines.push('| Scenario | Upstream ' + BASELINE_REF + ' | Fork (new gridStatic algorithm) |');
+    lines.push('| Scenario | Upstream ' + figure(BASELINE_REF) + ' | Fork (new gridStatic algorithm) |');
     lines.push('| --- | --- | --- |');
     for (const row of rows) {
         const cells = formatAllocRow(row);
@@ -876,7 +884,7 @@ if (allocArg) {
             allocRows.push(row);
             const cells = formatAllocRow(row);
             const dirty = row.results.filter(result => result.windows < ALLOC_WINDOWS);
-            console.log(' ' + cells.upstream.padStart(9) + ' -> ' + cells.fork.replace(/\*\*/g, '') +
+            console.log(' ' + cells.upstream.replace(/`/g, '').padStart(9) + ' -> ' + cells.fork.replace(/`/g, '') +
                 (dirty.length > 0 ? '  (' + dirty.map(result => result.key + ': ' + result.windows + '/' + ALLOC_WINDOWS + ' clean windows').join(', ') + ')' : ''));
         }
         console.log('');
