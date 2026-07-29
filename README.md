@@ -13,6 +13,113 @@ dormant, so the work lives here. Consumed as release-tag tarballs
 (`v0.20.0-perfN`); the built `build/matter.js` bundle is committed so installs
 need no build step.
 
+### Performance benchmarks
+
+Simulation time
+
+> Time to run one `Engine.update`, so lower is faster
+
+| Scenario | Bodies | Upstream 0.20.0 | Fork | Fork (new gridStatic algorithm) |
+| --- | --- | --- | --- | --- |
+| **General** | | | | |
+| Box stack settling | 339 | 297us | (213us) **-28%** | (239us) **-19%** |
+| Mixed shapes pile | 303 | 1053us | (881us) **-16%** | (932us) **-11%** |
+| Constraint chains | 315 | 341us | (278us) **-18%** | (290us) **-15%** |
+| Sleeping enabled | 403 | 375us | (274us) **-27%** | (310us) **-17%** |
+| Moving static platforms | 319 | 516us | (394us) **-24%** | (428us) **-17%** |
+| **Page destroyer** | | | | |
+| Page, calm | 5,303 | 2514us | (1412us) **-44%** | (555us) **-78%** |
+| Page, debris raining | 5,303 | 2466us | (1382us) **-44%** | (530us) **-78%** |
+| Page, firing | 5,311 | 2563us | (1459us) **-43%** | (594us) **-77%** |
+| Page, 800-mover storm | 5,803 | 4808us | (3083us) **-36%** | (1811us) **-62%** |
+| Page, being destroyed | 5,003 | 6073us | (5087us) **-16%** | (2023us) **-67%** |
+| Page, calm (2000 tiles) | 2,303 | 1033us | (692us) **-33%** | (484us) **-53%** |
+| Page, calm (8000 tiles) | 8,303 | 4135us | (2379us) **-42%** | (588us) **-86%** |
+
+Memory usage
+
+> Lower memory usage avoids simulation being interrupted by garbage collector
+
+| Scenario | Upstream 0.20.0 | Fork (new gridStatic algorithm) |
+| --- | --- | --- |
+| Box stack settling | 35.8 KB | (2.8 KB) **-92%** |
+| Mixed shapes pile | 86.6 KB | (14.4 KB) **-83%** |
+| Constraint chains | 193.9 KB | (151.1 KB) **-22%** |
+| Sleeping enabled | 46.4 KB | (11.0 KB) **-76%** |
+| Moving static platforms | 89.3 KB | (38.1 KB) **-57%** |
+| Page, calm | 127.6 KB | (5.2 KB) **-96%** |
+| Page, debris raining | 127.2 KB | (10.3 KB) **-92%** |
+| Page, firing | 142.0 KB | (14.8 KB) **-90%** |
+| Page, 800-mover storm | 288.7 KB | (40.3 KB) **-86%** |
+| Page, being destroyed | 1283.8 KB | (364.3 KB) **-72%** |
+| Page, calm (2000 tiles) | 87.4 KB | (6.4 KB) **-93%** |
+| Page, calm (8000 tiles) | 161.7 KB | (6.6 KB) **-96%** |
+
+<details>
+<summary>How these are measured, and what they say</summary>
+
+`npm run bench-suite` runs [`bench/suite.js`](bench/suite.js), which times this
+fork against stock `matter-js@0.20.0` on a fixed set of scenes. Both trees run in
+one process against identical worlds, in alternating timed blocks, one process
+per scenario; the stock baseline is provisioned automatically as a git worktree
+of the `0.20.0` tag. There are three arms, so the broadphase stays separable from
+the rest of the work: upstream, this fork held to upstream's own sweep
+broadphase, and this fork as it ships (`Detector._mode = 'gridStatic'`).
+
+Simulation time is microseconds per `Engine.update`, the mean of the fastest
+fifth of 24 timed blocks per arm, best of three separate processes, on an Apple
+M1 Pro under Node 24. Three processes because interleaving removes interference
+landing inside a block but not a whole process that ran hot: one arm read 35%
+above its own reading in neighbouring runs. Memory usage
+is heap growth per step measured across collection-free windows, so short-lived
+garbage counts rather than only what survives (`npm run bench-suite -- --alloc`).
+
+The general scenes are a few hundred dynamic bodies with almost no static field,
+which is what most matter scenes are; they are in the suite to catch a regression
+outside the regime this fork targets. The page scenes are that regime: a dense
+static field with debris moving through it, calm, under a storm, and being
+actively destroyed. The two trees are deterministic but re-baselined against each
+other, so their scenes drift apart over a run; each scenario warms up until it
+has settled, otherwise the arms are timed doing genuinely different amounts of
+work.
+
+Three things the tables say:
+
+- The win grows with the size of the static field: -53% at 2000 tiles, -78% at
+  5000, -86% at 8000. Most of what the fork removed scaled with body count.
+- `gridStatic` costs 4-13% on the general scenes, which have no static field
+  worth skipping, and is worth a further 1.4x to 4x on a page (compare the two
+  fork columns). That is why it stays opt-in rather than becoming the default.
+- The narrowest wins are the scenes dominated by work the fork did not change:
+  contact solving in the 800-mover storm, and `Body.create` in the scene that
+  builds new bodies every frame.
+
+</details>
+
+### The gridStatic broadphase
+
+Statics are bucketed into a uniform grid once and the index is kept up to date
+as bodies come and go. Each step only movers are re-bucketed, and only movers
+generate candidate pairs, so the static field is never tested against itself.
+Sweep, by contrast, re-sorts every body every step to rediscover that 5000 tiles
+have not moved.
+
+It exists because per-step cost then scales with the number of MOVING bodies
+rather than with total body count, which is the difference between a shattered
+web page being playable and not. It suits any scene that is mostly static
+scenery: tile maps, level geometry, destructible terrain. On a scene with few
+statics there is nothing to skip and the bookkeeping costs 4-13%, which is why
+it is opt-in rather than the default.
+
+```js
+Matter.Detector._mode = 'gridStatic';
+// optional, defaults to 32; tune to roughly your typical static body size
+Matter.Detector._cellSize = 32;
+
+// a static body that MOVES must be tagged, or the grid will not re-index it
+Matter.Detector.setGridDynamic(body, true);
+```
+
 ### What changed
 
 Benefit is the change in whole-step time (`Engine.update`) on the fork's benches
@@ -70,8 +177,8 @@ and docs) see the [upstream matter-js readme](https://github.com/liabru/matter-j
 
 ## License
 
-Matter.js is licensed under [The MIT License (MIT)](https://opensource.org/licenses/MIT)  
+Matter.js is licensed under [The MIT License (MIT)](https://opensource.org/licenses/MIT)
 Copyright (c) Liam Brummitt and contributors.
 
-This license is also supplied with the release and source code.  
+This license is also supplied with the release and source code.
 As stated in the license, absolutely no warranty is provided.
