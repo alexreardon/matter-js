@@ -735,23 +735,27 @@ function buildTable(rows) {
 
 function formatAllocRow(row) {
     const upstream = row.results.find(result => result.key === 'upstream');
+    const forkSweep = row.results.find(result => result.key === 'fork-sweep');
     const forkGrid = row.results.find(result => result.key === 'fork-grid');
-    if (upstream.bytesPerStep === null || forkGrid.bytesPerStep === null) {
-        return { upstream: 'n/a', fork: 'n/a' };
+    const measured = [upstream, forkSweep, forkGrid].every(result => result.bytesPerStep !== null);
+    if (!measured) {
+        return { upstream: 'n/a', forkSweep: 'n/a', forkGrid: 'n/a' };
     }
+    const baseline = upstream.bytesPerStep / 1024;
     return {
-        upstream: figure((upstream.bytesPerStep / 1024).toFixed(1) + ' KB'),
-        fork: formatAgainst(forkGrid.bytesPerStep / 1024, upstream.bytesPerStep / 1024, ' KB')
+        upstream: figure(baseline.toFixed(1) + ' KB'),
+        forkSweep: formatAgainst(forkSweep.bytesPerStep / 1024, baseline, ' KB'),
+        forkGrid: formatAgainst(forkGrid.bytesPerStep / 1024, baseline, ' KB')
     };
 }
 
 function buildAllocTable(rows) {
     const lines = [];
-    lines.push('| Scenario | Upstream ' + figure(BASELINE_REF) + ' | Fork (new gridStatic algorithm) |');
-    lines.push('| --- | --- | --- |');
+    lines.push('| Scenario | Upstream ' + figure(BASELINE_REF) + ' | Fork | Fork (new gridStatic algorithm) |');
+    lines.push('| --- | --- | --- | --- |');
     for (const row of rows) {
         const cells = formatAllocRow(row);
-        lines.push('| ' + row.title + ' | ' + cells.upstream + ' | ' + cells.fork + ' |');
+        lines.push('| ' + row.title + ' | ' + cells.upstream + ' | ' + cells.forkSweep + ' | ' + cells.forkGrid + ' |');
     }
     return lines.join('\n');
 }
@@ -768,6 +772,10 @@ const defaultBlocks = quick ? 9 : 24;
 const blocks = blocksArg ? Number(blocksArg.split('=')[1]) : defaultBlocks;
 const repeatsArg = args.find(arg => arg.startsWith('--repeats='));
 const repeats = repeatsArg ? Number(repeatsArg.split('=')[1]) : (quick ? 1 : 3);
+// `--alloc-only` skips the timing pass, which is the long one: regenerating the
+// memory table alone does not need three timed processes per scenario
+const allocOnly = args.includes('--alloc-only');
+const wantAlloc = allocOnly || args.includes('--alloc');
 
 function findScenario(key) {
     const scenario = scenarios.find(entry => entry.key === key);
@@ -839,7 +847,7 @@ if (allocArg) {
     }
 
     const rows = [];
-    for (const scenario of selected) {
+    for (const scenario of (allocOnly ? [] : selected)) {
         process.stdout.write((scenario.key + ' ').padEnd(26, '.'));
         const runs = [];
         for (let repeat = 0; repeat < repeats; repeat++) {
@@ -860,16 +868,18 @@ if (allocArg) {
             (badArm ? '  NON-FINITE BODIES, RESULT INVALID' : ''));
     }
 
-    console.log('');
-    console.log(buildTable(rows));
-    console.log('');
-    console.log('Times are us per `Engine.update`, mean of the fastest fifth of blocks.');
-    for (const row of rows) {
-        const detail = row.results.map(result => result.label + ' median ' + result.median.toFixed(0) + 'us').join(', ');
-        console.log('  ' + row.key.padEnd(18) + row.bodies + ' bodies (' + row.movers + ' movers): ' + detail);
+    if (rows.length > 0) {
+        console.log('');
+        console.log(buildTable(rows));
+        console.log('');
+        console.log('Times are us per `Engine.update`, mean of the fastest fifth of blocks.');
+        for (const row of rows) {
+            const detail = row.results.map(result => result.label + ' median ' + result.median.toFixed(0) + 'us').join(', ');
+            console.log('  ' + row.key.padEnd(18) + row.bodies + ' bodies (' + row.movers + ' movers): ' + detail);
+        }
     }
 
-    if (args.includes('--alloc')) {
+    if (wantAlloc) {
         console.log('');
         console.log('allocation per step');
         const allocRows = [];
@@ -884,7 +894,8 @@ if (allocArg) {
             allocRows.push(row);
             const cells = formatAllocRow(row);
             const dirty = row.results.filter(result => result.windows < ALLOC_WINDOWS);
-            console.log(' ' + cells.upstream.replace(/`/g, '').padStart(9) + ' -> ' + cells.fork.replace(/`/g, '') +
+            console.log(' ' + cells.upstream.replace(/`/g, '').padStart(9) + ' -> ' +
+                cells.forkSweep.replace(/`/g, '') + ' -> ' + cells.forkGrid.replace(/`/g, '') +
                 (dirty.length > 0 ? '  (' + dirty.map(result => result.key + ': ' + result.windows + '/' + ALLOC_WINDOWS + ' clean windows').join(', ') + ')' : ''));
         }
         console.log('');

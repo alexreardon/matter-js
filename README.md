@@ -41,20 +41,20 @@ Memory usage
 
 > Lower memory usage avoids simulation being interrupted by garbage collector
 
-| Scenario | Upstream `0.20.0` | Fork (new gridStatic algorithm) |
-| --- | --- | --- |
-| Box stack settling | `35.8 KB` | `2.8 KB` (`-92%`) |
-| Mixed shapes pile | `86.6 KB` | `14.4 KB` (`-83%`) |
-| Constraint chains | `193.9 KB` | `151.1 KB` (`-22%`) |
-| Sleeping enabled | `46.4 KB` | `11.0 KB` (`-76%`) |
-| Moving static platforms | `89.3 KB` | `38.1 KB` (`-57%`) |
-| Page, calm | `127.6 KB` | `5.2 KB` (`-96%`) |
-| Page, debris raining | `127.2 KB` | `10.3 KB` (`-92%`) |
-| Page, firing | `142.0 KB` | `14.8 KB` (`-90%`) |
-| Page, 800-mover storm | `288.7 KB` | `40.3 KB` (`-86%`) |
-| Page, being destroyed | `1283.8 KB` | `364.3 KB` (`-72%`) |
-| Page, calm (2000 tiles) | `87.4 KB` | `6.4 KB` (`-93%`) |
-| Page, calm (8000 tiles) | `161.7 KB` | `6.6 KB` (`-96%`) |
+| Scenario | Upstream `0.20.0` | Fork | Fork (new gridStatic algorithm) |
+| --- | --- | --- | --- |
+| Box stack settling | `35.8 KB` | `5.1 KB` (`-86%`) | `2.9 KB` (`-92%`) |
+| Mixed shapes pile | `84.6 KB` | `21.5 KB` (`-75%`) | `14.4 KB` (`-83%`) |
+| Constraint chains | `193.9 KB` | `167.5 KB` (`-14%`) | `151.1 KB` (`-22%`) |
+| Sleeping enabled | `46.4 KB` | `11.7 KB` (`-75%`) | `11.0 KB` (`-76%`) |
+| Moving static platforms | `89.1 KB` | `55.0 KB` (`-38%`) | `38.0 KB` (`-57%`) |
+| Page, calm | `133.0 KB` | `59.7 KB` (`-55%`) | `5.1 KB` (`-96%`) |
+| Page, debris raining | `127.2 KB` | `63.5 KB` (`-50%`) | `10.3 KB` (`-92%`) |
+| Page, firing | `135.9 KB` | `71.0 KB` (`-48%`) | `14.8 KB` (`-89%`) |
+| Page, 800-mover storm | `288.7 KB` | `116.7 KB` (`-60%`) | `40.4 KB` (`-86%`) |
+| Page, being destroyed | `1283.8 KB` | `1216.0 KB` (`-5%`) | `363.7 KB` (`-72%`) |
+| Page, calm (2000 tiles) | `87.7 KB` | `30.1 KB` (`-66%`) | `6.4 KB` (`-93%`) |
+| Page, calm (8000 tiles) | `160.1 KB` | `91.8 KB` (`-43%`) | `6.7 KB` (`-96%`) |
 
 <details>
 <summary>How these are measured, and what they say</summary>
