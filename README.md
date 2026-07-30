@@ -100,9 +100,9 @@ What the tables say:
 
 ## Compared to Rapier (Rust via WASM)
 
-The obvious question for a JS physics fork: why not swap the engine for [Rapier](https://rapier.rs/) and take the native-code win? Because a physics engine's step time is not the number a game pays. The renderer lives in JS, so every frame has to pull every dynamic body's position and rotation back across the WASM boundary, and gameplay that creates and destroys bodies crosses it again for every mutation.
+Why not swap the engine for [Rapier](https://rapier.rs/) and take the native-code win? Because step time is not the number a game pays. The renderer lives in JS, so every frame pulls every body's position and rotation back across the WASM boundary — and destruction gameplay crosses it again for every body added or removed.
 
-[`bench/vs-rapier.js`](bench/vs-rapier.js) runs the suite scenes on both engines with Rapier given its best case: the SIMD build (`@dimforge/rapier2d-simd-compat@0.19.3`), `lengthUnit` set per its pixel-world docs, cached body refs, and poses read into a preallocated `Float64Array`. Worlds are workload-identical — same seeded geometry and counts, matched gravity, damping and friction/restitution combine rules; output-identical is impossible across different solvers — and sleeping is off everywhere, because [Page Rage](https://page-rage.com) cannot use it (a slept body misses gameplay wakes and hangs in mid-air). Two Rapier arms separate physics from boundary: **step only** is `world.step()` alone, results left inside WASM memory — a ceiling no real game can run at; **+ readback** adds the per-frame pose readback a JS renderer cannot skip.
+[`bench/vs-rapier.js`](bench/vs-rapier.js) runs the suite scenes on both engines. Rapier gets its best case: the SIMD build, `lengthUnit` per its pixel-world docs, cached body refs, poses read into a preallocated `Float64Array`. Worlds are workload-identical (same seeded geometry, matched gravity, damping and combine rules) and sleeping is off everywhere, because [Page Rage](https://page-rage.com) cannot use it. **Step only** is `world.step()` alone — a ceiling no real game can run at. **+ readback** adds the per-frame readback a JS renderer cannot skip.
 
 Time for one step (lower is faster):
 
@@ -117,7 +117,7 @@ Time for one step (lower is faster):
 | Page, 800-mover storm | `5,803` | `4656us` | `1851us` (`-60%`) | `1050us` (`-77%`) | `1385us` (`-70%`) |
 | Page, being destroyed | `5,003` | `5799us` | `2103us` (`-64%`) | `1082us` (`-81%`) | `1303us` (`-78%`) |
 
-JS-heap growth per step. Rapier's step allocates almost nothing on the JS heap (its working memory is WASM-internal), so its readback column is pure bridge garbage — each `translation()` call materialises a fresh `{x, y}` through wasm-bindgen:
+Heap growth per step. Rapier's step barely touches the JS heap, so its readback column is pure bridge garbage — every `translation()` call materialises a fresh `{x, y}`:
 
 | Scenario | Upstream `0.20.0` | Fork (`gridStatic`) | Rapier (step only) | Rapier (+ readback) |
 | --- | --- | --- | --- | --- |
@@ -130,15 +130,15 @@ JS-heap growth per step. Rapier's step allocates almost nothing on the JS heap (
 
 What the tables say:
 
-- The bridge tax is linear and irreducible: `~0.4us` per body per frame (`+137us` for 336 bodies, `+335us` for 800), `+20-32%` on every scene. Rapier's JS API has no batched pose readback, so it is paid one `translation()` + `rotation()` call per body.
-- On the shipping regime (calm and firing pages) the bridge erases Rapier's edge over the fork: `531us` vs `567us` is a wash. Rapier keeps a real `25-38%` at peak load (storm, destruction).
-- With sleeping off, Rapier's solver is not uniformly faster than matter's: it loses the box stack outright (`+49%` before the bridge is even paid) and wins mixed shapes big (true circle colliders; matter's are polygons).
-- The readback garbage is the hidden cost: `~7.5MB/s` at 60fps on a calm page — the same order as upstream matter's *entire engine* and `~60x` the fork. Destruction is the one scene where Rapier allocates less than the fork, because body construction happens inside WASM.
+- The bridge tax is linear: `~0.4us` per body per frame, `+20-32%` on every scene. Rapier has no batched pose API, so it is paid one `translation()` + `rotation()` call per body.
+- On the calm and firing pages the bridge erases Rapier's edge over the fork: `531us` vs `567us` is a wash. Rapier keeps `25-38%` at peak load (storm, destruction).
+- With sleeping off, Rapier does not uniformly win the physics either: it loses the box stack outright and wins mixed shapes big (true circle colliders; matter's are polygons).
+- Readback garbage is the hidden cost: `~7.5MB/s` at 60fps on a calm page, `~60x` the fork. Destruction is the one scene where Rapier allocates less — bodies are built inside WASM.
 
 <details>
 <summary>What about sleeping?</summary>
 
-Sleeping is where Rapier's headline numbers come from: with it, the settled stack steps in `18us` instead of `462us` — and the bridge then costs `7x` the physics, because the dumb readback still visits 336 sleeping bodies (a sleep-aware bridge would use `forEachActiveRigidBody`). Running BOTH engines with sleeping on (`ALLOW_SLEEP=1 npm run bench-rapier`):
+Sleeping is where Rapier's headline numbers come from: the settled stack steps in `18us` instead of `462us` — and readback then costs `7x` the physics, still visiting 336 sleeping bodies. With sleeping on in both engines (`ALLOW_SLEEP=1 npm run bench-rapier`):
 
 | Scenario | Fork (`gridStatic`) | Rapier (step only) | Rapier (+ readback) | Asleep (fork vs rapier) |
 | --- | --- | --- | --- | --- |
@@ -149,18 +149,20 @@ Sleeping is where Rapier's headline numbers come from: with it, the settled stac
 | Box stack settling | `268us` | `18us` | `149us` | ⚠ `0` vs `336` — not comparable |
 | Mixed shapes pile | `24us` | `368us` | `492us` | ⚠ `300` vs `1` — not comparable |
 
-Sleeping helps both engines only where their (different) thresholds actually engage: matter cannot sleep a dense box stack at all (solver jitter stays above its threshold) while Rapier sleeps all of it; Rapier keeps rolling circles and the storm pile awake while matter sleeps them eagerly. On the clean rows, sleeping makes the fork `1.8x` faster and Rapier `3.3x` faster — and during destruction it buys neither engine anything. It also reproduced the mid-air-hang bug class on first contact: `Body.setVelocity` does not wake a sleeping body, so released tiles froze in place until the bench added an explicit `Sleeping.set(body, false)` on release. The scenes where sleeping would pay are exactly the scenes the game cannot run it in.
+Each engine sleeps different scenes: matter cannot sleep a dense stack (solver jitter stays above its threshold), Rapier will not sleep rolling circles or the storm pile. On the clean rows sleeping is worth `1.8x` to the fork and `3.3x` to Rapier — and nothing to either during destruction, where debris never lives long enough.
+
+It also reproduced the mid-air-hang bug on first contact: `Body.setVelocity` does not wake a sleeping body, so released tiles froze in place until the bench added `Sleeping.set(body, false)` on release. The scenes where sleeping pays are the scenes the game cannot run it in.
 
 </details>
 
 <details>
 <summary>How these are measured</summary>
 
-Same method as the suite above: four arms in one process on identical worlds, alternating timed blocks with rotating lead, mean of the fastest fifth of `24` blocks, best of three processes, Apple M1 Pro under Node 22. Cross-arm sanity per scenario: equal body counts, no non-finite positions, matching settle heights.
+Same method as the suite above: four arms in one process on identical worlds, alternating timed blocks, mean of the fastest fifth of `24` blocks, best of three processes, Apple M1 Pro under Node 22. Per-scenario sanity: equal body counts, no non-finite positions, matching settle heights.
 
-Rapier at 2D defaults (`numSolverIterations: 4` — a higher-quality TGS solver than matter's PGS; dropping it to `1` only saves `~4%`, so the gap is not a quality knob). Velocities and gravity are unit-converted so both engines integrate the same trajectories (`1000 px/s^2` gravity, matter `frictionAir: 0.01` ≙ Rapier damping `0.606`). Known impurity: 3 of 800 storm movers escape the bowl in the Rapier arms (`0.4%`, slightly flattering Rapier).
+Rapier runs its 2D defaults (`numSolverIterations: 4`, a higher-quality solver than matter's — dropping it to `1` saves only `~4%`, so the gap is not a quality knob). Gravity, damping and velocities are unit-converted so both engines integrate the same trajectories. Known impurity: 3 of 800 storm movers escape the bowl in the Rapier arms (`0.4%`, slightly flattering Rapier).
 
-Rapier is deliberately not a devDependency; to reproduce: `npm install --no-save @dimforge/rapier2d-simd-compat`, then `npm run bench-rapier` (add `--alloc` for the memory table).
+Rapier is not a devDependency. To reproduce: `npm install --no-save @dimforge/rapier2d-simd-compat`, then `npm run bench-rapier` (`--alloc` for the memory table).
 
 </details>
 
