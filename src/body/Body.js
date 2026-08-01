@@ -44,7 +44,7 @@ var Axes = require('../geometry/Axes');
             parts: [],
             plugin: {},
             angle: 0,
-            vertices: Vertices.fromPath('L 0 0 L 40 0 L 40 40 L 0 40'),
+            vertices: (options && options.vertices) || Vertices.fromPath('L 0 0 L 40 0 L 40 40 L 0 40'),
             position: { x: 0, y: 0 },
             force: { x: 0, y: 0 },
             torque: 0,
@@ -189,6 +189,11 @@ var Axes = require('../geometry/Axes');
      * @param {body} body
      * @param {} [options]
      */
+    // Hoisted out of `_initProperties`: it allocated a fresh five element array per body created.
+    // The `Common.choose` call site is unchanged, so the RNG stream and the chosen colours are
+    // identical.
+    var _defaultFillStyles = ['#f19648', '#f5d259', '#f55a3c', '#063e7b', '#ececd1'];
+
     var _initProperties = function(body, options) {
         options = options || {};
 
@@ -217,7 +222,7 @@ var Axes = require('../geometry/Axes');
         });
 
         // render properties
-        var defaultFillStyle = (body.isStatic ? '#14151f' : Common.choose(['#f19648', '#f5d259', '#f55a3c', '#063e7b', '#ececd1'])),
+        var defaultFillStyle = (body.isStatic ? '#14151f' : Common.choose(_defaultFillStyles)),
             defaultStrokeStyle = body.isStatic ? '#555' : '#ccc',
             defaultLineWidth = body.isStatic && body.render.fillStyle === null ? 1 : 0;
         body.render.fillStyle = body.render.fillStyle || defaultFillStyle;

@@ -36,20 +36,37 @@ var Vector = require('../geometry/Vector');
     Bodies.rectangle = function(x, y, width, height, options) {
         options = options || {};
 
+        // The four corners built directly. This used to concatenate an SVG-ish path string and parse
+        // it back with a global regex (`Vertices.fromPath`), for a rectangle whose corners are
+        // already known numbers. It is also strictly more correct: the path pattern's `[-\d.e]+`
+        // class omits `+`, so any dimension `String()` renders in exponent form (`1e+21`) parsed to
+        // NaN and produced a NaN body.
         var rectangle = { 
             label: 'Rectangle Body',
             position: { x: x, y: y },
-            vertices: Vertices.fromPath('L 0 0 L ' + width + ' 0 L ' + width + ' ' + height + ' L 0 ' + height)
+            vertices: [
+                { x: 0, y: 0 },
+                { x: width, y: 0 },
+                { x: width, y: height },
+                { x: 0, y: height }
+            ]
         };
 
         if (options.chamfer) {
             var chamfer = options.chamfer;
-            rectangle.vertices = Vertices.chamfer(rectangle.vertices, chamfer.radius, 
+            rectangle.vertices = Vertices.chamfer(Vertices.create(rectangle.vertices, null), chamfer.radius, 
                 chamfer.quality, chamfer.qualityMin, chamfer.qualityMax);
             delete options.chamfer;
         }
 
-        return Body.create(Common.extend({}, rectangle, options));
+        // Shallow merge, not `Common.extend`: `Body.create` deep-merges these into its own fresh
+        // defaults regardless, so the outer deep clone only ever built garbage. Nothing here can
+        // alias the caller's nested objects for the same reason.
+        for (var prop in options) {
+            rectangle[prop] = options[prop];
+        }
+
+        return Body.create(rectangle);
     };
     
     /**
