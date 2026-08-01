@@ -45,6 +45,8 @@ Matter.Detector.setGridDynamic(body, true);
 
 ## Performance
 
+Measured at [`v0.20.0-perf11`](https://github.com/alexreardon/matter-js/releases/tag/v0.20.0-perf11). `perf12` cut body creation after these were taken, so the destruction scene is understated here; the rest of the step is unchanged.
+
 Time for one `Engine.update` (lower is faster):
 
 | Scenario | Bodies | Upstream `0.20.0` | Fork (drop-in) | Fork (`gridStatic`) |
@@ -94,7 +96,7 @@ What the tables say:
 
 - The win grows with the size of the static field: `-53%` at `2000` tiles, `-78%` at `5000`, `-86%` at `8000`.
 - `gridStatic` costs `4-13%` on the general scenes (nothing to skip) and is worth a further `1.4x` to `4x` on a page. That is why it is opt-in.
-- The narrowest wins are scenes dominated by work the fork did not change: contact solving in the storm, `Body.create` in the destruction scene.
+- The narrowest win is the storm, dominated by contact solving, which this fork does not change. The destruction scene was in that category too until `perf12` made body creation `61%` cheaper, which these numbers predate.
 
 </details>
 
