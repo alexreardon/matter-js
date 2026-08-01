@@ -18,7 +18,7 @@ For scenes that are mostly static bodies, the opt-in `gridStatic` mode goes furt
 Install from a release tag (`v0.20.0-perfN`). The built bundle (`build/matter.js`) is committed, so there is no build step.
 
 ```bash
-npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-perf9.tar.gz
+npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-perf12.tar.gz
 ```
 
 ## Usage
@@ -191,6 +191,7 @@ Each change was A/B'd on its own against the previous release tag. Benefit is wh
 | **No whole-world walk per step** — the last full-body scans are gone (cached mover lists, typed-array bounds) | `-22%` to `-25%`, growing with scene size |
 | **Static index maintained, not rebuilt** — membership changes are applied as a difference instead of firing a full rebuild | `-45%` while bodies are added and removed every step |
 | **Removed bodies stop being simulated** — a removed body's decaying position impulse is cleared | `-2%` during churn, and a correctness fix |
+| **Cheaper body creation** — rectangles build their corners directly instead of concatenating a path string and parsing it back with a regex, and `Body.create` no longer parses a throwaway default vertex set the caller immediately overwrites | `-61%` per `Bodies.rectangle`, `-4%` whole-step during churn |
 | **Allocation micro-optimisations** — numeric pair ids, a collision record cache, an unrolled box-vs-box SAT path | `-34%` allocation per update |
 
 ## Differences from upstream
@@ -201,6 +202,7 @@ In both modes:
 - A resting body's `force` / `torque` is only zeroed once it starts moving again. Unchanged when sleeping is enabled.
 - `pair.id` is a number rather than a string.
 - A body removed from a composite has its `positionImpulse` cleared, so it stops being simulated (this matches what upstream effectively did).
+- `Bodies.rectangle` accepts dimensions upstream could not. Upstream builds the body from a path string, and its parser's character class omits `+`, so any dimension `String()` renders in exponent form (`1e+21` and above) silently produced a `NaN` body. Here the corners are built directly, so there is no parse to get wrong.
 
 Only in `gridStatic` mode:
 

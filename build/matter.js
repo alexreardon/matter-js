@@ -1669,7 +1669,7 @@ var Axes = __webpack_require__(11);
             parts: [],
             plugin: {},
             angle: 0,
-            vertices: Vertices.fromPath('L 0 0 L 40 0 L 40 40 L 0 40'),
+            vertices: (options && options.vertices) || Vertices.fromPath('L 0 0 L 40 0 L 40 40 L 0 40'),
             position: { x: 0, y: 0 },
             force: { x: 0, y: 0 },
             torque: 0,
@@ -1814,6 +1814,11 @@ var Axes = __webpack_require__(11);
      * @param {body} body
      * @param {} [options]
      */
+    // Hoisted out of `_initProperties`: it allocated a fresh five element array per body created.
+    // The `Common.choose` call site is unchanged, so the RNG stream and the chosen colours are
+    // identical.
+    var _defaultFillStyles = ['#f19648', '#f5d259', '#f55a3c', '#063e7b', '#ececd1'];
+
     var _initProperties = function(body, options) {
         options = options || {};
 
@@ -1842,7 +1847,7 @@ var Axes = __webpack_require__(11);
         });
 
         // render properties
-        var defaultFillStyle = (body.isStatic ? '#14151f' : Common.choose(['#f19648', '#f5d259', '#f55a3c', '#063e7b', '#ececd1'])),
+        var defaultFillStyle = (body.isStatic ? '#14151f' : Common.choose(_defaultFillStyles)),
             defaultStrokeStyle = body.isStatic ? '#555' : '#ccc',
             defaultLineWidth = body.isStatic && body.render.fillStyle === null ? 1 : 0;
         body.render.fillStyle = body.render.fillStyle || defaultFillStyle;
@@ -5642,20 +5647,37 @@ var Vector = __webpack_require__(2);
     Bodies.rectangle = function(x, y, width, height, options) {
         options = options || {};
 
+        // The four corners built directly. This used to concatenate an SVG-ish path string and parse
+        // it back with a global regex (`Vertices.fromPath`), for a rectangle whose corners are
+        // already known numbers. It is also strictly more correct: the path pattern's `[-\d.e]+`
+        // class omits `+`, so any dimension `String()` renders in exponent form (`1e+21`) parsed to
+        // NaN and produced a NaN body.
         var rectangle = { 
             label: 'Rectangle Body',
             position: { x: x, y: y },
-            vertices: Vertices.fromPath('L 0 0 L ' + width + ' 0 L ' + width + ' ' + height + ' L 0 ' + height)
+            vertices: [
+                { x: 0, y: 0 },
+                { x: width, y: 0 },
+                { x: width, y: height },
+                { x: 0, y: height }
+            ]
         };
 
         if (options.chamfer) {
             var chamfer = options.chamfer;
-            rectangle.vertices = Vertices.chamfer(rectangle.vertices, chamfer.radius, 
+            rectangle.vertices = Vertices.chamfer(Vertices.create(rectangle.vertices, null), chamfer.radius, 
                 chamfer.quality, chamfer.qualityMin, chamfer.qualityMax);
             delete options.chamfer;
         }
 
-        return Body.create(Common.extend({}, rectangle, options));
+        // Shallow merge, not `Common.extend`: `Body.create` deep-merges these into its own fresh
+        // defaults regardless, so the outer deep clone only ever built garbage. Nothing here can
+        // alias the caller's nested objects for the same reason.
+        for (var prop in options) {
+            rectangle[prop] = options[prop];
+        }
+
+        return Body.create(rectangle);
     };
     
     /**
