@@ -1333,7 +1333,13 @@ var Common = __webpack_require__(0);
             translateX = vector.x * scalar,
             translateY = vector.y * scalar,
             i;
-        
+
+        // the self-projection memo describes these vertex positions
+        var spBody = verticesLength > 0 ? vertices[0].body : null;
+        if (spBody) {
+            spBody._spValid = false;
+        }
+
         for (i = 0; i < verticesLength; i++) {
             vertices[i].x += translateX;
             vertices[i].y += translateY;
@@ -1362,6 +1368,12 @@ var Common = __webpack_require__(0);
             dx,
             dy,
             i;
+
+        // the self-projection memo describes these vertex positions
+        var spBody = verticesLength > 0 ? vertices[0].body : null;
+        if (spBody) {
+            spBody._spValid = false;
+        }
 
         for (i = 0; i < verticesLength; i++) {
             vertex = vertices[i];
@@ -1418,6 +1430,12 @@ var Common = __webpack_require__(0);
 
         var vertex,
             delta;
+
+        // the self-projection memo describes these vertex positions
+        var spBody = vertices.length > 0 ? vertices[0].body : null;
+        if (spBody) {
+            spBody._spValid = false;
+        }
 
         for (var i = 0; i < vertices.length; i++) {
             vertex = vertices[i];
@@ -1771,7 +1789,24 @@ var Axes = __webpack_require__(11);
             _sIndexedAt: -1,
             _sWalk: 0,
             _sWorldIndex: 0,
-            _sDeparted: false
+            _sDeparted: false,
+            // the cell span this body was BUCKETED at. Unbucketing has to know
+            // which cells it vacated in order to invalidate the movers standing
+            // over them, and by then its live bounds no longer say: a released
+            // tile has already been integrated by Engine._bodiesUpdate before
+            // the broadphase runs
+            _sCx0: 0,
+            _sCx1: 0,
+            _sCy0: 0,
+            _sCy1: 0,
+            // Collision._selfProjection memo: this body's own vertices projected
+            // onto its own axes, packed flat as [min0, max0, min1, max1, ...],
+            // one pair per axis. _spValid is cleared by every site that moves a
+            // vertex or changes the axes (see Vertices.translate/rotate/scale,
+            // Body.setVertices/setParts/scale and the inlined rotate in
+            // Body.setPositionAndAngle)
+            _sp: null,
+            _spValid: false
         };
 
         var body = Common.extend(defaults, options);
@@ -1920,6 +1955,12 @@ var Axes = __webpack_require__(11);
             case 'parts':
                 Body.setParts(body, value);
                 break;
+            case 'axes':
+                // same assignment the default branch makes, plus the
+                // self-projection memo invalidation replacing axes needs
+                body.axes = value;
+                body._spValid = false;
+                break;
             case 'centre':
                 Body.setCentre(body, value);
                 break;
@@ -2057,6 +2098,9 @@ var Axes = __webpack_require__(11);
 
         // update properties
         body.axes = Axes.fromVertices(body.vertices);
+        // both the vertices and the axes have been replaced, so the
+        // self-projection memo is stale (and possibly the wrong length)
+        body._spValid = false;
         body.area = Vertices.area(body.vertices);
         Body.setMass(body, body.density * body.area);
 
@@ -2091,6 +2135,10 @@ var Axes = __webpack_require__(11);
      */
     Body.setParts = function(body, parts, autoHull) {
         var i;
+
+        // the hull below rebuilds this body's vertices and axes, so the
+        // self-projection memo is stale (and possibly the wrong length)
+        body._spValid = false;
 
         // add all the parts, ensuring that the first part is always the parent body
         parts = parts.slice(0);
@@ -2292,6 +2340,10 @@ var Axes = __webpack_require__(11);
             maxX = 0,
             minY = 0,
             maxY = 0;
+
+        // the vertex and axis writes below are inlined rather than routed
+        // through Vertices.rotate / Axes.rotate, so invalidate here too
+        body._spValid = false;
 
         for (var i = 0; i < verticesLength; i++) {
             var vertex = vertices[i],
@@ -2502,6 +2554,9 @@ var Axes = __webpack_require__(11);
 
             // update properties
             part.axes = Axes.fromVertices(part.vertices);
+            // the axes have been replaced, so the self-projection memo is stale
+            // (and possibly the wrong length)
+            part._spValid = false;
             part.area = Vertices.area(part.vertices);
             Body.setMass(part, body.density * part.area);
 
@@ -4424,13 +4479,13 @@ var Pair = __webpack_require__(9);
      * @return {collision|null} A collision record if detected, otherwise null
      */
     Collision.collides = function(bodyA, bodyB, pairs) {
-        Collision._overlapAxes(_overlapAB, bodyA.vertices, bodyB.vertices, bodyA.axes);
+        Collision._overlapAxes(_overlapAB, bodyA, bodyB.vertices, bodyA.axes);
 
         if (_overlapAB.overlap <= 0) {
             return null;
         }
 
-        Collision._overlapAxes(_overlapBA, bodyB.vertices, bodyA.vertices, bodyB.axes);
+        Collision._overlapAxes(_overlapBA, bodyB, bodyA.vertices, bodyB.axes);
 
         if (_overlapBA.overlap <= 0) {
             return null;
@@ -4564,16 +4619,111 @@ var Pair = __webpack_require__(9);
     };
 
     /**
-     * Find the overlap between two sets of vertices.
+     * Project a body's own vertices onto its own axes, memoised on the body.
+     *
+     * Both `Collision._overlapAxes` calls in `Collision.collides` pass the body
+     * that OWNS the axes as the A side, so this reduction is pair-independent:
+     * without a memo it is recomputed once per pair the body takes part in,
+     * every step, and again next step even for a static whose vertices have not
+     * moved.
+     *
+     * The result is packed flat into `body._sp` as
+     * `[min0, max0, min1, max1, ...]`, one pair per axis, and is valid while
+     * `body._spValid` is `true`. Every site that moves a vertex or changes the
+     * axes clears that flag.
+     * @method _selfProjection
+     * @private
+     * @param {body} body
+     * @return {number[]} The filled `body._sp`
+     */
+    Collision._selfProjection = function(body) {
+        var vertices = body.vertices,
+            verticesLength = vertices.length,
+            axes = body.axes,
+            axesLength = axes.length,
+            sp = body._sp,
+            i;
+
+        // `new Array(n)` on its own is HOLEY and reads slow, so fill it
+        if (!sp || sp.length !== axesLength * 2) {
+            sp = body._sp = new Array(axesLength * 2).fill(0);
+        }
+
+        // both branches below seed from vertex 0 and use the same comparison
+        // structure and operand order the inline projections used, so the
+        // memoised values are bit-identical to computing them in place
+        if (verticesLength === 4) {
+            var v0 = vertices[0], v1 = vertices[1], v2 = vertices[2], v3 = vertices[3],
+                v0x = v0.x, v0y = v0.y, v1x = v1.x, v1y = v1.y,
+                v2x = v2.x, v2y = v2.y, v3x = v3.x, v3y = v3.y;
+
+            for (i = 0; i < axesLength; i++) {
+                var quadAxis = axes[i],
+                    quadAxisX = quadAxis.x,
+                    quadAxisY = quadAxis.y,
+                    q0 = v0x * quadAxisX + v0y * quadAxisY,
+                    q1 = v1x * quadAxisX + v1y * quadAxisY,
+                    q2 = v2x * quadAxisX + v2y * quadAxisY,
+                    q3 = v3x * quadAxisX + v3y * quadAxisY,
+                    quadMin = q0, quadMax = q0;
+
+                if (q1 > quadMax) { quadMax = q1; } else if (q1 < quadMin) { quadMin = q1; }
+                if (q2 > quadMax) { quadMax = q2; } else if (q2 < quadMin) { quadMin = q2; }
+                if (q3 > quadMax) { quadMax = q3; } else if (q3 < quadMin) { quadMin = q3; }
+
+                sp[i * 2] = quadMin;
+                sp[i * 2 + 1] = quadMax;
+            }
+
+            body._spValid = true;
+            return sp;
+        }
+
+        var firstX = vertices[0].x,
+            firstY = vertices[0].y,
+            dot,
+            j;
+
+        for (i = 0; i < axesLength; i++) {
+            var selfAxis = axes[i],
+                selfAxisX = selfAxis.x,
+                selfAxisY = selfAxis.y,
+                min = firstX * selfAxisX + firstY * selfAxisY,
+                max = min;
+
+            for (j = 1; j < verticesLength; j += 1) {
+                dot = vertices[j].x * selfAxisX + vertices[j].y * selfAxisY;
+
+                if (dot > max) {
+                    max = dot;
+                } else if (dot < min) {
+                    min = dot;
+                }
+            }
+
+            sp[i * 2] = min;
+            sp[i * 2 + 1] = max;
+        }
+
+        body._spValid = true;
+        return sp;
+    };
+
+    /**
+     * Find the overlap between a body and a set of vertices along the body's axes.
+     *
+     * `bodyA` must be the body that owns `axes`: its side of the projection is
+     * read from the `Collision._selfProjection` memo, which is indexed by the
+     * body's own axis order.
      * @method _overlapAxes
      * @private
      * @param {object} result
-     * @param {vertices} verticesA
+     * @param {body} bodyA
      * @param {vertices} verticesB
      * @param {axes} axes
      */
-    Collision._overlapAxes = function(result, verticesA, verticesB, axes) {
-        var verticesALength = verticesA.length,
+    Collision._overlapAxes = function(result, bodyA, verticesB, axes) {
+        var sp = bodyA._spValid ? bodyA._sp : Collision._selfProjection(bodyA),
             verticesBLength = verticesB.length,
             axesLength = axes.length,
             overlapMin = Number.MAX_VALUE,
@@ -4585,14 +4735,11 @@ var Pair = __webpack_require__(9);
             i,
             j;
 
-        // unrolled fast path for the box/quad-vs-quad common case (both bodies
-        // have four vertices). min/max of a fixed set is order-independent, so
-        // this produces bit-identical projections to the general loop below.
-        if (verticesALength === 4 && verticesBLength === 4) {
-            var a0 = verticesA[0], a1 = verticesA[1], a2 = verticesA[2], a3 = verticesA[3],
-                b0 = verticesB[0], b1 = verticesB[1], b2 = verticesB[2], b3 = verticesB[3],
-                a0x = a0.x, a0y = a0.y, a1x = a1.x, a1y = a1.y,
-                a2x = a2.x, a2y = a2.y, a3x = a3.x, a3y = a3.y,
+        // unrolled fast path for the box/quad common case (the other body has
+        // four vertices). min/max of a fixed set is order-independent, so this
+        // produces bit-identical projections to the general loop below.
+        if (verticesBLength === 4) {
+            var b0 = verticesB[0], b1 = verticesB[1], b2 = verticesB[2], b3 = verticesB[3],
                 b0x = b0.x, b0y = b0.y, b1x = b1.x, b1y = b1.y,
                 b2x = b2.x, b2y = b2.y, b3x = b3.x, b3y = b3.y;
 
@@ -4600,20 +4747,13 @@ var Pair = __webpack_require__(9);
                 var qAxis = axes[i],
                     qAxisX = qAxis.x,
                     qAxisY = qAxis.y,
-                    qa0 = a0x * qAxisX + a0y * qAxisY,
-                    qa1 = a1x * qAxisX + a1y * qAxisY,
-                    qa2 = a2x * qAxisX + a2y * qAxisY,
-                    qa3 = a3x * qAxisX + a3y * qAxisY,
-                    qMinA = qa0, qMaxA = qa0,
+                    qMinA = sp[i * 2],
+                    qMaxA = sp[i * 2 + 1],
                     qb0 = b0x * qAxisX + b0y * qAxisY,
                     qb1 = b1x * qAxisX + b1y * qAxisY,
                     qb2 = b2x * qAxisX + b2y * qAxisY,
                     qb3 = b3x * qAxisX + b3y * qAxisY,
                     qMinB = qb0, qMaxB = qb0;
-
-                if (qa1 > qMaxA) { qMaxA = qa1; } else if (qa1 < qMinA) { qMinA = qa1; }
-                if (qa2 > qMaxA) { qMaxA = qa2; } else if (qa2 < qMinA) { qMinA = qa2; }
-                if (qa3 > qMaxA) { qMaxA = qa3; } else if (qa3 < qMinA) { qMinA = qa3; }
 
                 if (qb1 > qMaxB) { qMaxB = qb1; } else if (qb1 < qMinB) { qMinB = qb1; }
                 if (qb2 > qMaxB) { qMaxB = qb2; } else if (qb2 < qMinB) { qMinB = qb2; }
@@ -4638,29 +4778,17 @@ var Pair = __webpack_require__(9);
             return;
         }
 
-        var verticesAX = verticesA[0].x,
-            verticesAY = verticesA[0].y,
-            verticesBX = verticesB[0].x,
+        var verticesBX = verticesB[0].x,
             verticesBY = verticesB[0].y;
 
         for (i = 0; i < axesLength; i++) {
             var axis = axes[i],
                 axisX = axis.x,
                 axisY = axis.y,
-                minA = verticesAX * axisX + verticesAY * axisY,
+                minA = sp[i * 2],
+                maxA = sp[i * 2 + 1],
                 minB = verticesBX * axisX + verticesBY * axisY,
-                maxA = minA,
                 maxB = minB;
-
-            for (j = 1; j < verticesALength; j += 1) {
-                dot = verticesA[j].x * axisX + verticesA[j].y * axisY;
-
-                if (dot > maxA) {
-                    maxA = dot;
-                } else if (dot < minA) {
-                    minA = dot;
-                }
-            }
 
             for (j = 1; j < verticesBLength; j += 1) {
                 dot = verticesB[j].x * axisX + verticesB[j].y * axisY;
@@ -6651,7 +6779,8 @@ var Collision = __webpack_require__(8);
 
         // an oversized static spans too many cells to bucket; it goes on the
         // list every mover scans instead, and holds no buckets (which is what
-        // an empty `_sBuckets` means)
+        // an empty `_sBuckets` means). It needs no cell bookkeeping either:
+        // `sOver` is re-scanned by every mover every step, never cached
         if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) > maxCells) {
             at = g.sOver.length;
             while (at > 0 && g.sOver[at - 1]._sWorldIndex > worldIndex) {
@@ -6659,6 +6788,25 @@ var Collision = __webpack_require__(8);
             }
             g.sOver.splice(at, 0, body);
             return;
+        }
+
+        // remember the span so unbucketing can report the same cells back
+        body._sCx0 = cx0;
+        body._sCx1 = cx1;
+        body._sCy0 = cy0;
+        body._sCy1 = cy1;
+
+        // and report them as changed, so the movers standing over them drop
+        // their cached static-candidate lists. Skipped during a full rebuild
+        // (`built` is only set at the end of one), which bumps the epoch and so
+        // invalidates every cached list at once
+        if (g.built) {
+            var changed = g.changedCells;
+            for (cx = cx0; cx <= cx1; cx++) {
+                for (cy = cy0; cy <= cy1; cy++) {
+                    changed.push(cx, cy);
+                }
+            }
         }
 
         for (cx = cx0; cx <= cx1; cx++) {
@@ -6715,6 +6863,22 @@ var Collision = __webpack_require__(8);
                 g.sOver.splice(at, 1);
             }
             return;
+        }
+
+        // report the vacated cells from the span the body was BUCKETED at, not
+        // from its live bounds: a released tile has already been integrated by
+        // `Engine._bodiesUpdate` this step, so its bounds describe where it is
+        // now, not the cells it is being pulled out of
+        var changed = g.changedCells,
+            ucx,
+            ucy,
+            ucx1 = body._sCx1,
+            ucy1 = body._sCy1;
+
+        for (ucx = body._sCx0; ucx <= ucx1; ucx++) {
+            for (ucy = body._sCy0; ucy <= ucy1; ucy++) {
+                changed.push(ucx, ucy);
+            }
         }
 
         for (i = 0; i < buckets.length; i++) {
@@ -6782,6 +6946,9 @@ var Collision = __webpack_require__(8);
         g.sFlat.length = 0;
         g.sFlatValid = false;
         g.indexed.length = 0;
+        // the epoch bump below invalidates every cached candidate list, so
+        // per-cell reports from this rebuild would be a pure cost
+        g.changedCells.length = 0;
 
         for (i = 0; i < n; i++) {
             var body = bodies[i];
@@ -6852,7 +7019,13 @@ var Collision = __webpack_require__(8);
         }
 
         pendingAdd.length = 0;
-        g.epoch += 1;
+
+        // NOTE: no epoch bump. The epoch invalidates EVERY mover's cached
+        // static-candidate list, and this path runs on every step of a page
+        // being destroyed, which drove that cache's hit rate to zero. The
+        // changes are reported per CELL instead (`g.changedCells`), and only the
+        // movers standing over one lose their list. The epoch is now bumped
+        // only by a full rebuild, where every bucket really does change.
     };
 
     /**
@@ -6942,9 +7115,17 @@ var Collision = __webpack_require__(8);
                 // contiguous memory
                 mBounds: new Float64Array(0), mStamp: new Int32Array(0),
                 mOver: new Int32Array(0),
-                // static-index build epoch: bumped on every rebuild so each
-                // mover's cached static-candidate list can be validated cheaply
-                epoch: 0,
+                // each mover's FIRST entry index in the chain arrays. Its
+                // remaining cells are the following slots, in the same order
+                // both passes walk them, which is what lets the generation pass
+                // start a chain walk past its own entry (see below)
+                mEntry: new Int32Array(0),
+                // static-index build epoch: bumped on every full REBUILD (where
+                // every bucket changes) so each mover's cached static-candidate
+                // list can be validated cheaply. An incremental change reports
+                // the cells it touched here instead, as flat (cx, cy) pairs
+                // consumed once per step by the invalidation sweep below
+                epoch: 0, changedCells: [],
                 cellSize: 0
             };
         }
@@ -7018,6 +7199,9 @@ var Collision = __webpack_require__(8);
                 // longer match the order a full rebuild produces
                 if (body._sDeparted) {
                     body._sDeparted = false;
+                    // out of the world it was in no mover index, so the
+                    // per-cell invalidation sweep could not reach it
+                    body._scEpoch = -1;
                     if (body._sIndexed) {
                         Detector._staticIndexRemove(g, body);
                         staticDirty = true;
@@ -7026,6 +7210,9 @@ var Collision = __webpack_require__(8);
 
                 if (body._sPrev !== isStaticNow) {
                     body._sPrev = isStaticNow;
+                    // same reason: while it was static it was not a mover, so
+                    // any cell that changed under it went unreported to it
+                    body._scEpoch = -1;
                     staticDirty = true;
                 }
 
@@ -7125,7 +7312,8 @@ var Collision = __webpack_require__(8);
         var dSpan = g.dSpan,
             mBounds = g.mBounds,
             mStamp = g.mStamp,
-            mOver = g.mOver;
+            mOver = g.mOver,
+            mEntry = g.mEntry;
 
         if (dSpan.length < moversLength * 4) {
             var moverCapacity = (moversLength + 16) * 2;
@@ -7139,6 +7327,7 @@ var Collision = __webpack_require__(8);
             // cells, likewise flattened off the body
             mStamp = g.mStamp = new Int32Array(moverCapacity);
             mOver = g.mOver = new Int32Array(moverCapacity);
+            mEntry = g.mEntry = new Int32Array(moverCapacity);
         }
 
         var minCx = Infinity,
@@ -7229,6 +7418,10 @@ var Collision = __webpack_require__(8);
         // exactly the order the previous per-cell bucket arrays produced.
         var dEntry = 0;
         for (mIns = moversLength - 1; mIns >= 0; mIns--) {
+            // where this mover's own entries start. A mover with a NaN span
+            // contributes none, and the value is then never read (its cell
+            // loops iterate zero times in the generation pass too)
+            mEntry[mIns] = dEntry;
             spanBase = mIns * 4;
             var iSpanCx1 = dSpan[spanBase + 1],
                 iSpanCy0 = dSpan[spanBase + 2],
@@ -7250,6 +7443,39 @@ var Collision = __webpack_require__(8);
                     dEntry++;
                 }
             }
+        }
+
+        // 3b) invalidate the static-candidate cache of every mover standing over
+        // a cell whose static occupants changed this step.
+        //
+        // A mover's cached list is built from exactly the cells in its span, so
+        // the mover index just built is the reverse lookup this needs: resolve
+        // each reported cell to its chain and stamp the movers on it. A cell
+        // outside the movers' bounding rectangle wraps to some slot whose
+        // entries all fail the key test, which is the right answer (no mover
+        // covers it). Typical cost is a few dozen cells against the thousands of
+        // list rebuilds the old global epoch bump forced.
+        var changedCells = g.changedCells,
+            changedLength = changedCells.length;
+
+        if (changedLength > 0) {
+            if (dEntryCount > 0) {
+                for (i = 0; i < changedLength; i += 2) {
+                    var dcx = changedCells[i],
+                        dcy = changedCells[i + 1],
+                        dcKey = (dcx + keyOffset) * keyStride + (dcy + keyOffset),
+                        dcSlot = ((dcx - minCx) & dMaskW) | (((dcy - minCy) & dMaskH) << dShiftW);
+
+                    for (var dce = dHead[dcSlot]; dce !== -1; dce = dNext[dce]) {
+                        if (dKeyArr[dce] !== dcKey) {
+                            continue;
+                        }
+                        bodies[movers[dItem[dce]]]._scEpoch = -1;
+                    }
+                }
+            }
+
+            changedCells.length = 0;
         }
 
         // 4) candidate generation: each mover is an outer body; pair it with
@@ -7303,6 +7529,11 @@ var Collision = __webpack_require__(8);
             // passes below. Skipped for a static (tagged moving) mover, since
             // static-static never resolves.
             if (mOver[mGen] === 1) {
+                // not in the mover index, so the sweep above cannot reach it;
+                // drop its cached list rather than let it survive an oversized
+                // spell and validate against cells that changed meanwhile
+                m._scEpoch = -1;
+
                 if (!mStatic) {
                     for (var sfi = 0; sfi < sFlatLength; sfi++) {
                         var fsBody = sFlat[sfi],
@@ -7352,10 +7583,20 @@ var Collision = __webpack_require__(8);
                     m._scCy1 = mcy1;
                 }
 
+                // this mover's own chain entry for the cell about to be walked.
+                // Pass B inserted movers in DESCENDING ordinal and head-pushed,
+                // so a chain reads back ASCENDING and everything at or before
+                // this mover's own entry is rejected by the `dj <= mGen` test
+                // below. Starting at `dNext[own]` therefore emits the identical
+                // subsequence in the identical order while skipping the whole
+                // lower prefix, and costs no `dHead` load: the mover's entries
+                // are contiguous from `mEntry[mGen]` in the same cell order
+                // this loop walks
+                var selfEntry = mEntry[mGen];
+
                 for (cx = mcx0; cx <= mcx1; cx++) {
                     var mKeyX = (cx + keyOffset) * keyStride,
-                        mCxOffset = cx + keyOffset,
-                        mSlotX = (cx - minCx) & dMaskW;
+                        mCxOffset = cx + keyOffset;
 
                     for (cy = mcy0; cy <= mcy1; cy++) {
                         var cyOffset = cy + keyOffset;
@@ -7400,11 +7641,14 @@ var Collision = __webpack_require__(8);
                         // address wraps on a pathological mover spread. Every
                         // test here reads the flat mover arrays, so a candidate
                         // that fails costs no body access at all
-                        for (var dgi = dHead[mSlotX | (((cy - minCy) & dMaskH) << dShiftW)]; dgi !== -1; dgi = dNext[dgi]) {
+                        for (var dgi = dNext[selfEntry++]; dgi !== -1; dgi = dNext[dgi]) {
                             if (dKeyArr[dgi] !== key) {
                                 continue;
                             }
                             var dj = dItem[dgi];
+                            // still required: two of THIS mover's own cells can
+                            // alias to one slot, putting an earlier entry of its
+                            // own ahead of it in the chain
                             if (dj <= mGen || mStamp[dj] === localStamp) {
                                 continue;
                             }
