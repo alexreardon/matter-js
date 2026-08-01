@@ -654,7 +654,8 @@ var Collision = require('./Collision');
 
         // an oversized static spans too many cells to bucket; it goes on the
         // list every mover scans instead, and holds no buckets (which is what
-        // an empty `_sBuckets` means)
+        // an empty `_sBuckets` means). It needs no cell bookkeeping either:
+        // `sOver` is re-scanned by every mover every step, never cached
         if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) > maxCells) {
             at = g.sOver.length;
             while (at > 0 && g.sOver[at - 1]._sWorldIndex > worldIndex) {
@@ -662,6 +663,25 @@ var Collision = require('./Collision');
             }
             g.sOver.splice(at, 0, body);
             return;
+        }
+
+        // remember the span so unbucketing can report the same cells back
+        body._sCx0 = cx0;
+        body._sCx1 = cx1;
+        body._sCy0 = cy0;
+        body._sCy1 = cy1;
+
+        // and report them as changed, so the movers standing over them drop
+        // their cached static-candidate lists. Skipped during a full rebuild
+        // (`built` is only set at the end of one), which bumps the epoch and so
+        // invalidates every cached list at once
+        if (g.built) {
+            var changed = g.changedCells;
+            for (cx = cx0; cx <= cx1; cx++) {
+                for (cy = cy0; cy <= cy1; cy++) {
+                    changed.push(cx, cy);
+                }
+            }
         }
 
         for (cx = cx0; cx <= cx1; cx++) {
@@ -718,6 +738,22 @@ var Collision = require('./Collision');
                 g.sOver.splice(at, 1);
             }
             return;
+        }
+
+        // report the vacated cells from the span the body was BUCKETED at, not
+        // from its live bounds: a released tile has already been integrated by
+        // `Engine._bodiesUpdate` this step, so its bounds describe where it is
+        // now, not the cells it is being pulled out of
+        var changed = g.changedCells,
+            ucx,
+            ucy,
+            ucx1 = body._sCx1,
+            ucy1 = body._sCy1;
+
+        for (ucx = body._sCx0; ucx <= ucx1; ucx++) {
+            for (ucy = body._sCy0; ucy <= ucy1; ucy++) {
+                changed.push(ucx, ucy);
+            }
         }
 
         for (i = 0; i < buckets.length; i++) {
@@ -785,6 +821,9 @@ var Collision = require('./Collision');
         g.sFlat.length = 0;
         g.sFlatValid = false;
         g.indexed.length = 0;
+        // the epoch bump below invalidates every cached candidate list, so
+        // per-cell reports from this rebuild would be a pure cost
+        g.changedCells.length = 0;
 
         for (i = 0; i < n; i++) {
             var body = bodies[i];
@@ -855,7 +894,13 @@ var Collision = require('./Collision');
         }
 
         pendingAdd.length = 0;
-        g.epoch += 1;
+
+        // NOTE: no epoch bump. The epoch invalidates EVERY mover's cached
+        // static-candidate list, and this path runs on every step of a page
+        // being destroyed, which drove that cache's hit rate to zero. The
+        // changes are reported per CELL instead (`g.changedCells`), and only the
+        // movers standing over one lose their list. The epoch is now bumped
+        // only by a full rebuild, where every bucket really does change.
     };
 
     /**
@@ -945,9 +990,17 @@ var Collision = require('./Collision');
                 // contiguous memory
                 mBounds: new Float64Array(0), mStamp: new Int32Array(0),
                 mOver: new Int32Array(0),
-                // static-index build epoch: bumped on every rebuild so each
-                // mover's cached static-candidate list can be validated cheaply
-                epoch: 0,
+                // each mover's FIRST entry index in the chain arrays. Its
+                // remaining cells are the following slots, in the same order
+                // both passes walk them, which is what lets the generation pass
+                // start a chain walk past its own entry (see below)
+                mEntry: new Int32Array(0),
+                // static-index build epoch: bumped on every full REBUILD (where
+                // every bucket changes) so each mover's cached static-candidate
+                // list can be validated cheaply. An incremental change reports
+                // the cells it touched here instead, as flat (cx, cy) pairs
+                // consumed once per step by the invalidation sweep below
+                epoch: 0, changedCells: [],
                 cellSize: 0
             };
         }
@@ -1021,6 +1074,9 @@ var Collision = require('./Collision');
                 // longer match the order a full rebuild produces
                 if (body._sDeparted) {
                     body._sDeparted = false;
+                    // out of the world it was in no mover index, so the
+                    // per-cell invalidation sweep could not reach it
+                    body._scEpoch = -1;
                     if (body._sIndexed) {
                         Detector._staticIndexRemove(g, body);
                         staticDirty = true;
@@ -1029,6 +1085,9 @@ var Collision = require('./Collision');
 
                 if (body._sPrev !== isStaticNow) {
                     body._sPrev = isStaticNow;
+                    // same reason: while it was static it was not a mover, so
+                    // any cell that changed under it went unreported to it
+                    body._scEpoch = -1;
                     staticDirty = true;
                 }
 
@@ -1128,7 +1187,8 @@ var Collision = require('./Collision');
         var dSpan = g.dSpan,
             mBounds = g.mBounds,
             mStamp = g.mStamp,
-            mOver = g.mOver;
+            mOver = g.mOver,
+            mEntry = g.mEntry;
 
         if (dSpan.length < moversLength * 4) {
             var moverCapacity = (moversLength + 16) * 2;
@@ -1142,6 +1202,7 @@ var Collision = require('./Collision');
             // cells, likewise flattened off the body
             mStamp = g.mStamp = new Int32Array(moverCapacity);
             mOver = g.mOver = new Int32Array(moverCapacity);
+            mEntry = g.mEntry = new Int32Array(moverCapacity);
         }
 
         var minCx = Infinity,
@@ -1232,6 +1293,10 @@ var Collision = require('./Collision');
         // exactly the order the previous per-cell bucket arrays produced.
         var dEntry = 0;
         for (mIns = moversLength - 1; mIns >= 0; mIns--) {
+            // where this mover's own entries start. A mover with a NaN span
+            // contributes none, and the value is then never read (its cell
+            // loops iterate zero times in the generation pass too)
+            mEntry[mIns] = dEntry;
             spanBase = mIns * 4;
             var iSpanCx1 = dSpan[spanBase + 1],
                 iSpanCy0 = dSpan[spanBase + 2],
@@ -1253,6 +1318,39 @@ var Collision = require('./Collision');
                     dEntry++;
                 }
             }
+        }
+
+        // 3b) invalidate the static-candidate cache of every mover standing over
+        // a cell whose static occupants changed this step.
+        //
+        // A mover's cached list is built from exactly the cells in its span, so
+        // the mover index just built is the reverse lookup this needs: resolve
+        // each reported cell to its chain and stamp the movers on it. A cell
+        // outside the movers' bounding rectangle wraps to some slot whose
+        // entries all fail the key test, which is the right answer (no mover
+        // covers it). Typical cost is a few dozen cells against the thousands of
+        // list rebuilds the old global epoch bump forced.
+        var changedCells = g.changedCells,
+            changedLength = changedCells.length;
+
+        if (changedLength > 0) {
+            if (dEntryCount > 0) {
+                for (i = 0; i < changedLength; i += 2) {
+                    var dcx = changedCells[i],
+                        dcy = changedCells[i + 1],
+                        dcKey = (dcx + keyOffset) * keyStride + (dcy + keyOffset),
+                        dcSlot = ((dcx - minCx) & dMaskW) | (((dcy - minCy) & dMaskH) << dShiftW);
+
+                    for (var dce = dHead[dcSlot]; dce !== -1; dce = dNext[dce]) {
+                        if (dKeyArr[dce] !== dcKey) {
+                            continue;
+                        }
+                        bodies[movers[dItem[dce]]]._scEpoch = -1;
+                    }
+                }
+            }
+
+            changedCells.length = 0;
         }
 
         // 4) candidate generation: each mover is an outer body; pair it with
@@ -1306,6 +1404,11 @@ var Collision = require('./Collision');
             // passes below. Skipped for a static (tagged moving) mover, since
             // static-static never resolves.
             if (mOver[mGen] === 1) {
+                // not in the mover index, so the sweep above cannot reach it;
+                // drop its cached list rather than let it survive an oversized
+                // spell and validate against cells that changed meanwhile
+                m._scEpoch = -1;
+
                 if (!mStatic) {
                     for (var sfi = 0; sfi < sFlatLength; sfi++) {
                         var fsBody = sFlat[sfi],
@@ -1355,10 +1458,20 @@ var Collision = require('./Collision');
                     m._scCy1 = mcy1;
                 }
 
+                // this mover's own chain entry for the cell about to be walked.
+                // Pass B inserted movers in DESCENDING ordinal and head-pushed,
+                // so a chain reads back ASCENDING and everything at or before
+                // this mover's own entry is rejected by the `dj <= mGen` test
+                // below. Starting at `dNext[own]` therefore emits the identical
+                // subsequence in the identical order while skipping the whole
+                // lower prefix, and costs no `dHead` load: the mover's entries
+                // are contiguous from `mEntry[mGen]` in the same cell order
+                // this loop walks
+                var selfEntry = mEntry[mGen];
+
                 for (cx = mcx0; cx <= mcx1; cx++) {
                     var mKeyX = (cx + keyOffset) * keyStride,
-                        mCxOffset = cx + keyOffset,
-                        mSlotX = (cx - minCx) & dMaskW;
+                        mCxOffset = cx + keyOffset;
 
                     for (cy = mcy0; cy <= mcy1; cy++) {
                         var cyOffset = cy + keyOffset;
@@ -1403,11 +1516,14 @@ var Collision = require('./Collision');
                         // address wraps on a pathological mover spread. Every
                         // test here reads the flat mover arrays, so a candidate
                         // that fails costs no body access at all
-                        for (var dgi = dHead[mSlotX | (((cy - minCy) & dMaskH) << dShiftW)]; dgi !== -1; dgi = dNext[dgi]) {
+                        for (var dgi = dNext[selfEntry++]; dgi !== -1; dgi = dNext[dgi]) {
                             if (dKeyArr[dgi] !== key) {
                                 continue;
                             }
                             var dj = dItem[dgi];
+                            // still required: two of THIS mover's own cells can
+                            // alias to one slot, putting an earlier entry of its
+                            // own ahead of it in the chain
                             if (dj <= mGen || mStamp[dj] === localStamp) {
                                 continue;
                             }

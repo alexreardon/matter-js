@@ -61,13 +61,13 @@ var Pair = require('./Pair');
      * @return {collision|null} A collision record if detected, otherwise null
      */
     Collision.collides = function(bodyA, bodyB, pairs) {
-        Collision._overlapAxes(_overlapAB, bodyA.vertices, bodyB.vertices, bodyA.axes);
+        Collision._overlapAxes(_overlapAB, bodyA, bodyB.vertices, bodyA.axes);
 
         if (_overlapAB.overlap <= 0) {
             return null;
         }
 
-        Collision._overlapAxes(_overlapBA, bodyB.vertices, bodyA.vertices, bodyB.axes);
+        Collision._overlapAxes(_overlapBA, bodyB, bodyA.vertices, bodyB.axes);
 
         if (_overlapBA.overlap <= 0) {
             return null;
@@ -201,16 +201,111 @@ var Pair = require('./Pair');
     };
 
     /**
-     * Find the overlap between two sets of vertices.
+     * Project a body's own vertices onto its own axes, memoised on the body.
+     *
+     * Both `Collision._overlapAxes` calls in `Collision.collides` pass the body
+     * that OWNS the axes as the A side, so this reduction is pair-independent:
+     * without a memo it is recomputed once per pair the body takes part in,
+     * every step, and again next step even for a static whose vertices have not
+     * moved.
+     *
+     * The result is packed flat into `body._sp` as
+     * `[min0, max0, min1, max1, ...]`, one pair per axis, and is valid while
+     * `body._spValid` is `true`. Every site that moves a vertex or changes the
+     * axes clears that flag.
+     * @method _selfProjection
+     * @private
+     * @param {body} body
+     * @return {number[]} The filled `body._sp`
+     */
+    Collision._selfProjection = function(body) {
+        var vertices = body.vertices,
+            verticesLength = vertices.length,
+            axes = body.axes,
+            axesLength = axes.length,
+            sp = body._sp,
+            i;
+
+        // `new Array(n)` on its own is HOLEY and reads slow, so fill it
+        if (!sp || sp.length !== axesLength * 2) {
+            sp = body._sp = new Array(axesLength * 2).fill(0);
+        }
+
+        // both branches below seed from vertex 0 and use the same comparison
+        // structure and operand order the inline projections used, so the
+        // memoised values are bit-identical to computing them in place
+        if (verticesLength === 4) {
+            var v0 = vertices[0], v1 = vertices[1], v2 = vertices[2], v3 = vertices[3],
+                v0x = v0.x, v0y = v0.y, v1x = v1.x, v1y = v1.y,
+                v2x = v2.x, v2y = v2.y, v3x = v3.x, v3y = v3.y;
+
+            for (i = 0; i < axesLength; i++) {
+                var quadAxis = axes[i],
+                    quadAxisX = quadAxis.x,
+                    quadAxisY = quadAxis.y,
+                    q0 = v0x * quadAxisX + v0y * quadAxisY,
+                    q1 = v1x * quadAxisX + v1y * quadAxisY,
+                    q2 = v2x * quadAxisX + v2y * quadAxisY,
+                    q3 = v3x * quadAxisX + v3y * quadAxisY,
+                    quadMin = q0, quadMax = q0;
+
+                if (q1 > quadMax) { quadMax = q1; } else if (q1 < quadMin) { quadMin = q1; }
+                if (q2 > quadMax) { quadMax = q2; } else if (q2 < quadMin) { quadMin = q2; }
+                if (q3 > quadMax) { quadMax = q3; } else if (q3 < quadMin) { quadMin = q3; }
+
+                sp[i * 2] = quadMin;
+                sp[i * 2 + 1] = quadMax;
+            }
+
+            body._spValid = true;
+            return sp;
+        }
+
+        var firstX = vertices[0].x,
+            firstY = vertices[0].y,
+            dot,
+            j;
+
+        for (i = 0; i < axesLength; i++) {
+            var selfAxis = axes[i],
+                selfAxisX = selfAxis.x,
+                selfAxisY = selfAxis.y,
+                min = firstX * selfAxisX + firstY * selfAxisY,
+                max = min;
+
+            for (j = 1; j < verticesLength; j += 1) {
+                dot = vertices[j].x * selfAxisX + vertices[j].y * selfAxisY;
+
+                if (dot > max) {
+                    max = dot;
+                } else if (dot < min) {
+                    min = dot;
+                }
+            }
+
+            sp[i * 2] = min;
+            sp[i * 2 + 1] = max;
+        }
+
+        body._spValid = true;
+        return sp;
+    };
+
+    /**
+     * Find the overlap between a body and a set of vertices along the body's axes.
+     *
+     * `bodyA` must be the body that owns `axes`: its side of the projection is
+     * read from the `Collision._selfProjection` memo, which is indexed by the
+     * body's own axis order.
      * @method _overlapAxes
      * @private
      * @param {object} result
-     * @param {vertices} verticesA
+     * @param {body} bodyA
      * @param {vertices} verticesB
      * @param {axes} axes
      */
-    Collision._overlapAxes = function(result, verticesA, verticesB, axes) {
-        var verticesALength = verticesA.length,
+    Collision._overlapAxes = function(result, bodyA, verticesB, axes) {
+        var sp = bodyA._spValid ? bodyA._sp : Collision._selfProjection(bodyA),
             verticesBLength = verticesB.length,
             axesLength = axes.length,
             overlapMin = Number.MAX_VALUE,
@@ -222,14 +317,11 @@ var Pair = require('./Pair');
             i,
             j;
 
-        // unrolled fast path for the box/quad-vs-quad common case (both bodies
-        // have four vertices). min/max of a fixed set is order-independent, so
-        // this produces bit-identical projections to the general loop below.
-        if (verticesALength === 4 && verticesBLength === 4) {
-            var a0 = verticesA[0], a1 = verticesA[1], a2 = verticesA[2], a3 = verticesA[3],
-                b0 = verticesB[0], b1 = verticesB[1], b2 = verticesB[2], b3 = verticesB[3],
-                a0x = a0.x, a0y = a0.y, a1x = a1.x, a1y = a1.y,
-                a2x = a2.x, a2y = a2.y, a3x = a3.x, a3y = a3.y,
+        // unrolled fast path for the box/quad common case (the other body has
+        // four vertices). min/max of a fixed set is order-independent, so this
+        // produces bit-identical projections to the general loop below.
+        if (verticesBLength === 4) {
+            var b0 = verticesB[0], b1 = verticesB[1], b2 = verticesB[2], b3 = verticesB[3],
                 b0x = b0.x, b0y = b0.y, b1x = b1.x, b1y = b1.y,
                 b2x = b2.x, b2y = b2.y, b3x = b3.x, b3y = b3.y;
 
@@ -237,20 +329,13 @@ var Pair = require('./Pair');
                 var qAxis = axes[i],
                     qAxisX = qAxis.x,
                     qAxisY = qAxis.y,
-                    qa0 = a0x * qAxisX + a0y * qAxisY,
-                    qa1 = a1x * qAxisX + a1y * qAxisY,
-                    qa2 = a2x * qAxisX + a2y * qAxisY,
-                    qa3 = a3x * qAxisX + a3y * qAxisY,
-                    qMinA = qa0, qMaxA = qa0,
+                    qMinA = sp[i * 2],
+                    qMaxA = sp[i * 2 + 1],
                     qb0 = b0x * qAxisX + b0y * qAxisY,
                     qb1 = b1x * qAxisX + b1y * qAxisY,
                     qb2 = b2x * qAxisX + b2y * qAxisY,
                     qb3 = b3x * qAxisX + b3y * qAxisY,
                     qMinB = qb0, qMaxB = qb0;
-
-                if (qa1 > qMaxA) { qMaxA = qa1; } else if (qa1 < qMinA) { qMinA = qa1; }
-                if (qa2 > qMaxA) { qMaxA = qa2; } else if (qa2 < qMinA) { qMinA = qa2; }
-                if (qa3 > qMaxA) { qMaxA = qa3; } else if (qa3 < qMinA) { qMinA = qa3; }
 
                 if (qb1 > qMaxB) { qMaxB = qb1; } else if (qb1 < qMinB) { qMinB = qb1; }
                 if (qb2 > qMaxB) { qMaxB = qb2; } else if (qb2 < qMinB) { qMinB = qb2; }
@@ -275,29 +360,17 @@ var Pair = require('./Pair');
             return;
         }
 
-        var verticesAX = verticesA[0].x,
-            verticesAY = verticesA[0].y,
-            verticesBX = verticesB[0].x,
+        var verticesBX = verticesB[0].x,
             verticesBY = verticesB[0].y;
 
         for (i = 0; i < axesLength; i++) {
             var axis = axes[i],
                 axisX = axis.x,
                 axisY = axis.y,
-                minA = verticesAX * axisX + verticesAY * axisY,
+                minA = sp[i * 2],
+                maxA = sp[i * 2 + 1],
                 minB = verticesBX * axisX + verticesBY * axisY,
-                maxA = minA,
                 maxB = minB;
-
-            for (j = 1; j < verticesALength; j += 1) {
-                dot = verticesA[j].x * axisX + verticesA[j].y * axisY;
-
-                if (dot > maxA) {
-                    maxA = dot;
-                } else if (dot < minA) {
-                    minA = dot;
-                }
-            }
 
             for (j = 1; j < verticesBLength; j += 1) {
                 dot = verticesB[j].x * axisX + verticesB[j].y * axisY;

@@ -175,7 +175,13 @@ var Common = require('../core/Common');
             translateX = vector.x * scalar,
             translateY = vector.y * scalar,
             i;
-        
+
+        // the self-projection memo describes these vertex positions
+        var spBody = verticesLength > 0 ? vertices[0].body : null;
+        if (spBody) {
+            spBody._spValid = false;
+        }
+
         for (i = 0; i < verticesLength; i++) {
             vertices[i].x += translateX;
             vertices[i].y += translateY;
@@ -204,6 +210,12 @@ var Common = require('../core/Common');
             dx,
             dy,
             i;
+
+        // the self-projection memo describes these vertex positions
+        var spBody = verticesLength > 0 ? vertices[0].body : null;
+        if (spBody) {
+            spBody._spValid = false;
+        }
 
         for (i = 0; i < verticesLength; i++) {
             vertex = vertices[i];
@@ -260,6 +272,12 @@ var Common = require('../core/Common');
 
         var vertex,
             delta;
+
+        // the self-projection memo describes these vertex positions
+        var spBody = vertices.length > 0 ? vertices[0].body : null;
+        if (spBody) {
+            spBody._spValid = false;
+        }
 
         for (var i = 0; i < vertices.length; i++) {
             vertex = vertices[i];

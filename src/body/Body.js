@@ -146,7 +146,24 @@ var Axes = require('../geometry/Axes');
             _sIndexedAt: -1,
             _sWalk: 0,
             _sWorldIndex: 0,
-            _sDeparted: false
+            _sDeparted: false,
+            // the cell span this body was BUCKETED at. Unbucketing has to know
+            // which cells it vacated in order to invalidate the movers standing
+            // over them, and by then its live bounds no longer say: a released
+            // tile has already been integrated by Engine._bodiesUpdate before
+            // the broadphase runs
+            _sCx0: 0,
+            _sCx1: 0,
+            _sCy0: 0,
+            _sCy1: 0,
+            // Collision._selfProjection memo: this body's own vertices projected
+            // onto its own axes, packed flat as [min0, max0, min1, max1, ...],
+            // one pair per axis. _spValid is cleared by every site that moves a
+            // vertex or changes the axes (see Vertices.translate/rotate/scale,
+            // Body.setVertices/setParts/scale and the inlined rotate in
+            // Body.setPositionAndAngle)
+            _sp: null,
+            _spValid: false
         };
 
         var body = Common.extend(defaults, options);
@@ -295,6 +312,12 @@ var Axes = require('../geometry/Axes');
             case 'parts':
                 Body.setParts(body, value);
                 break;
+            case 'axes':
+                // same assignment the default branch makes, plus the
+                // self-projection memo invalidation replacing axes needs
+                body.axes = value;
+                body._spValid = false;
+                break;
             case 'centre':
                 Body.setCentre(body, value);
                 break;
@@ -432,6 +455,9 @@ var Axes = require('../geometry/Axes');
 
         // update properties
         body.axes = Axes.fromVertices(body.vertices);
+        // both the vertices and the axes have been replaced, so the
+        // self-projection memo is stale (and possibly the wrong length)
+        body._spValid = false;
         body.area = Vertices.area(body.vertices);
         Body.setMass(body, body.density * body.area);
 
@@ -466,6 +492,10 @@ var Axes = require('../geometry/Axes');
      */
     Body.setParts = function(body, parts, autoHull) {
         var i;
+
+        // the hull below rebuilds this body's vertices and axes, so the
+        // self-projection memo is stale (and possibly the wrong length)
+        body._spValid = false;
 
         // add all the parts, ensuring that the first part is always the parent body
         parts = parts.slice(0);
@@ -667,6 +697,10 @@ var Axes = require('../geometry/Axes');
             maxX = 0,
             minY = 0,
             maxY = 0;
+
+        // the vertex and axis writes below are inlined rather than routed
+        // through Vertices.rotate / Axes.rotate, so invalidate here too
+        body._spValid = false;
 
         for (var i = 0; i < verticesLength; i++) {
             var vertex = vertices[i],
@@ -877,6 +911,9 @@ var Axes = require('../geometry/Axes');
 
             // update properties
             part.axes = Axes.fromVertices(part.vertices);
+            // the axes have been replaced, so the self-projection memo is stale
+            // (and possibly the wrong length)
+            part._spValid = false;
             part.area = Vertices.area(part.vertices);
             Body.setMass(part, body.density * part.area);
 
