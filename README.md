@@ -18,7 +18,7 @@ For scenes that are mostly static bodies, the opt-in `gridStatic` mode goes furt
 Install from a release tag (`v0.20.0-perfN`). The built bundle (`build/matter.js`) is committed, so there is no build step.
 
 ```bash
-npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-perf12.tar.gz
+npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-perf13.tar.gz
 ```
 
 ## Usage
@@ -45,7 +45,7 @@ Matter.Detector.setGridDynamic(body, true);
 
 ## Performance
 
-Measured at [`v0.20.0-perf11`](https://github.com/alexreardon/matter-js/releases/tag/v0.20.0-perf11). `perf12` cut body creation after these were taken, so the destruction scene is understated here; the rest of the step is unchanged.
+Measured at [`v0.20.0-perf11`](https://github.com/alexreardon/matter-js/releases/tag/v0.20.0-perf11). Two releases have landed since, so every `gridStatic` number below is understated: `perf12` cut body creation, and `perf13` took a further `-5.6%` on a calm page, `-6.3%` firing, `-4.6%` on the storm and `-17%` on the destruction scene.
 
 Time for one `Engine.update` (lower is faster):
 
