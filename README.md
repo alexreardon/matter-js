@@ -9,9 +9,9 @@ Built for [Page Rage](https://page-rage.com), where a web page is shattered into
 
 ## Rationale
 
-As a drop-in replacement this fork is always faster than upstream: `16-44%` faster per `Engine.update` on every benchmarked scene, with less allocation everywhere.
+As a drop-in replacement this fork is always faster than upstream: `17-43%` faster per `Engine.update` on every benchmarked scene, with less allocation everywhere.
 
-For scenes that are mostly static bodies, the opt-in `gridStatic` mode goes further. Upstream's per-step work scales with _total_ body count — the sweep broadphase re-sorts every body on every step, and the engine walks the whole world several times per update, so on a scene with `5000` static tiles and `50` movers almost all of that work rediscovers that nothing moved. The opt-in `gridStatic` broadphase makes per-step cost scale with the number of _moving_ bodies instead: `2-7x` faster than upstream on [Page Rage](https://page-rage.com) scenes, with up to `-96%` allocation per step.
+For scenes that are mostly static bodies, the opt-in `gridStatic` mode goes further. Upstream's per-step work scales with _total_ body count — the sweep broadphase re-sorts every body on every step, and the engine walks the whole world several times per update, so on a scene with `5000` static tiles and `50` movers almost all of that work rediscovers that nothing moved. The opt-in `gridStatic` broadphase makes per-step cost scale with the number of _moving_ bodies instead: `2.3-7x` faster than upstream on [Page Rage](https://page-rage.com) scenes, with up to `-96%` allocation per step.
 
 ## Installation
 
@@ -41,62 +41,66 @@ Matter.Detector._cellSize = 32;
 Matter.Detector.setGridDynamic(body, true);
 ```
 
-`gridStatic` buckets static bodies into a grid once and keeps the index up to date as bodies come and go. Each step only movers are re-bucketed, and only movers generate candidate pairs — the static field is never tested against itself. Use it when your scene is mostly static scenery: tile maps, level geometry, destructible terrain. On scenes with few statics there is nothing to skip and the bookkeeping costs `4-13%`, which is why it is opt-in.
+`gridStatic` buckets static bodies into a grid once and keeps the index up to date as bodies come and go. Each step only movers are re-bucketed, and only movers generate candidate pairs — the static field is never tested against itself. Use it when your scene is mostly static scenery: tile maps, level geometry, destructible terrain. On scenes with few statics there is nothing to skip and the bookkeeping costs `1-8%`, which is why it is opt-in.
 
 ## Performance
 
-Measured at [`v0.20.0-perf11`](https://github.com/alexreardon/matter-js/releases/tag/v0.20.0-perf11). Two releases have landed since, so every `gridStatic` number below is understated: `perf12` cut body creation, and `perf13` took a further `-5.6%` on a calm page, `-6.3%` firing, `-4.6%` on the storm and `-17%` on the destruction scene.
+Measured at [`v0.20.0-perf13`](https://github.com/alexreardon/matter-js/releases/tag/v0.20.0-perf13).
 
 Time for one `Engine.update` (lower is faster):
 
 | Scenario | Bodies | Upstream `0.20.0` | Fork (drop-in) | Fork (`gridStatic`) |
 | --- | --- | --- | --- | --- |
 | **General** | | | | |
-| Box stack settling | `339` | `297us` | `213us` (`-28%`) | `239us` (`-19%`) |
-| Mixed shapes pile | `303` | `1053us` | `881us` (`-16%`) | `932us` (`-11%`) |
-| Constraint chains | `315` | `341us` | `278us` (`-18%`) | `290us` (`-15%`) |
-| Sleeping enabled | `403` | `375us` | `274us` (`-27%`) | `310us` (`-17%`) |
-| Moving static platforms | `319` | `516us` | `394us` (`-24%`) | `428us` (`-17%`) |
+| Box stack settling | `339` | `299us` | `215us` (`-28%`) | `228us` (`-24%`) |
+| Mixed shapes pile | `303` | `1043us` | `693us` (`-34%`) | `727us` (`-30%`) |
+| Constraint chains | `315` | `337us` | `279us` (`-17%`) | `281us` (`-17%`) |
+| Sleeping enabled | `403` | `373us` | `274us` (`-27%`) | `296us` (`-21%`) |
+| Moving static platforms | `319` | `508us` | `389us` (`-23%`) | `402us` (`-21%`) |
 | **[Page Rage](https://page-rage.com)** | | | | |
-| Page, calm | `5,303` | `2514us` | `1412us` (`-44%`) | `555us` (`-78%`) |
-| Page, debris raining | `5,303` | `2466us` | `1382us` (`-44%`) | `530us` (`-78%`) |
-| Page, firing | `5,311` | `2563us` | `1459us` (`-43%`) | `594us` (`-77%`) |
-| Page, 800-mover storm | `5,803` | `4808us` | `3083us` (`-36%`) | `1811us` (`-62%`) |
-| Page, being destroyed | `5,003` | `6073us` | `5087us` (`-16%`) | `2023us` (`-67%`) |
-| Page, calm (2000 tiles) | `2,303` | `1033us` | `692us` (`-33%`) | `484us` (`-53%`) |
-| Page, calm (8000 tiles) | `8,303` | `4135us` | `2379us` (`-42%`) | `588us` (`-86%`) |
+| Page, calm | `5,303` | `2652us` | `1503us` (`-43%`) | `522us` (`-80%`) |
+| Page, debris raining | `5,303` | `2316us` | `1422us` (`-39%`) | `497us` (`-79%`) |
+| Page, firing | `5,311` | `2564us` | `1649us` (`-36%`) | `559us` (`-78%`) |
+| Page, 800-mover storm | `5,803` | `4642us` | `3184us` (`-31%`) | `1679us` (`-64%`) |
+| Page, being destroyed | `5,003` | `5659us` | `4663us` (`-18%`) | `1661us` (`-71%`) |
+| Page, calm (2000 tiles) | `2,303` | `1050us` | `719us` (`-32%`) | `465us` (`-56%`) |
+| Page, calm (8000 tiles) | `8,303` | `3927us` | `2553us` (`-35%`) | `559us` (`-86%`) |
 
 Heap growth per step (less garbage means fewer GC pauses mid-simulation):
 
 | Scenario | Upstream `0.20.0` | Fork (drop-in) | Fork (`gridStatic`) |
 | --- | --- | --- | --- |
-| Box stack settling | `35.8 KB` | `5.1 KB` (`-86%`) | `2.9 KB` (`-92%`) |
-| Mixed shapes pile | `84.6 KB` | `21.5 KB` (`-75%`) | `14.4 KB` (`-83%`) |
-| Constraint chains | `193.9 KB` | `167.5 KB` (`-14%`) | `151.1 KB` (`-22%`) |
-| Sleeping enabled | `46.4 KB` | `11.7 KB` (`-75%`) | `11.0 KB` (`-76%`) |
-| Moving static platforms | `89.1 KB` | `55.0 KB` (`-38%`) | `38.0 KB` (`-57%`) |
-| Page, calm | `133.0 KB` | `59.7 KB` (`-55%`) | `5.1 KB` (`-96%`) |
-| Page, debris raining | `127.2 KB` | `63.5 KB` (`-50%`) | `10.3 KB` (`-92%`) |
-| Page, firing | `135.9 KB` | `71.0 KB` (`-48%`) | `14.8 KB` (`-89%`) |
-| Page, 800-mover storm | `288.7 KB` | `116.7 KB` (`-60%`) | `40.4 KB` (`-86%`) |
-| Page, being destroyed | `1283.8 KB` | `1216.0 KB` (`-5%`) | `363.7 KB` (`-72%`) |
-| Page, calm (2000 tiles) | `87.7 KB` | `30.1 KB` (`-66%`) | `6.4 KB` (`-93%`) |
-| Page, calm (8000 tiles) | `160.1 KB` | `91.8 KB` (`-43%`) | `6.7 KB` (`-96%`) |
+| Box stack settling | `35.8 KB` | `5.0 KB` (`-86%`) | `2.8 KB` (`-92%`) |
+| Mixed shapes pile | `86.6 KB` | `21.5 KB` (`-75%`) | `14.4 KB` (`-83%`) |
+| Constraint chains | `193.9 KB` | `173.5 KB` (`-11%`) | `157.1 KB` (`-19%`) |
+| Sleeping enabled | `46.5 KB` | `13.2 KB` (`-72%`) | `11.3 KB` (`-76%`) |
+| Moving static platforms | `89.3 KB` | `55.0 KB` (`-38%`) | `39.7 KB` (`-56%`) |
+| Page, calm | `133.0 KB` | `59.7 KB` (`-55%`) | `6.6 KB` (`-95%`) |
+| Page, debris raining | `127.2 KB` | `63.3 KB` (`-50%`) | `11.2 KB` (`-91%`) |
+| Page, firing | `135.9 KB` | `73.4 KB` (`-46%`) | `15.1 KB` (`-89%`) |
+| Page, 800-mover storm | `288.7 KB` | `113.5 KB` (`-61%`) | `40.4 KB` (`-86%`) |
+| Page, being destroyed | `1283.8 KB` | `1157.0 KB` (`-10%`) | `264.1 KB` (`-79%`) |
+| Page, calm (2000 tiles) | `87.4 KB` | `30.1 KB` (`-66%`) | `6.4 KB` (`-93%`) |
+| Page, calm (8000 tiles) | `155.8 KB` | `85.8 KB` (`-45%`) | `6.6 KB` (`-96%`) |
 
 <details>
 <summary>How these are measured</summary>
 
 `npm run bench-suite` runs [`bench/suite.js`](bench/suite.js): this fork against upstream `matter-js@0.20.0`, in one process, on identical worlds, in alternating timed blocks. The upstream baseline is provisioned automatically as a git worktree of the `0.20.0` tag. Three arms keep the broadphase separable from the rest of the work: upstream, the fork in drop-in mode (upstream's sweep broadphase), and the fork in `gridStatic` mode.
 
-Simulation time is microseconds per `Engine.update`: the mean of the fastest fifth of `24` blocks per arm, best of three separate processes (a single process can run hot), on an Apple M1 Pro under Node 24. Memory is heap growth per step across collection-free windows (`npm run bench-suite -- --alloc`), so short-lived garbage counts too.
+Simulation time is microseconds per `Engine.update`, on an Apple M1 Pro under Node 24: the mean of the fastest fifth of blocks per arm (`24` blocks for the general scenes, `40` for the page scenes), each arm keeping its best across three processes per scenario, and each published cell then the fastest of three full suite runs. Memory is heap growth per step across collection-free windows (`npm run bench-suite -- --alloc`), so short-lived garbage counts too.
+
+Three full runs rather than one, because the upstream arm is the volatile one: its sweep broadphase insertion-sorts every body every step, so it is memory-bound and takes the brunt of whatever else the machine is doing. One scenario read `24%` apart between two runs of identical code. Keeping the fastest reading per cell (the least-contended sample) is what brings every upstream number back within `7%` of the previous release's, and that agreement is the check that the table is measuring the engine and not a busy laptop. The two fork columns are far steadier, because they touch much less memory. Allocation needs none of this: the upstream figures reproduce to the decimal across runs.
 
 The general scenes are typical matter scenes — a few hundred dynamic bodies, no static field — and exist to catch regressions outside the regime this fork targets. The page scenes are that regime.
 
 What the tables say:
 
-- The win grows with the size of the static field: `-53%` at `2000` tiles, `-78%` at `5000`, `-86%` at `8000`.
-- `gridStatic` costs `4-13%` on the general scenes (nothing to skip) and is worth a further `1.4x` to `4x` on a page. That is why it is opt-in.
-- The narrowest win is the storm, dominated by contact solving, which this fork does not change. The destruction scene was in that category too until `perf12` made body creation `61%` cheaper, which these numbers predate.
+- The win grows with the size of the static field: `-56%` at `2000` tiles, `-80%` at `5000`, `-86%` at `8000`.
+- `gridStatic` costs `1-8%` on the general scenes (nothing to skip) and is worth a further `1.6x` to `4.6x` on a page. That is why it is opt-in.
+- The narrowest win is the storm, dominated by contact solving, which this fork does not change.
+- The destruction scene used to be in that category too, at `-67%` and allocating `364 KB` a step. `perf12` made body creation `61%` cheaper and `perf13` stopped a candidate cache being thrown away every step, together taking it to `-71%` and `264 KB`.
+- The general scenes are not static either: the mixed shapes pile went from `-16%` to `-34%` drop-in at `perf13`, because the memoised self-projection it added pays most on bodies with many axes, which is exactly what that scene is full of.
 
 </details>
 
@@ -104,7 +108,7 @@ What the tables say:
 
 [Rapier](https://rapier.rs/) is a 2D physics engine written in Rust and compiled to WASM, and swapping to it looks like a free native-code win. It isn't, because stepping the world is not the whole cost: the renderer lives in JS, so every frame reads every body's position and rotation back across the WASM boundary (`~0.4us` per body), and destruction crosses the boundary again for every body added or removed.
 
-With that readback included, Rapier and this fork are about equal on a calm or firing page. Rapier stays `25-38%` ahead at peak load, but on a calm page it allocates `~60x` more memory per frame than this fork. Allocation matters: the more garbage a frame creates, the more often the garbage collector pauses the game, and those pauses are visible as stutter.
+With that readback included, Rapier and this fork are level on a calm or firing page. Rapier stays about `25%` ahead at peak load, but on a calm page it allocates `~29x` more memory per frame than this fork. Allocation matters: the more garbage a frame creates, the more often the garbage collector pauses the game, and those pauses are visible as stutter.
 
 <details>
 <summary>The full comparison</summary>
@@ -121,47 +125,49 @@ Time for one step (lower is faster):
 | Scenario | Bodies | Upstream `0.20.0` | Fork (`gridStatic`) | Rapier (step only) | Rapier (+ readback) |
 | --- | --- | --- | --- | --- | --- |
 | **General** | | | | | |
-| Box stack settling | `339` | `311us` | `256us` (`-18%`) | `462us` (`+49%`) | `599us` (`+93%`) |
-| Mixed shapes pile | `303` | `1060us` | `943us` (`-11%`) | `379us` (`-64%`) | `499us` (`-53%`) |
+| Box stack settling | `339` | `300us` | `236us` (`-21%`) | `443us` (`+48%`) | `578us` (`+93%`) |
+| Mixed shapes pile | `303` | `1070us` | `744us` (`-30%`) | `378us` (`-65%`) | `502us` (`-53%`) |
 | **[Page Rage](https://page-rage.com)** | | | | | |
-| Page, calm | `5,303` | `2379us` | `567us` (`-76%`) | `421us` (`-82%`) | `531us` (`-78%`) |
-| Page, firing | `5,311` | `2474us` | `600us` (`-76%`) | `450us` (`-82%`) | `561us` (`-77%`) |
-| Page, 800-mover storm | `5,803` | `4656us` | `1851us` (`-60%`) | `1050us` (`-77%`) | `1385us` (`-70%`) |
-| Page, being destroyed | `5,003` | `5799us` | `2103us` (`-64%`) | `1082us` (`-81%`) | `1303us` (`-78%`) |
+| Page, calm | `5,303` | `2557us` | `535us` (`-79%`) | `423us` (`-83%`) | `545us` (`-79%`) |
+| Page, firing | `5,311` | `2521us` | `563us` (`-78%`) | `449us` (`-82%`) | `561us` (`-78%`) |
+| Page, 800-mover storm | `5,803` | `4637us` | `1707us` (`-63%`) | `1015us` (`-78%`) | `1369us` (`-70%`) |
+| Page, being destroyed | `5,003` | `5459us` | `1674us` (`-69%`) | `1117us` (`-80%`) | `1321us` (`-76%`) |
 
 Heap growth per step. Rapier's own step barely allocates on the JS heap — nearly all of its readback column is boundary overhead, because every `translation()` call creates a fresh `{x, y}` object:
 
 | Scenario | Upstream `0.20.0` | Fork (`gridStatic`) | Rapier (step only) | Rapier (+ readback) |
 | --- | --- | --- | --- | --- |
-| Box stack settling | `34.2 KB` | `0.9 KB` | `0.9 KB` | `138.4 KB` |
-| Mixed shapes pile | `82.3 KB` | `9.9 KB` | `1.0 KB` | `125.5 KB` |
-| Page, calm | `125.2 KB` | `2.1 KB` | `1.0 KB` | `125.8 KB` |
-| Page, firing | `132.7 KB` | `12.3 KB` | `3.8 KB` | `129.7 KB` |
-| Page, 800-mover storm | `275.3 KB` | `29.4 KB` | `1.0 KB` | `301.3 KB` |
-| Page, being destroyed | `1302.6 KB` | `379.3 KB` | `42.0 KB` | `230.2 KB` |
+| Box stack settling | `35.9 KB` | `3.0 KB` | `0.8 KB` | `172.9 KB` |
+| Mixed shapes pile | `86.4 KB` | `12.9 KB` | `2.5 KB` | `143.8 KB` |
+| Page, calm | `132.8 KB` | `5.1 KB` | `0.9 KB` | `146.2 KB` |
+| Page, firing | `137.2 KB` | `15.3 KB` | `3.7 KB` | `149.1 KB` |
+| Page, 800-mover storm | `286.4 KB` | `37.5 KB` | `0.8 KB` | `388.4 KB` |
+| Page, being destroyed | `1266.6 KB` | `258.2 KB` | `43.2 KB` | `274.1 KB` |
 
 What the tables say:
 
-- Readback cost grows linearly with body count: `~0.4us` per body per frame, which adds `20-32%` to every scene. Rapier has no batched way to read poses, so each body costs one `translation()` and one `rotation()` call.
-- On the calm and firing pages, readback cancels out Rapier's lead: `531us` vs `567us`. At peak load (storm, destruction) Rapier stays `25-38%` ahead.
+- Readback cost grows linearly with body count: `~0.4us` per body per frame, which adds `18-35%` to every scene. Rapier has no batched way to read poses, so each body costs one `translation()` and one `rotation()` call.
+- On the calm and firing pages, readback more than cancels out Rapier's lead: `545us` vs `535us` calm, `561us` vs `563us` firing. At peak load (storm, destruction) Rapier stays `25-27%` ahead.
 - With sleeping off, Rapier does not win every scene on raw physics either: it is slower on the box stack, and much faster on mixed shapes (it has true circle colliders; matter approximates circles with polygons).
-- Readback also allocates heavily: `~7.5MB/s` at 60fps on a calm page, about `60x` this fork. Destruction is the one scene where Rapier allocates less, because its bodies are created inside WASM.
+- Readback also allocates heavily: `~8.8MB/s` at 60fps on a calm page, about `29x` this fork. Destruction used to be the one scene where Rapier allocated less; `perf13` closed that (`258 KB` against Rapier's `274 KB`) by no longer rebuilding a broadphase cache on every step of a membership change.
 
 <details>
 <summary>What about sleeping?</summary>
 
-Rapier's headline numbers rely on sleeping: the settled box stack steps in `18us` instead of `462us`. Readback does not sleep, though — it still visits all `336` sleeping bodies, costing `7x` the physics. With sleeping on in both engines (`ALLOW_SLEEP=1 npm run bench-rapier`):
+Rapier's headline numbers rely on sleeping: the settled box stack steps in `17us` instead of `443us`. Readback does not sleep, though — it still visits all `336` sleeping bodies, costing `8x` the physics. With sleeping on in both engines (`ALLOW_SLEEP=1 npm run bench-rapier`):
 
 | Scenario | Fork (`gridStatic`) | Rapier (step only) | Rapier (+ readback) | Asleep (fork vs rapier) |
 | --- | --- | --- | --- | --- |
-| Page, calm | `314us` | `128us` | `241us` | `300/300` vs `300/300` |
-| Page, firing | `380us` | `151us` | `269us` | `293` vs `300` |
-| Page, being destroyed | `2770us` | `1094us` | `1313us` | `0` vs `0` — debris lives 40 frames, never sleeps |
-| Page, 800-mover storm | `461us` | `1032us` | `1371us` | ⚠ `796` vs `7` — not comparable |
-| Box stack settling | `268us` | `18us` | `149us` | ⚠ `0` vs `336` — not comparable |
-| Mixed shapes pile | `24us` | `368us` | `492us` | ⚠ `300` vs `1` — not comparable |
+| Page, calm | `398us` | `129us` | `250us` | `300/300` vs `300/300` |
+| Page, firing | `475us` | `152us` | `266us` | `293` vs `300` |
+| Page, being destroyed | `2408us` | `1116us` | `1307us` | `0` vs `0` — debris lives 40 frames, never sleeps |
+| Page, 800-mover storm | `527us` | `993us` | `1328us` | ⚠ `796` vs `7` — not comparable |
+| Box stack settling | `253us` | `17us` | `147us` | ⚠ `0` vs `336` — not comparable |
+| Mixed shapes pile | `23us` | `366us` | `498us` | ⚠ `300` vs `1` — not comparable |
 
-The engines sleep different scenes: matter cannot sleep a dense stack (solver jitter keeps bodies above the wake threshold), and Rapier will not sleep rolling circles or the storm pile. On the rows where both engines sleep the same bodies, sleeping is worth `1.8x` to this fork and `3.3x` to Rapier — and nothing to either engine during destruction, because debris only lives `40` frames and never sleeps.
+The engines sleep different scenes: matter cannot sleep a dense stack (solver jitter keeps bodies above the wake threshold), and Rapier will not sleep rolling circles or the storm pile. On the rows where both engines sleep the same bodies, sleeping is worth `1.2x` to `1.3x` to this fork and `3.0x` to `3.3x` to Rapier.
+
+During destruction it is worse than nothing for this fork: `2408us` with sleeping enabled against `1674us` without. Debris lives `40` frames and never sleeps, so none of the bookkeeping pays for itself, and enabling sleeping also brings back the whole-world force pass that `perf10` scoped away (`Sleeping.update` reads a resting body's force to decide whether to wake it, which is the one observable use).
 
 Enabling sleeping also reproduced a real bug: `Body.setVelocity` does not wake a sleeping body, so released tiles hung in mid-air until the bench added `Sleeping.set(body, false)` on release. The scenes where sleeping helps are the scenes the game cannot enable it in.
 
@@ -170,7 +176,7 @@ Enabling sleeping also reproduced a real bug: `Body.setVelocity` does not wake a
 <details>
 <summary>How these are measured</summary>
 
-Same method as the suite above: four arms in one process on identical worlds, alternating timed blocks, mean of the fastest fifth of `24` blocks, best of three processes, on an Apple M1 Pro under Node 22. Each scenario checks that body counts match, positions stay finite, and stacks settle to the same heights.
+Same method as the suite above: four arms in one process on identical worlds, alternating timed blocks, mean of the fastest fifth of `24` blocks, best of three processes, on an Apple M1 Pro under Node 24. Each scenario checks that body counts match, positions stay finite, and stacks settle to the same heights.
 
 Rapier runs its 2D defaults (`numSolverIterations: 4`, a higher-quality solver than matter's — but dropping it to `1` only saves `~4%`, so solver quality does not explain the gap). Gravity, damping and velocities are unit-converted so both engines integrate the same trajectories. One known flaw: `3` of the `800` storm movers escape the bowl in the Rapier arms (`0.4%`, in Rapier's favour).
 
@@ -194,6 +200,9 @@ Each change was A/B'd on its own against the previous release tag. Benefit is wh
 | **Static index maintained, not rebuilt** — membership changes are applied as a difference instead of firing a full rebuild | `-45%` while bodies are added and removed every step |
 | **Removed bodies stop being simulated** — a removed body's decaying position impulse is cleared | `-2%` during churn, and a correctness fix |
 | **Cheaper body creation** — rectangles build their corners directly instead of concatenating a path string and parsing it back with a regex, and `Body.create` no longer parses a throwaway default vertex set the caller immediately overwrites | `-61%` per `Bodies.rectangle`, `-4%` whole-step during churn |
+| **Cache invalidation scoped to what changed** — the per-mover static-candidate cache is invalidated by the CELLS a membership change touched, instead of by a global epoch that any change anywhere bumped. That epoch had driven its hit rate to zero in exactly the regime it exists for | `-14%` while bodies are added and removed every step |
+| **Memoised self-projection** — each body's projection onto its own axes is a pair-independent reduction, so it is computed once per move instead of once per pair the body takes part in | `-5%` to `-6%` on a page, `-22%` on the mixed shapes pile |
+| **Shorter broadphase chain walks** — a mover starts its cell walk at its own entry rather than the chain head, skipping a prefix it would only reject | `-2%` to `-3%` |
 | **Allocation micro-optimisations** — numeric pair ids, a collision record cache, an unrolled box-vs-box SAT path | `-34%` allocation per update |
 
 ## Differences from upstream
