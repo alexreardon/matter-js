@@ -402,7 +402,15 @@ var Bounds = require('../geometry/Bounds');
                     }
                 }
 
+                // a body the position solve could not move has an unchanged
+                // snapshot, so its write-back is a no-op by value; skip it
+                // (solver bodies are mostly statics on a dense page)
+                var backCanMove = soaBack.canMove;
                 for (back = 0; back < backBodyCount; back++) {
+                    if (backCanMove[back] === 0) {
+                        continue;
+                    }
+
                     var backImpulse = solverBodies[back].positionImpulse;
                     backImpulse.x = backImpX[back];
                     backImpulse.y = backImpY[back];
@@ -419,17 +427,23 @@ var Bounds = require('../geometry/Bounds');
                 if (carryBody._solverStamp === epoch) {
                     continue;
                 }
-                if (postSolveBody(carryBody)) {
+                // the zero-impulse early-return of _postSolveBody, inlined to
+                // skip the call (a removed body's impulse is zeroed in place)
+                var carryImpulse = carryBody.positionImpulse;
+                if ((carryImpulse.x !== 0 || carryImpulse.y !== 0) && postSolveBody(carryBody)) {
                     // in-place compaction: carryCount <= i always holds here
                     carry[carryCount++] = carryBody;
                 }
             }
 
             // bodies touched by this step's pairs; append any that finish the
-            // step still carrying a warmed impulse
+            // step still carrying a warmed impulse. The zero-impulse check is
+            // inlined because most solver bodies on a dense page are statics
+            // that never accumulate one.
             for (i = 0; i < solverBodiesLength; i++) {
-                var solverBody = solverBodies[i];
-                if (postSolveBody(solverBody)) {
+                var solverBody = solverBodies[i],
+                    solverImpulse = solverBody.positionImpulse;
+                if ((solverImpulse.x !== 0 || solverImpulse.y !== 0) && postSolveBody(solverBody)) {
                     carry[carryCount++] = solverBody;
                 }
             }
@@ -775,9 +789,15 @@ var Bounds = require('../geometry/Bounds');
 
         soaV.dirty = false;
 
-        // untouched bodies (sensor-only, static) write back their unchanged
-        // snapshot: a no-op by value
+        // a body the velocity solve could not move (static or sleeping, per
+        // the snapshot flag; nothing wakes bodies between the snapshot and
+        // here) has unchanged values, so its write-back is skipped outright
+        var bCanMove = soaV.bCanMove;
         for (i = 0; i < bodyCount; i++) {
+            if (bCanMove[i] === 0) {
+                continue;
+            }
+
             var writeBody = solverBodies[i],
                 writeBodyPositionPrev = writeBody.positionPrev;
             writeBodyPositionPrev.x = bPosPrevX[i];
