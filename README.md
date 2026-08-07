@@ -9,16 +9,16 @@ Built for [Page Rage](https://page-rage.com), where a web page is shattered into
 
 ## Rationale
 
-As a drop-in replacement this fork is always faster than upstream: `17-43%` faster per `Engine.update` on every benchmarked scene, with less allocation everywhere.
+As a drop-in replacement this fork is always faster than upstream: `17-38%` faster per `Engine.update` on every benchmarked scene, with less allocation everywhere.
 
-For scenes that are mostly static bodies, the opt-in `gridStatic` mode goes further. Upstream's per-step work scales with _total_ body count — the sweep broadphase re-sorts every body on every step, and the engine walks the whole world several times per update, so on a scene with `5000` static tiles and `50` movers almost all of that work rediscovers that nothing moved. The opt-in `gridStatic` broadphase makes per-step cost scale with the number of _moving_ bodies instead: `2.3-7x` faster than upstream on [Page Rage](https://page-rage.com) scenes, with up to `-96%` allocation per step.
+For scenes that are mostly static bodies, the opt-in `gridStatic` mode goes further. Upstream's per-step work scales with _total_ body count — the sweep broadphase re-sorts every body on every step, and the engine walks the whole world several times per update, so on a scene with `5000` static tiles and `50` movers almost all of that work rediscovers that nothing moved. The opt-in `gridStatic` broadphase makes per-step cost scale with the number of _moving_ bodies instead: `2.4-7.3x` faster than upstream on [Page Rage](https://page-rage.com) scenes, with up to `-98%` allocation per step.
 
 ## Installation
 
 Install from a release tag (`v0.20.0-perfN`). The built bundle (`build/matter.js`) is committed, so there is no build step.
 
 ```bash
-npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-perf13.tar.gz
+npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-perf14.tar.gz
 ```
 
 ## Usage
@@ -45,43 +45,43 @@ Matter.Detector.setGridDynamic(body, true);
 
 ## Performance
 
-Measured at [`v0.20.0-perf13`](https://github.com/alexreardon/matter-js/releases/tag/v0.20.0-perf13).
+Measured at [`v0.20.0-perf14`](https://github.com/alexreardon/matter-js/releases/tag/v0.20.0-perf14).
 
 Time for one `Engine.update` (lower is faster):
 
 | Scenario | Bodies | Upstream `0.20.0` | Fork (drop-in) | Fork (`gridStatic`) |
 | --- | --- | --- | --- | --- |
 | **General** | | | | |
-| Box stack settling | `339` | `299us` | `215us` (`-28%`) | `228us` (`-24%`) |
-| Mixed shapes pile | `303` | `1043us` | `693us` (`-34%`) | `727us` (`-30%`) |
-| Constraint chains | `315` | `337us` | `279us` (`-17%`) | `281us` (`-17%`) |
-| Sleeping enabled | `403` | `373us` | `274us` (`-27%`) | `296us` (`-21%`) |
-| Moving static platforms | `319` | `508us` | `389us` (`-23%`) | `402us` (`-21%`) |
+| Box stack settling | `339` | `292us` | `216us` (`-26%`) | `227us` (`-22%`) |
+| Mixed shapes pile | `303` | `1047us` | `664us` (`-37%`) | `691us` (`-34%`) |
+| Constraint chains | `315` | `340us` | `269us` (`-21%`) | `267us` (`-21%`) |
+| Sleeping enabled | `403` | `368us` | `262us` (`-29%`) | `280us` (`-24%`) |
+| Moving static platforms | `319` | `523us` | `376us` (`-28%`) | `384us` (`-27%`) |
 | **[Page Rage](https://page-rage.com)** | | | | |
-| Page, calm | `5,303` | `2652us` | `1503us` (`-43%`) | `522us` (`-80%`) |
-| Page, debris raining | `5,303` | `2316us` | `1422us` (`-39%`) | `497us` (`-79%`) |
-| Page, firing | `5,311` | `2564us` | `1649us` (`-36%`) | `559us` (`-78%`) |
-| Page, 800-mover storm | `5,803` | `4642us` | `3184us` (`-31%`) | `1679us` (`-64%`) |
-| Page, being destroyed | `5,003` | `5659us` | `4663us` (`-18%`) | `1661us` (`-71%`) |
-| Page, calm (2000 tiles) | `2,303` | `1050us` | `719us` (`-32%`) | `465us` (`-56%`) |
-| Page, calm (8000 tiles) | `8,303` | `3927us` | `2553us` (`-35%`) | `559us` (`-86%`) |
+| Page, calm | `5,303` | `2469us` | `1538us` (`-38%`) | `491us` (`-80%`) |
+| Page, debris raining | `5,303` | `2389us` | `1471us` (`-38%`) | `467us` (`-80%`) |
+| Page, firing | `5,311` | `2445us` | `1647us` (`-33%`) | `526us` (`-78%`) |
+| Page, 800-mover storm | `5,803` | `4859us` | `3185us` (`-34%`) | `1514us` (`-69%`) |
+| Page, being destroyed | `5,003` | `5819us` | `4817us` (`-17%`) | `1419us` (`-76%`) |
+| Page, calm (2000 tiles) | `2,303` | `1036us` | `701us` (`-32%`) | `435us` (`-58%`) |
+| Page, calm (8000 tiles) | `8,303` | `3794us` | `2819us` (`-26%`) | `521us` (`-86%`) |
 
 Heap growth per step (less garbage means fewer GC pauses mid-simulation):
 
 | Scenario | Upstream `0.20.0` | Fork (drop-in) | Fork (`gridStatic`) |
 | --- | --- | --- | --- |
-| Box stack settling | `35.8 KB` | `5.0 KB` (`-86%`) | `2.8 KB` (`-92%`) |
-| Mixed shapes pile | `86.6 KB` | `21.5 KB` (`-75%`) | `14.4 KB` (`-83%`) |
-| Constraint chains | `193.9 KB` | `173.5 KB` (`-11%`) | `157.1 KB` (`-19%`) |
-| Sleeping enabled | `46.5 KB` | `13.2 KB` (`-72%`) | `11.3 KB` (`-76%`) |
-| Moving static platforms | `89.3 KB` | `55.0 KB` (`-38%`) | `39.7 KB` (`-56%`) |
-| Page, calm | `133.0 KB` | `59.7 KB` (`-55%`) | `6.6 KB` (`-95%`) |
-| Page, debris raining | `127.2 KB` | `63.3 KB` (`-50%`) | `11.2 KB` (`-91%`) |
-| Page, firing | `135.9 KB` | `73.4 KB` (`-46%`) | `15.1 KB` (`-89%`) |
-| Page, 800-mover storm | `288.7 KB` | `113.5 KB` (`-61%`) | `40.4 KB` (`-86%`) |
-| Page, being destroyed | `1283.8 KB` | `1157.0 KB` (`-10%`) | `264.1 KB` (`-79%`) |
-| Page, calm (2000 tiles) | `87.4 KB` | `30.1 KB` (`-66%`) | `6.4 KB` (`-93%`) |
-| Page, calm (8000 tiles) | `155.8 KB` | `85.8 KB` (`-45%`) | `6.6 KB` (`-96%`) |
+| Box stack settling | `35.8 KB` | `4.5 KB` (`-87%`) | `1.7 KB` (`-95%`) |
+| Mixed shapes pile | `86.6 KB` | `19.5 KB` (`-77%`) | `12.5 KB` (`-86%`) |
+| Constraint chains | `193.7 KB` | `173.1 KB` (`-11%`) | `156.9 KB` (`-19%`) |
+| Sleeping enabled | `46.4 KB` | `10.9 KB` (`-76%`) | `9.1 KB` (`-80%`) |
+| Moving static platforms | `89.3 KB` | `45.8 KB` (`-49%`) | `36.1 KB` (`-60%`) |
+| Page, calm | `133.0 KB` | `57.5 KB` (`-57%`) | `5.1 KB` (`-96%`) |
+| Page, debris raining | `127.4 KB` | `62.5 KB` (`-51%`) | `9.6 KB` (`-92%`) |
+| Page, firing | `136.5 KB` | `69.2 KB` (`-49%`) | `11.4 KB` (`-92%`) |
+| Page, 800-mover storm | `288.7 KB` | `99.0 KB` (`-66%`) | `26.7 KB` (`-91%`) |
+| Page, being destroyed | `1283.8 KB` | `1145.7 KB` (`-11%`) | `208.0 KB` (`-84%`) |
+| Page, calm (2000 tiles) | `87.7 KB` | `27.6 KB` (`-69%`) | `5.0 KB` (`-94%`) |
+| Page, calm (8000 tiles) | `159.6 KB` | `90.8 KB` (`-43%`) | `3.6 KB` (`-98%`) |
 
 <details>
 <summary>How these are measured</summary>
@@ -96,11 +96,11 @@ The general scenes are typical matter scenes — a few hundred dynamic bodies, n
 
 What the tables say:
 
-- The win grows with the size of the static field: `-56%` at `2000` tiles, `-80%` at `5000`, `-86%` at `8000`.
-- `gridStatic` costs `1-8%` on the general scenes (nothing to skip) and is worth a further `1.6x` to `4.6x` on a page. That is why it is opt-in.
-- The narrowest win is the storm, dominated by contact solving, which this fork does not change.
-- The destruction scene used to be in that category too, at `-67%` and allocating `364 KB` a step. `perf12` made body creation `61%` cheaper and `perf13` stopped a candidate cache being thrown away every step, together taking it to `-71%` and `264 KB`.
-- The general scenes are not static either: the mixed shapes pile went from `-16%` to `-34%` drop-in at `perf13`, because the memoised self-projection it added pays most on bodies with many axes, which is exactly what that scene is full of.
+- The win grows with the size of the static field: `-58%` at `2000` tiles, `-80%` at `5000`, `-86%` at `8000`.
+- `gridStatic` costs `0-7%` on the general scenes (nothing to skip) and is worth a further `1.6x` to `5.4x` on a page. That is why it is opt-in.
+- The narrowest win is the storm, dominated by contact solving, which this fork speeds up but does not do less of.
+- The destruction scene used to be the narrow one, at `-67%` and allocating `364 KB` a step at `perf11`. `perf12` made body creation `61%` cheaper, `perf13` stopped a candidate cache being thrown away every step, and `perf14` stopped the detector copying the whole body array on every membership change, together taking it to `-76%` and `208 KB`.
+- The general scenes are not static either: the mixed shapes pile went from `-16%` to `-34%` drop-in at `perf13` (the memoised self-projection pays most on bodies with many axes), and to `-37%` at `perf14` (the solver's per-contact constants are computed once per step instead of once per iteration).
 
 </details>
 
@@ -112,6 +112,8 @@ With that readback included, Rapier and this fork are level on a calm or firing 
 
 <details>
 <summary>The full comparison</summary>
+
+_The Rapier tables were measured at `v0.20.0-perf13`; the fork's `gridStatic` column is a further `6-15%` faster (and allocates `~20%` less during destruction) at `v0.20.0-perf14`, per the suite tables above._
 
 [`bench/vs-rapier.js`](bench/vs-rapier.js) runs the suite scenes on both engines, and gives Rapier every advantage: the SIMD build, `lengthUnit` set for pixel worlds as its docs recommend, cached body references, and poses read into a preallocated `Float64Array`. The worlds are identical workloads (same seeded geometry, matched gravity, damping and combine rules). Sleeping is off in both engines, because [Page Rage](https://page-rage.com) cannot use it.
 
@@ -202,6 +204,9 @@ Each change was A/B'd on its own against the previous release tag. Benefit is wh
 | **Cheaper body creation** — rectangles build their corners directly instead of concatenating a path string and parsing it back with a regex, and `Body.create` no longer parses a throwaway default vertex set the caller immediately overwrites | `-61%` per `Bodies.rectangle`, `-4%` whole-step during churn |
 | **Cache invalidation scoped to what changed** — the per-mover static-candidate cache is invalidated by the CELLS a membership change touched, instead of by a global epoch that any change anywhere bumped. That epoch had driven its hit rate to zero in exactly the regime it exists for | `-14%` while bodies are added and removed every step |
 | **Memoised self-projection** — each body's projection onto its own axes is a pair-independent reduction, so it is computed once per move instead of once per pair the body takes part in | `-5%` to `-6%` on a page, `-22%` on the mixed shapes pile |
+| **One pair-record table** — the pairs `Map` and the direct-mapped cache in front of it became a single open-addressing table probed by the narrowphase, maintained at pair start/end | `-2%` to `-3%` |
+| **Velocity solver constants hoisted** — the velocity pre-solve builds over the position solve's snapshot instead of re-walking every pair, and per-contact offsets and the `share` divide move out of the four iterations (`4` divides per contact per step down to `1`) | `-3%` to `-4%` |
+| **The detector stops copying the body array** — the copy existed only so the sweep could sort in place; grid modes reference the caller's array, and the sweep copies lazily on first use | `-9%` while bodies are added and removed every step |
 | **Shorter broadphase chain walks** — a mover starts its cell walk at its own entry rather than the chain head, skipping a prefix it would only reject | `-2%` to `-3%` |
 | **Allocation micro-optimisations** — numeric pair ids, a collision record cache, an unrolled box-vs-box SAT path | `-34%` allocation per update |
 
