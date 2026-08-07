@@ -46,7 +46,6 @@ var Pair = require('./Pair');
             depth: 0,
             normal: { x: 0, y: 0 },
             tangent: { x: 0, y: 0 },
-            penetration: { x: 0, y: 0 },
             supports: [null, null],
             supportCount: 0
         };
@@ -128,7 +127,6 @@ var Pair = require('./Pair');
 
         var normal = collision.normal,
             tangent = collision.tangent,
-            penetration = collision.penetration,
             supports = collision.supports,
             depth = minOverlap.overlap,
             minAxis = minOverlap.axis,
@@ -148,9 +146,6 @@ var Pair = require('./Pair');
         
         tangent.x = -normalY;
         tangent.y = normalX;
-
-        penetration.x = normalX * depth;
-        penetration.y = normalY * depth;
 
         collision.depth = depth;
 
@@ -528,13 +523,6 @@ var Pair = require('./Pair');
      * @default { x: 0, y: 0 }
      */
 
-    /**
-     * A `Vector` that represents the direction and depth of the collision.
-     *
-     * @property penetration
-     * @type vector
-     * @default { x: 0, y: 0 }
-     */
 
     /**
      * An array of body vertices that represent the support points in the collision.

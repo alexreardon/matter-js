@@ -1387,10 +1387,7 @@ var Collision = require('./Collision');
                 // not generate static-static pairs (the sweep skips those)
                 mStatic = m.isStatic || m.isSleeping,
                 localStamp = ++g.stamp,
-                mcx0 = Math.floor(mMinX * invCell),
-                mcx1 = Math.floor(mMaxX * invCell),
-                mcy0 = Math.floor(mMinY * invCell),
-                mcy1 = Math.floor(mMaxY * invCell);
+                mIsOver = mOver[mGen] === 1;
 
             // Oversized mover: its bounds span more than maxCells cells, so it
             // was NOT inserted into the dynamic index. Walking its full cell
@@ -1403,7 +1400,7 @@ var Collision = require('./Collision');
             // in dOver); oversized statics/movers are handled by the sOver/dOver
             // passes below. Skipped for a static (tagged moving) mover, since
             // static-static never resolves.
-            if (mOver[mGen] === 1) {
+            if (mIsOver) {
                 // not in the mover index, so the sweep above cannot reach it;
                 // drop its cached list rather than let it survive an oversized
                 // spell and validate against cells that changed meanwhile
@@ -1423,6 +1420,14 @@ var Collision = require('./Collision');
                     }
                 }
             } else {
+                // the insert pass already floored this mover's cell span from
+                // the same flattened bounds, so reuse it (an oversized mover's
+                // span slots are unusable, but that branch never reads them)
+                var mcx0 = dSpan[mBoundsBase],
+                    mcx1 = dSpan[mBoundsBase + 1],
+                    mcy0 = dSpan[mBoundsBase + 2],
+                    mcy1 = dSpan[mBoundsBase + 3];
+
                 // static-candidate cache: while this mover's cell span, its
                 // static-vs-static role and the static index are all
                 // unchanged, the set of statics sharing cells with it cannot
@@ -1594,7 +1599,7 @@ var Collision = require('./Collision');
             // cell-walks to find normal movers).
             for (var doi = 0; doi < dOverLength; doi++) {
                 var doOrdinal = dOver[doi];
-                if (mOver[mGen] === 1 && doOrdinal <= mGen) {
+                if (mIsOver && doOrdinal <= mGen) {
                     continue;
                 }
                 var doBoundsBase = doOrdinal * 4;

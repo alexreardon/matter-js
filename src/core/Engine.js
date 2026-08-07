@@ -215,9 +215,13 @@ var Body = require('../body/Body');
         if (engine.enableSleeping)
             Sleeping.afterCollisions(pairs.list);
 
-        // trigger collision events
-        if (pairs.collisionStart.length > 0) {
-            Events.trigger(engine, 'collisionStart', { 
+        // trigger collision events. Each payload literal is gated on a
+        // listener actually existing: Events.trigger would no-op without one,
+        // but only after the caller allocated the payload
+        var engineEvents = engine.events;
+
+        if (pairs.collisionStart.length > 0 && engineEvents && engineEvents.collisionStart && engineEvents.collisionStart.length > 0) {
+            Events.trigger(engine, 'collisionStart', {
                 pairs: pairs.collisionStart,
                 timestamp: timing.timestamp,
                 delta: delta
@@ -258,16 +262,16 @@ var Body = require('../body/Body');
         // update body speed and velocity properties
         Engine._bodiesUpdateVelocities(moverBodies);
 
-        // trigger collision events
-        if (pairs.collisionActive.length > 0) {
-            Events.trigger(engine, 'collisionActive', { 
-                pairs: pairs.collisionActive, 
+        // trigger collision events, gated the same way as collisionStart
+        if (pairs.collisionActive.length > 0 && engineEvents && engineEvents.collisionActive && engineEvents.collisionActive.length > 0) {
+            Events.trigger(engine, 'collisionActive', {
+                pairs: pairs.collisionActive,
                 timestamp: timing.timestamp,
                 delta: delta
             });
         }
 
-        if (pairs.collisionEnd.length > 0) {
+        if (pairs.collisionEnd.length > 0 && engineEvents && engineEvents.collisionEnd && engineEvents.collisionEnd.length > 0) {
             Events.trigger(engine, 'collisionEnd', {
                 pairs: pairs.collisionEnd,
                 timestamp: timing.timestamp,

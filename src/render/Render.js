@@ -1313,8 +1313,14 @@ var Mouse = require('../core/Mouse');
             if (!bodyB.isStatic && !bodyA.isStatic) k = 0.5;
             if (bodyB.isStatic) k = 0;
 
+            // penetration is the normal scaled by the depth (the collision
+            // record no longer stores it; the debug renderer was its only
+            // consumer)
+            var penetrationX = collision.normal.x * collision.depth,
+                penetrationY = collision.normal.y * collision.depth;
+
             c.moveTo(bodyB.position.x, bodyB.position.y);
-            c.lineTo(bodyB.position.x - collision.penetration.x * k, bodyB.position.y - collision.penetration.y * k);
+            c.lineTo(bodyB.position.x - penetrationX * k, bodyB.position.y - penetrationY * k);
 
             k = 1;
 
@@ -1322,7 +1328,7 @@ var Mouse = require('../core/Mouse');
             if (bodyA.isStatic) k = 0;
 
             c.moveTo(bodyA.position.x, bodyA.position.y);
-            c.lineTo(bodyA.position.x + collision.penetration.x * k, bodyA.position.y + collision.penetration.y * k);
+            c.lineTo(bodyA.position.x + penetrationX * k, bodyA.position.y + penetrationY * k);
         }
 
         if (options.wireframes) {
