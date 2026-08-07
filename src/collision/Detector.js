@@ -23,7 +23,10 @@ var Collision = require('./Collision');
         var defaults = {
             bodies: [],
             collisions: [],
-            pairs: null
+            pairs: null,
+            // whether `bodies` is a private copy the sweep may sort in place
+            // (see Detector.setBodies)
+            _bodiesOwned: true
         };
 
         return Common.extend(defaults, options);
@@ -36,7 +39,15 @@ var Collision = require('./Collision');
      * @param {body[]} bodies
      */
     Detector.setBodies = function(detector, bodies) {
-        detector.bodies = bodies.slice(0);
+        // only the sweep reorders detector.bodies (it sorts in place), so only
+        // it needs a private copy. The grid modes reference the caller's array
+        // directly: Composite.allBodies builds a fresh array on any add or
+        // remove, so array identity still changes exactly when membership can
+        // have, which is what the classification caches key off. The copy for
+        // the sweep is taken lazily in _collisionsSweep, so a detector flipped
+        // to sweep after this call stays correct.
+        detector.bodies = bodies;
+        detector._bodiesOwned = false;
     };
 
     /**
@@ -94,6 +105,14 @@ var Collision = require('./Collision');
             collisionIndex = 0,
             i,
             j;
+
+        // the sweep sorts in place, so it must own the array: setBodies hands
+        // over the caller's array by reference (the grid modes never reorder
+        // it) and the copy is taken here, only when the sweep actually runs
+        if (!detector._bodiesOwned) {
+            bodies = detector.bodies = detector.bodies.slice(0);
+            detector._bodiesOwned = true;
+        }
 
         // sort bodies by bounds.min.x for sweep-and-prune. Uses the engine's
         // stable O(n log n) sort: callers rebuild `detector.bodies` from
