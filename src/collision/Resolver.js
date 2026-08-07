@@ -503,7 +503,16 @@ var Bounds = require('../geometry/Bounds');
             i,
             j;
 
-        if (container) {
+        // the velocity snapshot is built over the position snapshot: the pair
+        // list, solver slots, normals and separations were already collected
+        // by preSolvePosition this step, so they are aliased rather than
+        // re-derived from another walk of pairs.list. A container without a
+        // same-step position snapshot falls through to the classic path (the
+        // engine always runs preSolvePosition first, so only external callers
+        // can get there).
+        var soa = container && container._soa;
+
+        if (soa && soa.epoch === container._solverEpoch) {
             var soaV = container._soaV || (container._soaV = {
                     idxA: [], idxB: [], nx: [], ny: [], tx: [], ty: [],
                     invMassTotal: [], frictionTimesStatic: [], friction: [],
@@ -516,10 +525,14 @@ var Bounds = require('../geometry/Bounds');
                 }),
                 solverBodies = container._solverBodies || (container._solverBodies = []),
                 bodyCount = solverBodies.length,
-                vIdxA = soaV.idxA,
-                vIdxB = soaV.idxB,
-                vNx = soaV.nx,
-                vNy = soaV.ny,
+                aPairRefs = soa.pairRefs,
+                aPairCount = soa.pairCount,
+                aIdxA = soa.idxA,
+                aIdxB = soa.idxB,
+                aNx = soa.nx,
+                aNy = soa.ny,
+                aSep = soa.sep,
+                aSepValid = soa.sepValid,
                 vTx = soaV.tx,
                 vTy = soaV.ty,
                 vInvMassTotal = soaV.invMassTotal,
@@ -544,11 +557,19 @@ var Bounds = require('../geometry/Bounds');
                 bInvMass = soaV.bInvMass,
                 bInvInertia = soaV.bInvInertia,
                 bCanMove = soaV.bCanMove,
-                vPairCount = 0,
                 vContactIndex = 0;
 
+            // pair-parallel arrays that the position snapshot already holds are
+            // shared by reference; nothing on the velocity side writes them
+            soaV.idxA = aIdxA;
+            soaV.idxB = aIdxB;
+            soaV.nx = aNx;
+            soaV.ny = aNy;
+
             // per-body snapshot into the slots assigned by preSolvePosition
-            // (same epoch, same _solverIndex ordering as _solverBodies)
+            // (same epoch, same _solverIndex ordering as _solverBodies). This
+            // one is NOT aliased: positions moved during the position solve,
+            // and a constraint pass can wake bodies between the phases.
             for (i = 0; i < bodyCount; i++) {
                 var vBody = solverBodies[i],
                     vBodyPosition = vBody.position,
@@ -567,42 +588,33 @@ var Bounds = require('../geometry/Bounds');
             // per-pair and per-contact snapshot, with the classic warm-start
             // application fused in (identical order: pair by pair, contact by
             // contact, mutating the flat body state)
-            for (i = 0; i < pairsLength; i++) {
-                var vPair = pairs[i];
-
-                if (!vPair.isActive || vPair.isSensor)
-                    continue;
-
-                var vContacts = vPair.contacts,
+            for (i = 0; i < aPairCount; i++) {
+                var vPair = aPairRefs[i],
+                    vContacts = vPair.contacts,
                     vContactCount = vPair.contactCount,
-                    vCollision = vPair.collision,
-                    vParentA = vCollision.parentA,
-                    vParentB = vCollision.parentB,
-                    vNormal = vCollision.normal,
-                    vTangent = vCollision.tangent,
-                    slotA = vParentA._solverIndex,
-                    slotB = vParentB._solverIndex,
-                    vNormalX = vNormal.x,
-                    vNormalY = vNormal.y,
-                    vTangentX = vTangent.x,
-                    vTangentY = vTangent.y;
+                    slotA = aIdxA[i],
+                    slotB = aIdxB[i],
+                    vNormalX = aNx[i],
+                    vNormalY = aNy[i],
+                    // exactly how Collision.collides builds the tangent, so
+                    // deriving it here matches reading collision.tangent
+                    vTangentX = -vNormalY,
+                    vTangentY = vNormalX;
 
-                vIdxA[vPairCount] = slotA;
-                vIdxB[vPairCount] = slotB;
-                vNx[vPairCount] = vNormalX;
-                vNy[vPairCount] = vNormalY;
-                vTx[vPairCount] = vTangentX;
-                vTy[vPairCount] = vTangentY;
-                vInvMassTotal[vPairCount] = vPair.inverseMass;
+                vTx[i] = vTangentX;
+                vTy[i] = vTangentY;
+                vInvMassTotal[i] = vPair.inverseMass;
                 // first factor of the classic left-associated triple product
-                vFrictionTimesStatic[vPairCount] = vPair.friction * vPair.frictionStatic;
-                vFriction[vPairCount] = vPair.friction;
-                vRestitutionPlus1[vPairCount] = 1 + vPair.restitution;
-                vSeparation[vPairCount] = vPair.separation;
-                vContactShare[vPairCount] = 1 / vContactCount;
-                vContactStart[vPairCount] = vContactIndex;
-                vContactCounts[vPairCount] = vContactCount;
-                vPairCount++;
+                vFrictionTimesStatic[i] = vPair.friction * vPair.frictionStatic;
+                vFriction[i] = vPair.friction;
+                vRestitutionPlus1[i] = 1 + vPair.restitution;
+                // the position solve's separations, unless it never ran this
+                // step, in which case the pair still carries the value the
+                // classic path would read
+                vSeparation[i] = aSepValid ? aSep[i] : vPair.separation;
+                vContactShare[i] = 1 / vContactCount;
+                vContactStart[i] = vContactIndex;
+                vContactCounts[i] = vContactCount;
 
                 for (j = 0; j < vContactCount; j++) {
                     var vContact = vContacts[j],
@@ -649,7 +661,7 @@ var Bounds = require('../geometry/Bounds');
                 cRefs.length = vContactIndex;
             }
 
-            soaV.pairCount = vPairCount;
+            soaV.pairCount = aPairCount;
             soaV.contactTotal = vContactIndex;
             soaV.bodyCount = bodyCount;
             soaV.epoch = container._solverEpoch;
