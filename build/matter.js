@@ -1699,8 +1699,6 @@ var Axes = __webpack_require__(11);
             velocity: { x: 0, y: 0 },
             angularVelocity: 0,
             isSensor: false,
-            isStatic: false,
-            isSleeping: false,
             motion: 0,
             sleepThreshold: 60,
             density: 0.001,
@@ -1738,7 +1736,15 @@ var Axes = __webpack_require__(11);
             axes: null,
             area: 0,
             mass: 0,
+            // assigned by Body.setMass / setInertia / Sleeping before use, but
+            // declared here so they live in-object: left out, they spill to
+            // the out-of-object property backing store and every read (the
+            // solver snapshots them per body per step, Pair.update per pair)
+            // pays an extra indirection
+            inverseMass: 0,
             inertia: 0,
+            inverseInertia: 0,
+            sleepCounter: 0,
             deltaTime: 1000 / 60,
             _original: null,
             // per-step scratch stamps and flags used by the broadphase
@@ -1751,18 +1757,32 @@ var Axes = __webpack_require__(11);
             // RULE: any NEW per-body scratch field, from any module, must be
             // added to this block with a default of the same type it will
             // hold, never assigned onto a body for the first time elsewhere.
+            //
+            // Classification-walk cluster: the per-step walk in
+            // Detector._collisionsGridStatic touches every one of these for
+            // every body in the world, so they are declared adjacently
+            // (declaration order fixes the in-object layout) to land on as few
+            // cache lines as possible. isStatic / isSleeping live here rather
+            // than with the public fields for the same reason.
+            isStatic: false,
+            isSleeping: false,
+            _gridDynamic: false,
+            _sPrev: false,
+            _sIndexed: false,
+            _sDeparted: false,
+            _sWalk: 0,
+            _sWorldIndex: 0,
+            _scEpoch: 0,
             _stamp: 0,
             _gsStamp: 0,
-            _sPrev: false,
             _ov: false,
             _ovD: false,
-            _gridDynamic: false,
             _solverStamp: 0,
             // slot index into the resolver's flat solver arrays (valid only
             // while _solverStamp matches the current solver epoch)
             _solverIndex: 0,
-            // gridStatic static-candidate cache (see Detector._collisionsGridStatic)
-            _scEpoch: 0,
+            // gridStatic static-candidate cache (see Detector._collisionsGridStatic;
+            // _scEpoch is up in the classification-walk cluster)
             _scStatic: false,
             _scCx0: 0,
             _scCx1: 0,
@@ -1783,13 +1803,11 @@ var Axes = __webpack_require__(11);
             // _sWorldIndex its position in that walk, which is the sort key
             // that keeps bucket contents in world order, and _sDeparted a
             // one-shot set by Composite.removeBody so a body removed and
-            // re-added within a single step is re-indexed at its new position
+            // re-added within a single step is re-indexed at its new position.
+            // (_sIndexed / _sWalk / _sWorldIndex / _sDeparted are up in the
+            // classification-walk cluster.)
             _sBuckets: null,
-            _sIndexed: false,
             _sIndexedAt: -1,
-            _sWalk: 0,
-            _sWorldIndex: 0,
-            _sDeparted: false,
             // the cell span this body was BUCKETED at. Unbucketing has to know
             // which cells it vacated in order to invalidate the movers standing
             // over them, and by then its live bounds no longer say: a released
@@ -4464,7 +4482,6 @@ var Pair = __webpack_require__(9);
             depth: 0,
             normal: { x: 0, y: 0 },
             tangent: { x: 0, y: 0 },
-            penetration: { x: 0, y: 0 },
             supports: [null, null],
             supportCount: 0
         };
@@ -4491,15 +4508,14 @@ var Pair = __webpack_require__(9);
             return null;
         }
 
-        // Reuse collision records for gc efficiency. The record for this body
-        // pair is looked up in the pairs structure's direct-mapped cache first
-        // (see Pairs.create): the record is scratch that the rest of this
-        // function overwrites in full, so a hit is as good as the table lookup
-        // and costs a masked array read instead. A hit for a pair that has since
-        // ended is not only safe but preferable, since it recycles that record
-        // rather than allocating a new one.
+        // Reuse collision records for gc efficiency. The live pair's record is
+        // probed out of the pairs structure's open-addressing record table
+        // (see Pairs.create), which is authoritative: a key hit always means
+        // the pair is live and the value is the record the rest of this
+        // function overwrites in full. `Pairs.update` maintains the table, so
+        // a miss means these bodies have no live pair and a fresh record is
+        // built for them.
         var collision = null,
-            recordSlot = -1,
             pairId = 0;
 
         if (pairs) {
@@ -4507,24 +4523,21 @@ var Pair = __webpack_require__(9);
                 idB = bodyB.id;
 
             pairId = idA < idB ? idA * Pair._idShift + idB : idB * Pair._idShift + idA;
-            recordSlot = Pair.hash(idA, idB) & pairs._recordMask;
 
-            if (pairs._recordKeys[recordSlot] === pairId) {
-                var cached = pairs._recordValues[recordSlot];
+            var recordKeys = pairs._recordKeys,
+                recordMask = pairs._recordMask,
+                recordSlot = Pair.hash(idA, idB) & recordMask,
+                recordKey;
 
-                // a live pair still points back at its record, so this alone
-                // proves the cached record is the one the table would return
-                if (cached.pair !== null) {
-                    collision = cached;
+            // tombstones (-1) match neither the pair id nor the empty sentinel,
+            // so the probe walks straight over them
+            while ((recordKey = recordKeys[recordSlot]) !== 0) {
+                if (recordKey === pairId) {
+                    collision = pairs._recordValues[recordSlot];
+                    break;
                 }
-            }
 
-            if (collision === null) {
-                var pair = pairs.table.get(pairId);
-
-                if (pair) {
-                    collision = pair.collision;
-                }
+                recordSlot = (recordSlot + 1) & recordMask;
             }
         }
 
@@ -4535,11 +4548,6 @@ var Pair = __webpack_require__(9);
             collision.bodyB = bodyA.id < bodyB.id ? bodyB : bodyA;
             collision.parentA = collision.bodyA.parent;
             collision.parentB = collision.bodyB.parent;
-        }
-
-        if (recordSlot >= 0) {
-            pairs._recordKeys[recordSlot] = pairId;
-            pairs._recordValues[recordSlot] = collision;
         }
 
         bodyA = collision.bodyA;
@@ -4555,7 +4563,6 @@ var Pair = __webpack_require__(9);
 
         var normal = collision.normal,
             tangent = collision.tangent,
-            penetration = collision.penetration,
             supports = collision.supports,
             depth = minOverlap.overlap,
             minAxis = minOverlap.axis,
@@ -4575,9 +4582,6 @@ var Pair = __webpack_require__(9);
         
         tangent.x = -normalY;
         tangent.y = normalX;
-
-        penetration.x = normalX * depth;
-        penetration.y = normalY * depth;
 
         collision.depth = depth;
 
@@ -4955,13 +4959,6 @@ var Pair = __webpack_require__(9);
      * @default { x: 0, y: 0 }
      */
 
-    /**
-     * A `Vector` that represents the direction and depth of the collision.
-     *
-     * @property penetration
-     * @type vector
-     * @default { x: 0, y: 0 }
-     */
 
     /**
      * An array of body vertices that represent the support points in the collision.
@@ -5125,16 +5122,23 @@ var Contact = __webpack_require__(16);
     };
 
     /**
-     * Hashes the two body ids of a pair for the collision record cache (see
+     * Hashes the two body ids of a pair for the collision record table (see
      * `Pairs.create`). Mixes both ids: the packed `Pair.id` has the lower id
      * entirely in its high bits, so masking it directly would drop every pair a
-     * body has into one slot.
+     * body has into one slot. Sorts before mixing, because the mix is
+     * asymmetric and callers cannot all guarantee the same argument order.
      * @method hash
      * @param {number} idA
      * @param {number} idB
-     * @return {number} A non-negative hash of the id pair
+     * @return {number} An order-independent hash of the id pair
      */
     Pair.hash = function(idA, idB) {
+        if (idB < idA) {
+            var swap = idA;
+            idA = idB;
+            idB = swap;
+        }
+
         var mixed = (Math.imul(idA, 0x9E3779B1) ^ Math.imul(idB, 0x85EBCA77)) | 0;
         return (mixed ^ (mixed >>> 15)) | 0;
     };
@@ -6148,7 +6152,10 @@ var Collision = __webpack_require__(8);
         var defaults = {
             bodies: [],
             collisions: [],
-            pairs: null
+            pairs: null,
+            // whether `bodies` is a private copy the sweep may sort in place
+            // (see Detector.setBodies)
+            _bodiesOwned: true
         };
 
         return Common.extend(defaults, options);
@@ -6161,7 +6168,15 @@ var Collision = __webpack_require__(8);
      * @param {body[]} bodies
      */
     Detector.setBodies = function(detector, bodies) {
-        detector.bodies = bodies.slice(0);
+        // only the sweep reorders detector.bodies (it sorts in place), so only
+        // it needs a private copy. The grid modes reference the caller's array
+        // directly: Composite.allBodies builds a fresh array on any add or
+        // remove, so array identity still changes exactly when membership can
+        // have, which is what the classification caches key off. The copy for
+        // the sweep is taken lazily in _collisionsSweep, so a detector flipped
+        // to sweep after this call stays correct.
+        detector.bodies = bodies;
+        detector._bodiesOwned = false;
     };
 
     /**
@@ -6219,6 +6234,14 @@ var Collision = __webpack_require__(8);
             collisionIndex = 0,
             i,
             j;
+
+        // the sweep sorts in place, so it must own the array: setBodies hands
+        // over the caller's array by reference (the grid modes never reorder
+        // it) and the copy is taken here, only when the sweep actually runs
+        if (!detector._bodiesOwned) {
+            bodies = detector.bodies = detector.bodies.slice(0);
+            detector._bodiesOwned = true;
+        }
 
         // sort bodies by bounds.min.x for sweep-and-prune. Uses the engine's
         // stable O(n log n) sort: callers rebuild `detector.bodies` from
@@ -7512,10 +7535,7 @@ var Collision = __webpack_require__(8);
                 // not generate static-static pairs (the sweep skips those)
                 mStatic = m.isStatic || m.isSleeping,
                 localStamp = ++g.stamp,
-                mcx0 = Math.floor(mMinX * invCell),
-                mcx1 = Math.floor(mMaxX * invCell),
-                mcy0 = Math.floor(mMinY * invCell),
-                mcy1 = Math.floor(mMaxY * invCell);
+                mIsOver = mOver[mGen] === 1;
 
             // Oversized mover: its bounds span more than maxCells cells, so it
             // was NOT inserted into the dynamic index. Walking its full cell
@@ -7528,7 +7548,7 @@ var Collision = __webpack_require__(8);
             // in dOver); oversized statics/movers are handled by the sOver/dOver
             // passes below. Skipped for a static (tagged moving) mover, since
             // static-static never resolves.
-            if (mOver[mGen] === 1) {
+            if (mIsOver) {
                 // not in the mover index, so the sweep above cannot reach it;
                 // drop its cached list rather than let it survive an oversized
                 // spell and validate against cells that changed meanwhile
@@ -7548,6 +7568,14 @@ var Collision = __webpack_require__(8);
                     }
                 }
             } else {
+                // the insert pass already floored this mover's cell span from
+                // the same flattened bounds, so reuse it (an oversized mover's
+                // span slots are unusable, but that branch never reads them)
+                var mcx0 = dSpan[mBoundsBase],
+                    mcx1 = dSpan[mBoundsBase + 1],
+                    mcy0 = dSpan[mBoundsBase + 2],
+                    mcy1 = dSpan[mBoundsBase + 3];
+
                 // static-candidate cache: while this mover's cell span, its
                 // static-vs-static role and the static index are all
                 // unchanged, the set of statics sharing cells with it cannot
@@ -7719,7 +7747,7 @@ var Collision = __webpack_require__(8);
             // cell-walks to find normal movers).
             for (var doi = 0; doi < dOverLength; doi++) {
                 var doOrdinal = dOver[doi];
-                if (mOver[mGen] === 1 && doOrdinal <= mGen) {
+                if (mIsOver && doOrdinal <= mGen) {
                     continue;
                 }
                 var doBoundsBase = doOrdinal * 4;
@@ -8623,9 +8651,13 @@ var Body = __webpack_require__(4);
         if (engine.enableSleeping)
             Sleeping.afterCollisions(pairs.list);
 
-        // trigger collision events
-        if (pairs.collisionStart.length > 0) {
-            Events.trigger(engine, 'collisionStart', { 
+        // trigger collision events. Each payload literal is gated on a
+        // listener actually existing: Events.trigger would no-op without one,
+        // but only after the caller allocated the payload
+        var engineEvents = engine.events;
+
+        if (pairs.collisionStart.length > 0 && engineEvents && engineEvents.collisionStart && engineEvents.collisionStart.length > 0) {
+            Events.trigger(engine, 'collisionStart', {
                 pairs: pairs.collisionStart,
                 timestamp: timing.timestamp,
                 delta: delta
@@ -8666,16 +8698,16 @@ var Body = __webpack_require__(4);
         // update body speed and velocity properties
         Engine._bodiesUpdateVelocities(moverBodies);
 
-        // trigger collision events
-        if (pairs.collisionActive.length > 0) {
-            Events.trigger(engine, 'collisionActive', { 
-                pairs: pairs.collisionActive, 
+        // trigger collision events, gated the same way as collisionStart
+        if (pairs.collisionActive.length > 0 && engineEvents && engineEvents.collisionActive && engineEvents.collisionActive.length > 0) {
+            Events.trigger(engine, 'collisionActive', {
+                pairs: pairs.collisionActive,
                 timestamp: timing.timestamp,
                 delta: delta
             });
         }
 
-        if (pairs.collisionEnd.length > 0) {
+        if (pairs.collisionEnd.length > 0 && engineEvents && engineEvents.collisionEnd && engineEvents.collisionEnd.length > 0) {
             Events.trigger(engine, 'collisionEnd', {
                 pairs: pairs.collisionEnd,
                 timestamp: timing.timestamp,
@@ -9484,7 +9516,15 @@ var Bounds = __webpack_require__(1);
                     }
                 }
 
+                // a body the position solve could not move has an unchanged
+                // snapshot, so its write-back is a no-op by value; skip it
+                // (solver bodies are mostly statics on a dense page)
+                var backCanMove = soaBack.canMove;
                 for (back = 0; back < backBodyCount; back++) {
+                    if (backCanMove[back] === 0) {
+                        continue;
+                    }
+
                     var backImpulse = solverBodies[back].positionImpulse;
                     backImpulse.x = backImpX[back];
                     backImpulse.y = backImpY[back];
@@ -9501,17 +9541,23 @@ var Bounds = __webpack_require__(1);
                 if (carryBody._solverStamp === epoch) {
                     continue;
                 }
-                if (postSolveBody(carryBody)) {
+                // the zero-impulse early-return of _postSolveBody, inlined to
+                // skip the call (a removed body's impulse is zeroed in place)
+                var carryImpulse = carryBody.positionImpulse;
+                if ((carryImpulse.x !== 0 || carryImpulse.y !== 0) && postSolveBody(carryBody)) {
                     // in-place compaction: carryCount <= i always holds here
                     carry[carryCount++] = carryBody;
                 }
             }
 
             // bodies touched by this step's pairs; append any that finish the
-            // step still carrying a warmed impulse
+            // step still carrying a warmed impulse. The zero-impulse check is
+            // inlined because most solver bodies on a dense page are statics
+            // that never accumulate one.
             for (i = 0; i < solverBodiesLength; i++) {
-                var solverBody = solverBodies[i];
-                if (postSolveBody(solverBody)) {
+                var solverBody = solverBodies[i],
+                    solverImpulse = solverBody.positionImpulse;
+                if ((solverImpulse.x !== 0 || solverImpulse.y !== 0) && postSolveBody(solverBody)) {
                     carry[carryCount++] = solverBody;
                 }
             }
@@ -9585,26 +9631,43 @@ var Bounds = __webpack_require__(1);
             i,
             j;
 
-        if (container) {
+        // the velocity snapshot is built over the position snapshot: the pair
+        // list, solver slots, normals and separations were already collected
+        // by preSolvePosition this step, so they are aliased rather than
+        // re-derived from another walk of pairs.list. A container without a
+        // same-step position snapshot falls through to the classic path (the
+        // engine always runs preSolvePosition first, so only external callers
+        // can get there).
+        var soa = container && container._soa;
+
+        if (soa && soa.epoch === container._solverEpoch) {
             var soaV = container._soaV || (container._soaV = {
                     idxA: [], idxB: [], nx: [], ny: [], tx: [], ty: [],
-                    invMassTotal: [], frictionTimesStatic: [], friction: [],
+                    frictionTimesStatic: [], friction: [],
                     restitutionPlus1: [], separation: [], contactShare: [],
                     contactStart: [], contactCounts: [],
-                    cVx: [], cVy: [], cNormalImpulse: [], cTangentImpulse: [], cRefs: [],
+                    // per-contact constants of the iterations, hoisted here:
+                    // contact offsets from both body centres, and the share
+                    // factor whose divide otherwise runs once per contact per
+                    // iteration (all inputs are fixed across the iterations)
+                    cOffAX: [], cOffAY: [], cOffBX: [], cOffBY: [], cShare: [],
+                    cNormalImpulse: [], cTangentImpulse: [], cRefs: [],
                     bPosX: [], bPosY: [], bPosPrevX: [], bPosPrevY: [],
                     bAngle: [], bAnglePrev: [], bInvMass: [], bInvInertia: [], bCanMove: [],
                     pairCount: 0, contactTotal: 0, bodyCount: 0, epoch: 0, dirty: false
                 }),
                 solverBodies = container._solverBodies || (container._solverBodies = []),
                 bodyCount = solverBodies.length,
-                vIdxA = soaV.idxA,
-                vIdxB = soaV.idxB,
-                vNx = soaV.nx,
-                vNy = soaV.ny,
+                aPairRefs = soa.pairRefs,
+                aPairCount = soa.pairCount,
+                aIdxA = soa.idxA,
+                aIdxB = soa.idxB,
+                aNx = soa.nx,
+                aNy = soa.ny,
+                aSep = soa.sep,
+                aSepValid = soa.sepValid,
                 vTx = soaV.tx,
                 vTy = soaV.ty,
-                vInvMassTotal = soaV.invMassTotal,
                 vFrictionTimesStatic = soaV.frictionTimesStatic,
                 vFriction = soaV.friction,
                 vRestitutionPlus1 = soaV.restitutionPlus1,
@@ -9612,8 +9675,11 @@ var Bounds = __webpack_require__(1);
                 vContactShare = soaV.contactShare,
                 vContactStart = soaV.contactStart,
                 vContactCounts = soaV.contactCounts,
-                cVx = soaV.cVx,
-                cVy = soaV.cVy,
+                cOffAX = soaV.cOffAX,
+                cOffAY = soaV.cOffAY,
+                cOffBX = soaV.cOffBX,
+                cOffBY = soaV.cOffBY,
+                cShare = soaV.cShare,
                 cNormalImpulse = soaV.cNormalImpulse,
                 cTangentImpulse = soaV.cTangentImpulse,
                 cRefs = soaV.cRefs,
@@ -9626,11 +9692,19 @@ var Bounds = __webpack_require__(1);
                 bInvMass = soaV.bInvMass,
                 bInvInertia = soaV.bInvInertia,
                 bCanMove = soaV.bCanMove,
-                vPairCount = 0,
                 vContactIndex = 0;
 
+            // pair-parallel arrays that the position snapshot already holds are
+            // shared by reference; nothing on the velocity side writes them
+            soaV.idxA = aIdxA;
+            soaV.idxB = aIdxB;
+            soaV.nx = aNx;
+            soaV.ny = aNy;
+
             // per-body snapshot into the slots assigned by preSolvePosition
-            // (same epoch, same _solverIndex ordering as _solverBodies)
+            // (same epoch, same _solverIndex ordering as _solverBodies). This
+            // one is NOT aliased: positions moved during the position solve,
+            // and a constraint pass can wake bodies between the phases.
             for (i = 0; i < bodyCount; i++) {
                 var vBody = solverBodies[i],
                     vBodyPosition = vBody.position,
@@ -9649,51 +9723,63 @@ var Bounds = __webpack_require__(1);
             // per-pair and per-contact snapshot, with the classic warm-start
             // application fused in (identical order: pair by pair, contact by
             // contact, mutating the flat body state)
-            for (i = 0; i < pairsLength; i++) {
-                var vPair = pairs[i];
-
-                if (!vPair.isActive || vPair.isSensor)
-                    continue;
-
-                var vContacts = vPair.contacts,
+            for (i = 0; i < aPairCount; i++) {
+                var vPair = aPairRefs[i],
+                    vContacts = vPair.contacts,
                     vContactCount = vPair.contactCount,
-                    vCollision = vPair.collision,
-                    vParentA = vCollision.parentA,
-                    vParentB = vCollision.parentB,
-                    vNormal = vCollision.normal,
-                    vTangent = vCollision.tangent,
-                    slotA = vParentA._solverIndex,
-                    slotB = vParentB._solverIndex,
-                    vNormalX = vNormal.x,
-                    vNormalY = vNormal.y,
-                    vTangentX = vTangent.x,
-                    vTangentY = vTangent.y;
+                    slotA = aIdxA[i],
+                    slotB = aIdxB[i],
+                    vNormalX = aNx[i],
+                    vNormalY = aNy[i],
+                    // exactly how Collision.collides builds the tangent, so
+                    // deriving it here matches reading collision.tangent
+                    vTangentX = -vNormalY,
+                    vTangentY = vNormalX;
 
-                vIdxA[vPairCount] = slotA;
-                vIdxB[vPairCount] = slotB;
-                vNx[vPairCount] = vNormalX;
-                vNy[vPairCount] = vNormalY;
-                vTx[vPairCount] = vTangentX;
-                vTy[vPairCount] = vTangentY;
-                vInvMassTotal[vPairCount] = vPair.inverseMass;
+                vTx[i] = vTangentX;
+                vTy[i] = vTangentY;
+
+                var vInverseMassTotal = vPair.inverseMass,
+                    vPairContactShare = 1 / vContactCount,
+                    vInvInertiaA = bInvInertia[slotA],
+                    vInvInertiaB = bInvInertia[slotB],
+                    vPosAX = bPosX[slotA],
+                    vPosAY = bPosY[slotA],
+                    vPosBX = bPosX[slotB],
+                    vPosBY = bPosY[slotB];
+
                 // first factor of the classic left-associated triple product
-                vFrictionTimesStatic[vPairCount] = vPair.friction * vPair.frictionStatic;
-                vFriction[vPairCount] = vPair.friction;
-                vRestitutionPlus1[vPairCount] = 1 + vPair.restitution;
-                vSeparation[vPairCount] = vPair.separation;
-                vContactShare[vPairCount] = 1 / vContactCount;
-                vContactStart[vPairCount] = vContactIndex;
-                vContactCounts[vPairCount] = vContactCount;
-                vPairCount++;
+                vFrictionTimesStatic[i] = vPair.friction * vPair.frictionStatic;
+                vFriction[i] = vPair.friction;
+                vRestitutionPlus1[i] = 1 + vPair.restitution;
+                // the position solve's separations, unless it never ran this
+                // step, in which case the pair still carries the value the
+                // classic path would read
+                vSeparation[i] = aSepValid ? aSep[i] : vPair.separation;
+                vContactShare[i] = vPairContactShare;
+                vContactStart[i] = vContactIndex;
+                vContactCounts[i] = vContactCount;
 
                 for (j = 0; j < vContactCount; j++) {
                     var vContact = vContacts[j],
                         vContactVertex = vContact.vertex,
                         vNormalImpulse = vContact.normalImpulse,
-                        vTangentImpulse = vContact.tangentImpulse;
+                        vTangentImpulse = vContact.tangentImpulse,
+                        vOffsetAX = vContactVertex.x - vPosAX,
+                        vOffsetAY = vContactVertex.y - vPosAY,
+                        vOffsetBX = vContactVertex.x - vPosBX,
+                        vOffsetBY = vContactVertex.y - vPosBY,
+                        vOAcN = vOffsetAX * vNormalY - vOffsetAY * vNormalX,
+                        vOBcN = vOffsetBX * vNormalY - vOffsetBY * vNormalX;
 
-                    cVx[vContactIndex] = vContactVertex.x;
-                    cVy[vContactIndex] = vContactVertex.y;
+                    cOffAX[vContactIndex] = vOffsetAX;
+                    cOffAY[vContactIndex] = vOffsetAY;
+                    cOffBX[vContactIndex] = vOffsetBX;
+                    cOffBY[vContactIndex] = vOffsetBY;
+                    // identical association to the classic in-iteration form
+                    cShare[vContactIndex] = vPairContactShare / (vInverseMassTotal
+                        + vInvInertiaA * vOAcN * vOAcN
+                        + vInvInertiaB * vOBcN * vOBcN);
                     cNormalImpulse[vContactIndex] = vNormalImpulse;
                     cTangentImpulse[vContactIndex] = vTangentImpulse;
                     cRefs[vContactIndex] = vContact;
@@ -9703,13 +9789,14 @@ var Bounds = __webpack_require__(1);
                         var vImpulseX = vNormalX * vNormalImpulse + vTangentX * vTangentImpulse,
                             vImpulseY = vNormalY * vNormalImpulse + vTangentY * vTangentImpulse;
 
-                        // apply impulse from contact
+                        // apply impulse from contact; the offsets are the same
+                        // vertex-minus-position subtractions the classic form
+                        // wrote inline
                         if (bCanMove[slotA] === 1) {
                             bPosPrevX[slotA] += vImpulseX * bInvMass[slotA];
                             bPosPrevY[slotA] += vImpulseY * bInvMass[slotA];
                             bAnglePrev[slotA] += bInvInertia[slotA] * (
-                                (cVx[vContactIndex] - bPosX[slotA]) * vImpulseY
-                                - (cVy[vContactIndex] - bPosY[slotA]) * vImpulseX
+                                vOffsetAX * vImpulseY - vOffsetAY * vImpulseX
                             );
                         }
 
@@ -9717,8 +9804,7 @@ var Bounds = __webpack_require__(1);
                             bPosPrevX[slotB] -= vImpulseX * bInvMass[slotB];
                             bPosPrevY[slotB] -= vImpulseY * bInvMass[slotB];
                             bAnglePrev[slotB] -= bInvInertia[slotB] * (
-                                (cVx[vContactIndex] - bPosX[slotB]) * vImpulseY
-                                - (cVy[vContactIndex] - bPosY[slotB]) * vImpulseX
+                                vOffsetBX * vImpulseY - vOffsetBY * vImpulseX
                             );
                         }
                     }
@@ -9731,7 +9817,7 @@ var Bounds = __webpack_require__(1);
                 cRefs.length = vContactIndex;
             }
 
-            soaV.pairCount = vPairCount;
+            soaV.pairCount = aPairCount;
             soaV.contactTotal = vContactIndex;
             soaV.bodyCount = bodyCount;
             soaV.epoch = container._solverEpoch;
@@ -9817,9 +9903,15 @@ var Bounds = __webpack_require__(1);
 
         soaV.dirty = false;
 
-        // untouched bodies (sensor-only, static) write back their unchanged
-        // snapshot: a no-op by value
+        // a body the velocity solve could not move (static or sleeping, per
+        // the snapshot flag; nothing wakes bodies between the snapshot and
+        // here) has unchanged values, so its write-back is skipped outright
+        var bCanMove = soaV.bCanMove;
         for (i = 0; i < bodyCount; i++) {
+            if (bCanMove[i] === 0) {
+                continue;
+            }
+
             var writeBody = solverBodies[i],
                 writeBodyPositionPrev = writeBody.positionPrev;
             writeBodyPositionPrev.x = bPosPrevX[i];
@@ -9868,16 +9960,17 @@ var Bounds = __webpack_require__(1);
                 vNy = soaV.ny,
                 vTx = soaV.tx,
                 vTy = soaV.ty,
-                vInvMassTotal = soaV.invMassTotal,
                 vFrictionTimesStatic = soaV.frictionTimesStatic,
                 vFriction = soaV.friction,
                 vRestitutionPlus1 = soaV.restitutionPlus1,
                 vSeparation = soaV.separation,
-                vContactShare = soaV.contactShare,
                 vContactStart = soaV.contactStart,
                 vContactCounts = soaV.contactCounts,
-                cVx = soaV.cVx,
-                cVy = soaV.cVy,
+                cOffAX = soaV.cOffAX,
+                cOffAY = soaV.cOffAY,
+                cOffBX = soaV.cOffBX,
+                cOffBY = soaV.cOffBY,
+                cShare = soaV.cShare,
                 cNormalImpulse = soaV.cNormalImpulse,
                 cTangentImpulse = soaV.cTangentImpulse,
                 bPosX = soaV.bPosX,
@@ -9897,12 +9990,10 @@ var Bounds = __webpack_require__(1);
                     normalY = vNy[p],
                     tangentX = vTx[p],
                     tangentY = vTy[p],
-                    inverseMassTotal = vInvMassTotal[p],
                     friction = vFrictionTimesStatic[p] * frictionNormalMultiplier,
                     pairSeparation = vSeparation[p],
                     pairFriction = vFriction[p],
                     restitutionPlus1 = vRestitutionPlus1[p],
-                    contactShare = vContactShare[p],
                     contactStart = vContactStart[p],
                     contactEnd = contactStart + vContactCounts[p];
 
@@ -9928,13 +10019,12 @@ var Bounds = __webpack_require__(1);
 
                 // resolve each contact
                 for (var c = contactStart; c < contactEnd; c++) {
-                    var contactVertexX = cVx[c],
-                        contactVertexY = cVy[c];
-
-                    var offsetAX = contactVertexX - bodyAPositionX,
-                        offsetAY = contactVertexY - bodyAPositionY,
-                        offsetBX = contactVertexX - bodyBPositionX,
-                        offsetBY = contactVertexY - bodyBPositionY;
+                    // offsets and the share divide are constants of the
+                    // iterations, precomputed in preSolveVelocity
+                    var offsetAX = cOffAX[c],
+                        offsetAY = cOffAY[c],
+                        offsetBX = cOffBX[c],
+                        offsetBY = cOffBY[c];
 
                     var velocityPointAX = bodyAVelocityX - offsetAY * bodyAAngularVelocity,
                         velocityPointAY = bodyAVelocityY + offsetAX * bodyAAngularVelocity,
@@ -9968,12 +10058,9 @@ var Bounds = __webpack_require__(1);
                         maxFriction = frictionMaxStatic;
                     }
 
-                    // account for mass, inertia and contact offset
-                    var oAcN = offsetAX * normalY - offsetAY * normalX,
-                        oBcN = offsetBX * normalY - offsetBY * normalX,
-                        share = contactShare / (inverseMassTotal + bodyAInverseInertia * oAcN * oAcN + bodyBInverseInertia * oBcN * oBcN);
-
-                    // raw impulses
+                    // raw impulses (share was precomputed with the identical
+                    // mass, inertia and contact offset association)
+                    var share = cShare[c];
                     var normalImpulse = restitutionPlus1 * normalVelocity * share;
                     tangentImpulse *= share;
 
@@ -10192,35 +10279,150 @@ var Common = __webpack_require__(0);
      * @return {pairs} A new pairs structure
      */
     /**
-     * Slot count of the collision record cache (see `Pairs.create`). A power of
-     * two so the hash masks; sized well above a typical live pair count so
-     * eviction is rare.
+     * Initial slot count of the collision record table (see `Pairs.create`).
+     * A power of two so the hash masks; the table grows past half load.
      */
-    Pairs._cacheMask = 4095;
+    Pairs._initialSize = 4096;
 
     Pairs.create = function(options) {
         return Common.extend({
-            table: new Map(),
             list: [],
             collisionStart: [],
             collisionActive: [],
             collisionEnd: [],
-            // Direct-mapped cache from pair id to the collision record the pair
-            // reuses, read by `Collision.collides` on every overlapping
-            // candidate. The table lookup it replaces was one of the larger
-            // per-candidate costs; the cache turns it into a masked array read.
+            // Open-addressing table from pair id to the LIVE pair's collision
+            // record, probed by `Collision.collides` on every overlapping
+            // candidate. It is authoritative (it replaced a `Map` plus a
+            // direct-mapped hint cache in front of it): a present key always
+            // means the pair is live and its record is the value, so a probe
+            // hit is the record reuse and a miss means a fresh record.
             //
-            // It is only ever a hint, so it needs no invalidation: a pair id
-            // identifies its two bodies for the life of the world (body ids are
-            // never reused), a stored key can only ever be matched by that same
-            // body pair, and the record itself is scratch that the collision
-            // rewrites in full. It holds records for pairs that have since
-            // ended, which is what lets a re-collision reuse the old record
-            // instead of allocating a new one.
-            _recordKeys: new Float64Array(Pairs._cacheMask + 1),
-            _recordValues: new Array(Pairs._cacheMask + 1),
-            _recordMask: Pairs._cacheMask
+            // Keys: 0 is empty, -1 is a tombstone left by an ended pair
+            // (`Pairs._recordRemove`); a real pair id is always >= 1. Values
+            // are pre-filled with null so the backing store stays packed.
+            _recordKeys: new Float64Array(Pairs._initialSize),
+            _recordValues: new Array(Pairs._initialSize).fill(null),
+            _recordMask: Pairs._initialSize - 1,
+            // slots whose key is non-zero (live or tombstone); tombstone reuse
+            // keeps it flat, so it only grows on a write into an empty slot
+            _recordUsed: 0,
+            // live entries only; drives the grow-vs-rehash decision, because a
+            // churning world retires pairs constantly and the tombstones they
+            // leave must not read as fullness
+            _recordLive: 0
         }, options);
+    };
+
+    /**
+     * Inserts a live pair's collision record into the record table.
+     * @method _recordInsert
+     * @param {pairs} pairs
+     * @param {number} pairId
+     * @param {collision} collision
+     */
+    Pairs._recordInsert = function(pairs, pairId, collision) {
+        if ((pairs._recordUsed + 1) * 2 > pairs._recordMask + 1) {
+            Pairs._recordGrow(pairs);
+        }
+
+        var keys = pairs._recordKeys,
+            mask = pairs._recordMask,
+            slot = Pair.hash(collision.bodyA.id, collision.bodyB.id) & mask,
+            firstTombstone = -1,
+            key;
+
+        while ((key = keys[slot]) !== 0) {
+            if (key === pairId) {
+                pairs._recordValues[slot] = collision;
+                return;
+            }
+
+            if (key === -1 && firstTombstone === -1) {
+                firstTombstone = slot;
+            }
+
+            slot = (slot + 1) & mask;
+        }
+
+        if (firstTombstone !== -1) {
+            slot = firstTombstone;
+        } else {
+            pairs._recordUsed += 1;
+        }
+
+        keys[slot] = pairId;
+        pairs._recordValues[slot] = collision;
+        pairs._recordLive += 1;
+    };
+
+    /**
+     * Removes an ended pair's record from the record table, leaving a
+     * tombstone so later probe chains stay intact.
+     * @method _recordRemove
+     * @param {pairs} pairs
+     * @param {number} pairId
+     * @param {pair} pair
+     */
+    Pairs._recordRemove = function(pairs, pairId, pair) {
+        var keys = pairs._recordKeys,
+            mask = pairs._recordMask,
+            slot = Pair.hash(pair.bodyA.id, pair.bodyB.id) & mask,
+            key;
+
+        while ((key = keys[slot]) !== 0) {
+            if (key === pairId) {
+                keys[slot] = -1;
+                pairs._recordValues[slot] = null;
+                pairs._recordLive -= 1;
+                return;
+            }
+
+            slot = (slot + 1) & mask;
+        }
+    };
+
+    /**
+     * Rebuilds the record table, re-inserting live records and dropping
+     * tombstones. Keeps the size when tombstones are what filled it (the
+     * churn regime retires pairs every step) and doubles only when live
+     * entries genuinely need the room.
+     * @method _recordGrow
+     * @param {pairs} pairs
+     */
+    Pairs._recordGrow = function(pairs) {
+        var oldKeys = pairs._recordKeys,
+            oldValues = pairs._recordValues,
+            oldSize = oldKeys.length,
+            size = (pairs._recordLive + 1) * 4 > oldSize ? oldSize * 2 : oldSize,
+            mask = size - 1,
+            keys = new Float64Array(size),
+            values = new Array(size).fill(null),
+            used = 0;
+
+        for (var i = 0; i < oldSize; i += 1) {
+            var key = oldKeys[i];
+
+            if (key === 0 || key === -1) {
+                continue;
+            }
+
+            var record = oldValues[i],
+                slot = Pair.hash(record.bodyA.id, record.bodyB.id) & mask;
+
+            while (keys[slot] !== 0) {
+                slot = (slot + 1) & mask;
+            }
+
+            keys[slot] = key;
+            values[slot] = record;
+            used += 1;
+        }
+
+        pairs._recordKeys = keys;
+        pairs._recordValues = values;
+        pairs._recordMask = mask;
+        pairs._recordUsed = used;
+        pairs._recordLive = used;
     };
 
     /**
@@ -10234,7 +10436,6 @@ var Common = __webpack_require__(0);
         var pairUpdate = Pair.update,
             pairCreate = Pair.create,
             pairSetActive = Pair.setActive,
-            pairsTable = pairs.table,
             pairsList = pairs.list,
             pairsListLength = pairsList.length,
             pairsListIndex = pairsListLength,
@@ -10265,7 +10466,7 @@ var Common = __webpack_require__(0);
             } else {
                 // pair did not exist, create a new pair
                 pair = pairCreate(collision, timestamp);
-                pairsTable.set(pair.id, pair);
+                Pairs._recordInsert(pairs, pair.id, collision);
 
                 // add the new pair
                 collisionStart[collisionStartIndex++] = pair;
@@ -10293,9 +10494,8 @@ var Common = __webpack_require__(0);
                 } else {
                     // remove inactive pairs if either body awake
                     collisionEnd[collisionEndIndex++] = pair;
-                    pairsTable.delete(pair.id);
-                    // the record outlives the pair (the collision record cache
-                    // hands it straight back if these bodies collide again), so
+                    Pairs._recordRemove(pairs, pair.id, pair);
+                    // the record can outlive the pair in solver scratch, so
                     // drop the back reference or the next `Pairs.update` would
                     // take it for a live pair and never re-add it
                     pair.collision.pair = null;
@@ -10328,10 +10528,10 @@ var Common = __webpack_require__(0);
      * @return {pairs} pairs
      */
     Pairs.clear = function(pairs) {
-        pairs.table = new Map();
         pairs._recordKeys.fill(0);
-        pairs._recordValues.length = 0;
-        pairs._recordValues.length = Pairs._cacheMask + 1;
+        pairs._recordValues.fill(null);
+        pairs._recordUsed = 0;
+        pairs._recordLive = 0;
         pairs.list.length = 0;
         pairs.collisionStart.length = 0;
         pairs.collisionActive.length = 0;
@@ -12904,8 +13104,14 @@ var Mouse = __webpack_require__(14);
             if (!bodyB.isStatic && !bodyA.isStatic) k = 0.5;
             if (bodyB.isStatic) k = 0;
 
+            // penetration is the normal scaled by the depth (the collision
+            // record no longer stores it; the debug renderer was its only
+            // consumer)
+            var penetrationX = collision.normal.x * collision.depth,
+                penetrationY = collision.normal.y * collision.depth;
+
             c.moveTo(bodyB.position.x, bodyB.position.y);
-            c.lineTo(bodyB.position.x - collision.penetration.x * k, bodyB.position.y - collision.penetration.y * k);
+            c.lineTo(bodyB.position.x - penetrationX * k, bodyB.position.y - penetrationY * k);
 
             k = 1;
 
@@ -12913,7 +13119,7 @@ var Mouse = __webpack_require__(14);
             if (bodyA.isStatic) k = 0;
 
             c.moveTo(bodyA.position.x, bodyA.position.y);
-            c.lineTo(bodyA.position.x + collision.penetration.x * k, bodyA.position.y + collision.penetration.y * k);
+            c.lineTo(bodyA.position.x + penetrationX * k, bodyA.position.y + penetrationY * k);
         }
 
         if (options.wireframes) {
