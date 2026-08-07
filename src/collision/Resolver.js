@@ -515,10 +515,15 @@ var Bounds = require('../geometry/Bounds');
         if (soa && soa.epoch === container._solverEpoch) {
             var soaV = container._soaV || (container._soaV = {
                     idxA: [], idxB: [], nx: [], ny: [], tx: [], ty: [],
-                    invMassTotal: [], frictionTimesStatic: [], friction: [],
+                    frictionTimesStatic: [], friction: [],
                     restitutionPlus1: [], separation: [], contactShare: [],
                     contactStart: [], contactCounts: [],
-                    cVx: [], cVy: [], cNormalImpulse: [], cTangentImpulse: [], cRefs: [],
+                    // per-contact constants of the iterations, hoisted here:
+                    // contact offsets from both body centres, and the share
+                    // factor whose divide otherwise runs once per contact per
+                    // iteration (all inputs are fixed across the iterations)
+                    cOffAX: [], cOffAY: [], cOffBX: [], cOffBY: [], cShare: [],
+                    cNormalImpulse: [], cTangentImpulse: [], cRefs: [],
                     bPosX: [], bPosY: [], bPosPrevX: [], bPosPrevY: [],
                     bAngle: [], bAnglePrev: [], bInvMass: [], bInvInertia: [], bCanMove: [],
                     pairCount: 0, contactTotal: 0, bodyCount: 0, epoch: 0, dirty: false
@@ -535,7 +540,6 @@ var Bounds = require('../geometry/Bounds');
                 aSepValid = soa.sepValid,
                 vTx = soaV.tx,
                 vTy = soaV.ty,
-                vInvMassTotal = soaV.invMassTotal,
                 vFrictionTimesStatic = soaV.frictionTimesStatic,
                 vFriction = soaV.friction,
                 vRestitutionPlus1 = soaV.restitutionPlus1,
@@ -543,8 +547,11 @@ var Bounds = require('../geometry/Bounds');
                 vContactShare = soaV.contactShare,
                 vContactStart = soaV.contactStart,
                 vContactCounts = soaV.contactCounts,
-                cVx = soaV.cVx,
-                cVy = soaV.cVy,
+                cOffAX = soaV.cOffAX,
+                cOffAY = soaV.cOffAY,
+                cOffBX = soaV.cOffBX,
+                cOffBY = soaV.cOffBY,
+                cShare = soaV.cShare,
                 cNormalImpulse = soaV.cNormalImpulse,
                 cTangentImpulse = soaV.cTangentImpulse,
                 cRefs = soaV.cRefs,
@@ -603,7 +610,16 @@ var Bounds = require('../geometry/Bounds');
 
                 vTx[i] = vTangentX;
                 vTy[i] = vTangentY;
-                vInvMassTotal[i] = vPair.inverseMass;
+
+                var vInverseMassTotal = vPair.inverseMass,
+                    vPairContactShare = 1 / vContactCount,
+                    vInvInertiaA = bInvInertia[slotA],
+                    vInvInertiaB = bInvInertia[slotB],
+                    vPosAX = bPosX[slotA],
+                    vPosAY = bPosY[slotA],
+                    vPosBX = bPosX[slotB],
+                    vPosBY = bPosY[slotB];
+
                 // first factor of the classic left-associated triple product
                 vFrictionTimesStatic[i] = vPair.friction * vPair.frictionStatic;
                 vFriction[i] = vPair.friction;
@@ -612,7 +628,7 @@ var Bounds = require('../geometry/Bounds');
                 // step, in which case the pair still carries the value the
                 // classic path would read
                 vSeparation[i] = aSepValid ? aSep[i] : vPair.separation;
-                vContactShare[i] = 1 / vContactCount;
+                vContactShare[i] = vPairContactShare;
                 vContactStart[i] = vContactIndex;
                 vContactCounts[i] = vContactCount;
 
@@ -620,10 +636,22 @@ var Bounds = require('../geometry/Bounds');
                     var vContact = vContacts[j],
                         vContactVertex = vContact.vertex,
                         vNormalImpulse = vContact.normalImpulse,
-                        vTangentImpulse = vContact.tangentImpulse;
+                        vTangentImpulse = vContact.tangentImpulse,
+                        vOffsetAX = vContactVertex.x - vPosAX,
+                        vOffsetAY = vContactVertex.y - vPosAY,
+                        vOffsetBX = vContactVertex.x - vPosBX,
+                        vOffsetBY = vContactVertex.y - vPosBY,
+                        vOAcN = vOffsetAX * vNormalY - vOffsetAY * vNormalX,
+                        vOBcN = vOffsetBX * vNormalY - vOffsetBY * vNormalX;
 
-                    cVx[vContactIndex] = vContactVertex.x;
-                    cVy[vContactIndex] = vContactVertex.y;
+                    cOffAX[vContactIndex] = vOffsetAX;
+                    cOffAY[vContactIndex] = vOffsetAY;
+                    cOffBX[vContactIndex] = vOffsetBX;
+                    cOffBY[vContactIndex] = vOffsetBY;
+                    // identical association to the classic in-iteration form
+                    cShare[vContactIndex] = vPairContactShare / (vInverseMassTotal
+                        + vInvInertiaA * vOAcN * vOAcN
+                        + vInvInertiaB * vOBcN * vOBcN);
                     cNormalImpulse[vContactIndex] = vNormalImpulse;
                     cTangentImpulse[vContactIndex] = vTangentImpulse;
                     cRefs[vContactIndex] = vContact;
@@ -633,13 +661,14 @@ var Bounds = require('../geometry/Bounds');
                         var vImpulseX = vNormalX * vNormalImpulse + vTangentX * vTangentImpulse,
                             vImpulseY = vNormalY * vNormalImpulse + vTangentY * vTangentImpulse;
 
-                        // apply impulse from contact
+                        // apply impulse from contact; the offsets are the same
+                        // vertex-minus-position subtractions the classic form
+                        // wrote inline
                         if (bCanMove[slotA] === 1) {
                             bPosPrevX[slotA] += vImpulseX * bInvMass[slotA];
                             bPosPrevY[slotA] += vImpulseY * bInvMass[slotA];
                             bAnglePrev[slotA] += bInvInertia[slotA] * (
-                                (cVx[vContactIndex] - bPosX[slotA]) * vImpulseY
-                                - (cVy[vContactIndex] - bPosY[slotA]) * vImpulseX
+                                vOffsetAX * vImpulseY - vOffsetAY * vImpulseX
                             );
                         }
 
@@ -647,8 +676,7 @@ var Bounds = require('../geometry/Bounds');
                             bPosPrevX[slotB] -= vImpulseX * bInvMass[slotB];
                             bPosPrevY[slotB] -= vImpulseY * bInvMass[slotB];
                             bAnglePrev[slotB] -= bInvInertia[slotB] * (
-                                (cVx[vContactIndex] - bPosX[slotB]) * vImpulseY
-                                - (cVy[vContactIndex] - bPosY[slotB]) * vImpulseX
+                                vOffsetBX * vImpulseY - vOffsetBY * vImpulseX
                             );
                         }
                     }
@@ -798,16 +826,17 @@ var Bounds = require('../geometry/Bounds');
                 vNy = soaV.ny,
                 vTx = soaV.tx,
                 vTy = soaV.ty,
-                vInvMassTotal = soaV.invMassTotal,
                 vFrictionTimesStatic = soaV.frictionTimesStatic,
                 vFriction = soaV.friction,
                 vRestitutionPlus1 = soaV.restitutionPlus1,
                 vSeparation = soaV.separation,
-                vContactShare = soaV.contactShare,
                 vContactStart = soaV.contactStart,
                 vContactCounts = soaV.contactCounts,
-                cVx = soaV.cVx,
-                cVy = soaV.cVy,
+                cOffAX = soaV.cOffAX,
+                cOffAY = soaV.cOffAY,
+                cOffBX = soaV.cOffBX,
+                cOffBY = soaV.cOffBY,
+                cShare = soaV.cShare,
                 cNormalImpulse = soaV.cNormalImpulse,
                 cTangentImpulse = soaV.cTangentImpulse,
                 bPosX = soaV.bPosX,
@@ -827,12 +856,10 @@ var Bounds = require('../geometry/Bounds');
                     normalY = vNy[p],
                     tangentX = vTx[p],
                     tangentY = vTy[p],
-                    inverseMassTotal = vInvMassTotal[p],
                     friction = vFrictionTimesStatic[p] * frictionNormalMultiplier,
                     pairSeparation = vSeparation[p],
                     pairFriction = vFriction[p],
                     restitutionPlus1 = vRestitutionPlus1[p],
-                    contactShare = vContactShare[p],
                     contactStart = vContactStart[p],
                     contactEnd = contactStart + vContactCounts[p];
 
@@ -858,13 +885,12 @@ var Bounds = require('../geometry/Bounds');
 
                 // resolve each contact
                 for (var c = contactStart; c < contactEnd; c++) {
-                    var contactVertexX = cVx[c],
-                        contactVertexY = cVy[c];
-
-                    var offsetAX = contactVertexX - bodyAPositionX,
-                        offsetAY = contactVertexY - bodyAPositionY,
-                        offsetBX = contactVertexX - bodyBPositionX,
-                        offsetBY = contactVertexY - bodyBPositionY;
+                    // offsets and the share divide are constants of the
+                    // iterations, precomputed in preSolveVelocity
+                    var offsetAX = cOffAX[c],
+                        offsetAY = cOffAY[c],
+                        offsetBX = cOffBX[c],
+                        offsetBY = cOffBY[c];
 
                     var velocityPointAX = bodyAVelocityX - offsetAY * bodyAAngularVelocity,
                         velocityPointAY = bodyAVelocityY + offsetAX * bodyAAngularVelocity,
@@ -898,12 +924,9 @@ var Bounds = require('../geometry/Bounds');
                         maxFriction = frictionMaxStatic;
                     }
 
-                    // account for mass, inertia and contact offset
-                    var oAcN = offsetAX * normalY - offsetAY * normalX,
-                        oBcN = offsetBX * normalY - offsetBY * normalX,
-                        share = contactShare / (inverseMassTotal + bodyAInverseInertia * oAcN * oAcN + bodyBInverseInertia * oBcN * oBcN);
-
-                    // raw impulses
+                    // raw impulses (share was precomputed with the identical
+                    // mass, inertia and contact offset association)
+                    var share = cShare[c];
                     var normalImpulse = restitutionPlus1 * normalVelocity * share;
                     tangentImpulse *= share;
 
