@@ -73,15 +73,14 @@ var Pair = require('./Pair');
             return null;
         }
 
-        // Reuse collision records for gc efficiency. The record for this body
-        // pair is looked up in the pairs structure's direct-mapped cache first
-        // (see Pairs.create): the record is scratch that the rest of this
-        // function overwrites in full, so a hit is as good as the table lookup
-        // and costs a masked array read instead. A hit for a pair that has since
-        // ended is not only safe but preferable, since it recycles that record
-        // rather than allocating a new one.
+        // Reuse collision records for gc efficiency. The live pair's record is
+        // probed out of the pairs structure's open-addressing record table
+        // (see Pairs.create), which is authoritative: a key hit always means
+        // the pair is live and the value is the record the rest of this
+        // function overwrites in full. `Pairs.update` maintains the table, so
+        // a miss means these bodies have no live pair and a fresh record is
+        // built for them.
         var collision = null,
-            recordSlot = -1,
             pairId = 0;
 
         if (pairs) {
@@ -89,24 +88,21 @@ var Pair = require('./Pair');
                 idB = bodyB.id;
 
             pairId = idA < idB ? idA * Pair._idShift + idB : idB * Pair._idShift + idA;
-            recordSlot = Pair.hash(idA, idB) & pairs._recordMask;
 
-            if (pairs._recordKeys[recordSlot] === pairId) {
-                var cached = pairs._recordValues[recordSlot];
+            var recordKeys = pairs._recordKeys,
+                recordMask = pairs._recordMask,
+                recordSlot = Pair.hash(idA, idB) & recordMask,
+                recordKey;
 
-                // a live pair still points back at its record, so this alone
-                // proves the cached record is the one the table would return
-                if (cached.pair !== null) {
-                    collision = cached;
+            // tombstones (-1) match neither the pair id nor the empty sentinel,
+            // so the probe walks straight over them
+            while ((recordKey = recordKeys[recordSlot]) !== 0) {
+                if (recordKey === pairId) {
+                    collision = pairs._recordValues[recordSlot];
+                    break;
                 }
-            }
 
-            if (collision === null) {
-                var pair = pairs.table.get(pairId);
-
-                if (pair) {
-                    collision = pair.collision;
-                }
+                recordSlot = (recordSlot + 1) & recordMask;
             }
         }
 
@@ -117,11 +113,6 @@ var Pair = require('./Pair');
             collision.bodyB = bodyA.id < bodyB.id ? bodyB : bodyA;
             collision.parentA = collision.bodyA.parent;
             collision.parentB = collision.bodyB.parent;
-        }
-
-        if (recordSlot >= 0) {
-            pairs._recordKeys[recordSlot] = pairId;
-            pairs._recordValues[recordSlot] = collision;
         }
 
         bodyA = collision.bodyA;
