@@ -56,8 +56,6 @@ var Axes = require('../geometry/Axes');
             velocity: { x: 0, y: 0 },
             angularVelocity: 0,
             isSensor: false,
-            isStatic: false,
-            isSleeping: false,
             motion: 0,
             sleepThreshold: 60,
             density: 0.001,
@@ -95,7 +93,15 @@ var Axes = require('../geometry/Axes');
             axes: null,
             area: 0,
             mass: 0,
+            // assigned by Body.setMass / setInertia / Sleeping before use, but
+            // declared here so they live in-object: left out, they spill to
+            // the out-of-object property backing store and every read (the
+            // solver snapshots them per body per step, Pair.update per pair)
+            // pays an extra indirection
+            inverseMass: 0,
             inertia: 0,
+            inverseInertia: 0,
+            sleepCounter: 0,
             deltaTime: 1000 / 60,
             _original: null,
             // per-step scratch stamps and flags used by the broadphase
@@ -108,18 +114,32 @@ var Axes = require('../geometry/Axes');
             // RULE: any NEW per-body scratch field, from any module, must be
             // added to this block with a default of the same type it will
             // hold, never assigned onto a body for the first time elsewhere.
+            //
+            // Classification-walk cluster: the per-step walk in
+            // Detector._collisionsGridStatic touches every one of these for
+            // every body in the world, so they are declared adjacently
+            // (declaration order fixes the in-object layout) to land on as few
+            // cache lines as possible. isStatic / isSleeping live here rather
+            // than with the public fields for the same reason.
+            isStatic: false,
+            isSleeping: false,
+            _gridDynamic: false,
+            _sPrev: false,
+            _sIndexed: false,
+            _sDeparted: false,
+            _sWalk: 0,
+            _sWorldIndex: 0,
+            _scEpoch: 0,
             _stamp: 0,
             _gsStamp: 0,
-            _sPrev: false,
             _ov: false,
             _ovD: false,
-            _gridDynamic: false,
             _solverStamp: 0,
             // slot index into the resolver's flat solver arrays (valid only
             // while _solverStamp matches the current solver epoch)
             _solverIndex: 0,
-            // gridStatic static-candidate cache (see Detector._collisionsGridStatic)
-            _scEpoch: 0,
+            // gridStatic static-candidate cache (see Detector._collisionsGridStatic;
+            // _scEpoch is up in the classification-walk cluster)
             _scStatic: false,
             _scCx0: 0,
             _scCx1: 0,
@@ -140,13 +160,11 @@ var Axes = require('../geometry/Axes');
             // _sWorldIndex its position in that walk, which is the sort key
             // that keeps bucket contents in world order, and _sDeparted a
             // one-shot set by Composite.removeBody so a body removed and
-            // re-added within a single step is re-indexed at its new position
+            // re-added within a single step is re-indexed at its new position.
+            // (_sIndexed / _sWalk / _sWorldIndex / _sDeparted are up in the
+            // classification-walk cluster.)
             _sBuckets: null,
-            _sIndexed: false,
             _sIndexedAt: -1,
-            _sWalk: 0,
-            _sWorldIndex: 0,
-            _sDeparted: false,
             // the cell span this body was BUCKETED at. Unbucketing has to know
             // which cells it vacated in order to invalidate the movers standing
             // over them, and by then its live bounds no longer say: a released
