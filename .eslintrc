@@ -21,6 +21,7 @@
     },
     "globals": {
         "Map": false,
+        "Set": false,
         "Float64Array": false,
         "Int32Array": false,
         "Matter": false,
