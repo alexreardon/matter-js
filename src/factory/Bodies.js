@@ -56,6 +56,9 @@ var Vector = require('../geometry/Vector');
             var chamfer = options.chamfer;
             rectangle.vertices = Vertices.chamfer(Vertices.create(rectangle.vertices, null), chamfer.radius, 
                 chamfer.quality, chamfer.qualityMin, chamfer.qualityMax);
+            // the key must be ABSENT for Common.extend (an undefined value would still copy
+            // the key onto the body and change its shape); options is a throwaway per call
+            // eslint-disable-next-line no-restricted-syntax
             delete options.chamfer;
         }
 
@@ -114,6 +117,9 @@ var Vector = require('../geometry/Vector');
             var chamfer = options.chamfer;
             trapezoid.vertices = Vertices.chamfer(trapezoid.vertices, chamfer.radius, 
                 chamfer.quality, chamfer.qualityMin, chamfer.qualityMax);
+            // the key must be ABSENT for Common.extend (an undefined value would still copy
+            // the key onto the body and change its shape); options is a throwaway per call
+            // eslint-disable-next-line no-restricted-syntax
             delete options.chamfer;
         }
 
@@ -191,6 +197,9 @@ var Vector = require('../geometry/Vector');
             var chamfer = options.chamfer;
             polygon.vertices = Vertices.chamfer(polygon.vertices, chamfer.radius, 
                 chamfer.quality, chamfer.qualityMin, chamfer.qualityMax);
+            // the key must be ABSENT for Common.extend (an undefined value would still copy
+            // the key onto the body and change its shape); options is a throwaway per call
+            // eslint-disable-next-line no-restricted-syntax
             delete options.chamfer;
         }
 

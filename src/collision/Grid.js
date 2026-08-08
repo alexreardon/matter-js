@@ -330,6 +330,8 @@ var deprecated = Common.deprecated;
             if (pair[2] > 0) {
                 pairs.push(pair);
             } else {
+                // legacy Grid module (the game never runs it); key absence is its bucket semantics
+                // eslint-disable-next-line no-restricted-syntax
                 delete gridPairs[pairKeys[k]];
             }
         }

@@ -163,6 +163,8 @@ var Common = require('./Common');
 
             if (plugin._warned) {
                 status.push('🔶 ' + Plugin.toString(plugin));
+                // cold plugin bookkeeping, runs once at use-time
+                // eslint-disable-next-line no-restricted-syntax
                 delete plugin._warned;
             } else {
                 status.push('✅ ' + Plugin.toString(plugin));

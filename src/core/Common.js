@@ -541,7 +541,8 @@ module.exports = Common;
         var chain = function() {
             // https://github.com/GoogleChrome/devtools-docs/issues/53#issuecomment-51941358
             var lastResult,
-                // eslint-disable-next-line no-restricted-syntax -- cold arguments copy, densely filled on the next lines and discarded
+                // cold arguments copy, densely filled on the next lines and discarded
+                // eslint-disable-next-line no-restricted-syntax
                 args = new Array(arguments.length);
 
             for (var i = 0, l = arguments.length; i < l; i++) {
