@@ -483,7 +483,9 @@ var Collision = require('./Collision');
     Detector._createCellTable = function() {
         return {
             keys: new Float64Array(2048),
-            vals: new Array(2048),
+            // pre-filled so the backing store stays packed: a bare
+            // `new Array(n)` is HOLEY and every probe read pays for it
+            vals: new Array(2048).fill(null),
             mask: 2047,
             count: 0
         };
@@ -575,7 +577,7 @@ var Collision = require('./Collision');
             oldCapacity = oldKeys.length,
             newCapacity = oldCapacity * 2,
             newKeys = new Float64Array(newCapacity),
-            newVals = new Array(newCapacity),
+            newVals = new Array(newCapacity).fill(null),
             newMask = newCapacity - 1,
             keyStride = 0x200000;
 
