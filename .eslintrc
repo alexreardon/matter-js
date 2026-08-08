@@ -1,5 +1,16 @@
 {
     "rules": {
+        "no-restricted-syntax": [
+            2,
+            {
+                "selector": ":not(MemberExpression) > NewExpression[callee.name='Array']",
+                "message": "A bare `new Array(n)` is HOLEY for the array's whole life and every read pays for it. Chain `.fill(...)` at the allocation (see Pairs.create), or add a disable comment with a reason on a cold path. `npm run audit-shapes` catches the runtime forms this selector cannot see."
+            },
+            {
+                "selector": "UnaryExpression[operator='delete']",
+                "message": "`delete` drops an object to dictionary-mode properties. Assign null/undefined instead, or add a disable comment with a reason on a cold path."
+            }
+        ],
         "no-fallthrough": 2,
         "no-console": 0,
         "no-unused-vars": 0,
