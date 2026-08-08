@@ -206,8 +206,10 @@ Each change was A/B'd on its own against the previous release tag. Benefit is wh
 | **Memoised self-projection** — each body's projection onto its own axes is a pair-independent reduction, so it is computed once per move instead of once per pair the body takes part in | `-5%` to `-6%` on a page, `-22%` on the mixed shapes pile |
 | **One pair-record table** — the pairs `Map` and the direct-mapped cache in front of it became a single open-addressing table probed by the narrowphase, maintained at pair start/end | `-2%` to `-3%` |
 | **Velocity solver constants hoisted** — the velocity pre-solve builds over the position solve's snapshot instead of re-walking every pair, and per-contact offsets and the `share` divide move out of the four iterations (`4` divides per contact per step down to `1`) | `-3%` to `-4%` |
+| **Provable no-op write-backs skipped** — the position-impulse and velocity write-backs skip bodies the solver could not move, and the position post-solve never calls into a body with no accumulated impulse (on a dense page most solver bodies are statics) | `-1.3%` while bodies are added and removed every step |
 | **The detector stops copying the body array** — the copy existed only so the sweep could sort in place; grid modes reference the caller's array, and the sweep copies lazily on first use | `-9%` while bodies are added and removed every step |
 | **Shorter broadphase chain walks** — a mover starts its cell walk at its own entry rather than the chain head, skipping a prefix it would only reject | `-2%` to `-3%` |
+| **Dead work dropped** — the unread `collision.penetration` write is gone (the debug renderer derives it from `normal` and `depth`), the `gridStatic` candidate pass reuses the cell spans the insert pass already computed, and collision event payloads are only built when a listener exists | `-0.5%` to `-0.8%` while bodies are added and removed every step |
 | **Allocation micro-optimisations** — numeric pair ids, a collision record cache, an unrolled box-vs-box SAT path | `-34%` allocation per update |
 
 ## Differences from upstream
@@ -217,6 +219,7 @@ In both modes:
 - Change `body.isStatic` / `body.isSleeping` through `Body.setStatic` / `Sleeping.set` (which is what upstream documents anyway). Direct assignment leaves cached mover lists stale.
 - A resting body's `force` / `torque` is only zeroed once it starts moving again. Unchanged when sleeping is enabled.
 - `pair.id` is a number rather than a string.
+- `collision.penetration` no longer exists. Derive it as `normal` scaled by `depth`, which is how the built-in debug renderer now draws it.
 - A body removed from a composite has its `positionImpulse` cleared, so it stops being simulated (this matches what upstream effectively did).
 - `Bodies.rectangle` accepts dimensions upstream could not. Upstream builds the body from a path string, and its parser's character class omits `+`, so any dimension `String()` renders in exponent form (`1e+21` and above) silently produced a `NaN` body. Here the corners are built directly, so there is no parse to get wrong.
 
