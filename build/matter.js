@@ -668,6 +668,8 @@ module.exports = Common;
         var chain = function() {
             // https://github.com/GoogleChrome/devtools-docs/issues/53#issuecomment-51941358
             var lastResult,
+                // cold arguments copy, densely filled on the next lines and discarded
+                // eslint-disable-next-line no-restricted-syntax
                 args = new Array(arguments.length);
 
             for (var i = 0, l = arguments.length; i < l; i++) {
@@ -1398,17 +1400,27 @@ var Common = __webpack_require__(0);
             pointY = point.y,
             verticesLength = vertices.length,
             vertex = vertices[verticesLength - 1],
-            nextVertex;
+            // this iteration's start point is the previous iteration's end
+            // point, so it is carried as numbers rather than re-read off the
+            // vertex object every edge
+            vertexX = vertex.x,
+            vertexY = vertex.y,
+            nextVertex,
+            nextVertexX,
+            nextVertexY;
 
         for (var i = 0; i < verticesLength; i++) {
             nextVertex = vertices[i];
+            nextVertexX = nextVertex.x;
+            nextVertexY = nextVertex.y;
 
-            if ((pointX - vertex.x) * (nextVertex.y - vertex.y) 
-                + (pointY - vertex.y) * (vertex.x - nextVertex.x) > 0) {
+            if ((pointX - vertexX) * (nextVertexY - vertexY)
+                + (pointY - vertexY) * (vertexX - nextVertexX) > 0) {
                 return false;
             }
 
-            vertex = nextVertex;
+            vertexX = nextVertexX;
+            vertexY = nextVertexY;
         }
 
         return true;
@@ -4589,12 +4601,16 @@ var Pair = __webpack_require__(9);
         var supportsB = Collision._findSupports(bodyA, bodyB, normal, 1),
             supportCount = 0;
 
-        // find the supports from bodyB that are inside bodyA
-        if (Vertices.contains(bodyA.vertices, supportsB[0])) {
+        // find the supports from bodyB that are inside bodyA. Both points are
+        // always tested against the same vertex set, so one fused walk shares
+        // every edge's loads and deltas between them
+        var containsB = Collision._containsPair(bodyA.vertices, supportsB[0], supportsB[1]);
+
+        if ((containsB & 1) !== 0) {
             supports[supportCount++] = supportsB[0];
         }
 
-        if (Vertices.contains(bodyA.vertices, supportsB[1])) {
+        if ((containsB & 2) !== 0) {
             supports[supportCount++] = supportsB[1];
         }
 
@@ -4602,12 +4618,28 @@ var Pair = __webpack_require__(9);
         if (supportCount < 2) {
             var supportsA = Collision._findSupports(bodyB, bodyA, normal, -1);
 
-            if (Vertices.contains(bodyB.vertices, supportsA[0])) {
-                supports[supportCount++] = supportsA[0];
-            }
+            if (supportCount === 0) {
+                // nothing the first test can do takes the count to 2, so the
+                // second test always runs and the fused walk is free here too
+                var containsA = Collision._containsPair(bodyB.vertices, supportsA[0], supportsA[1]);
 
-            if (supportCount < 2 && Vertices.contains(bodyB.vertices, supportsA[1])) {
-                supports[supportCount++] = supportsA[1];
+                if ((containsA & 1) !== 0) {
+                    supports[supportCount++] = supportsA[0];
+                }
+
+                if ((containsA & 2) !== 0) {
+                    supports[supportCount++] = supportsA[1];
+                }
+            } else {
+                // entering with one support already, the second test can be
+                // skipped outright, which beats sharing the walk with it
+                if (Vertices.contains(bodyB.vertices, supportsA[0])) {
+                    supports[supportCount++] = supportsA[0];
+                }
+
+                if (supportCount < 2 && Vertices.contains(bodyB.vertices, supportsA[1])) {
+                    supports[supportCount++] = supportsA[1];
+                }
             }
         }
 
@@ -4882,6 +4914,71 @@ var Pair = __webpack_require__(9);
         _supports[1] = vertexC;
 
         return _supports;
+    };
+
+    /**
+     * Tests TWO points against the same vertex set in one walk of its edges.
+     *
+     * Each edge contributes two terms that do not depend on the point being
+     * tested, `nextVertex.y - vertex.y` and `vertex.x - nextVertex.x`, plus the
+     * element and property loads that produce them. Testing the points
+     * separately does all of that twice. A point drops out of the arithmetic on
+     * the first edge it fails, exactly as `Vertices.contains` returns early, so
+     * the per-point work is unchanged and only the shared edge setup is saved.
+     * @method _containsPair
+     * @private
+     * @param {vertices} vertices
+     * @param {vector} pointA
+     * @param {vector} pointB
+     * @return {number} Bit 1 set if `pointA` is inside, bit 2 if `pointB` is
+     */
+    Collision._containsPair = function(vertices, pointA, pointB) {
+        var pointAX = pointA.x,
+            pointAY = pointA.y,
+            pointBX = pointB.x,
+            pointBY = pointB.y,
+            verticesLength = vertices.length,
+            vertex = vertices[verticesLength - 1],
+            vertexX = vertex.x,
+            vertexY = vertex.y,
+            inside = 3,
+            nextVertex,
+            nextVertexX,
+            nextVertexY,
+            edgeDeltaY,
+            edgeDeltaX;
+
+        for (var i = 0; i < verticesLength; i++) {
+            nextVertex = vertices[i];
+            nextVertexX = nextVertex.x;
+            nextVertexY = nextVertex.y;
+            // the two exact subexpressions `Vertices.contains` forms per edge
+            edgeDeltaY = nextVertexY - vertexY;
+            edgeDeltaX = vertexX - nextVertexX;
+
+            if ((inside & 1) !== 0
+                && (pointAX - vertexX) * edgeDeltaY + (pointAY - vertexY) * edgeDeltaX > 0) {
+                inside &= ~1;
+
+                if (inside === 0) {
+                    return 0;
+                }
+            }
+
+            if ((inside & 2) !== 0
+                && (pointBX - vertexX) * edgeDeltaY + (pointBY - vertexY) * edgeDeltaX > 0) {
+                inside &= ~2;
+
+                if (inside === 0) {
+                    return 0;
+                }
+            }
+
+            vertexX = nextVertexX;
+            vertexY = nextVertexY;
+        }
+
+        return inside;
     };
 
     /*
@@ -5799,6 +5896,9 @@ var Vector = __webpack_require__(2);
             var chamfer = options.chamfer;
             rectangle.vertices = Vertices.chamfer(Vertices.create(rectangle.vertices, null), chamfer.radius, 
                 chamfer.quality, chamfer.qualityMin, chamfer.qualityMax);
+            // the key must be ABSENT for Common.extend (an undefined value would still copy
+            // the key onto the body and change its shape); options is a throwaway per call
+            // eslint-disable-next-line no-restricted-syntax
             delete options.chamfer;
         }
 
@@ -5857,6 +5957,9 @@ var Vector = __webpack_require__(2);
             var chamfer = options.chamfer;
             trapezoid.vertices = Vertices.chamfer(trapezoid.vertices, chamfer.radius, 
                 chamfer.quality, chamfer.qualityMin, chamfer.qualityMax);
+            // the key must be ABSENT for Common.extend (an undefined value would still copy
+            // the key onto the body and change its shape); options is a throwaway per call
+            // eslint-disable-next-line no-restricted-syntax
             delete options.chamfer;
         }
 
@@ -5934,6 +6037,9 @@ var Vector = __webpack_require__(2);
             var chamfer = options.chamfer;
             polygon.vertices = Vertices.chamfer(polygon.vertices, chamfer.radius, 
                 chamfer.quality, chamfer.qualityMin, chamfer.qualityMax);
+            // the key must be ABSENT for Common.extend (an undefined value would still copy
+            // the key onto the body and change its shape); options is a throwaway per call
+            // eslint-disable-next-line no-restricted-syntax
             delete options.chamfer;
         }
 
@@ -8211,6 +8317,8 @@ var Common = __webpack_require__(0);
 
             if (plugin._warned) {
                 status.push('🔶 ' + Plugin.toString(plugin));
+                // cold plugin bookkeeping, runs once at use-time
+                // eslint-disable-next-line no-restricted-syntax
                 delete plugin._warned;
             } else {
                 status.push('✅ ' + Plugin.toString(plugin));
@@ -9644,10 +9752,9 @@ var Bounds = __webpack_require__(1);
 
         if (soa && soa.epoch === container._solverEpoch) {
             var soaV = container._soaV || (container._soaV = {
-                    idxA: [], idxB: [], nx: [], ny: [], tx: [], ty: [],
+                    idxA: [], idxB: [], nx: [], ny: [],
                     frictionTimesStatic: [], friction: [],
-                    restitutionPlus1: [], separation: [], contactShare: [],
-                    contactStart: [], contactCounts: [],
+                    restitutionPlus1: [], separation: [], contactCounts: [],
                     // per-contact constants of the iterations, hoisted here:
                     // contact offsets from both body centres, and the share
                     // factor whose divide otherwise runs once per contact per
@@ -9668,14 +9775,9 @@ var Bounds = __webpack_require__(1);
                 aNy = soa.ny,
                 aSep = soa.sep,
                 aSepValid = soa.sepValid,
-                vTx = soaV.tx,
-                vTy = soaV.ty,
                 vFrictionTimesStatic = soaV.frictionTimesStatic,
                 vFriction = soaV.friction,
                 vRestitutionPlus1 = soaV.restitutionPlus1,
-                vSeparation = soaV.separation,
-                vContactShare = soaV.contactShare,
-                vContactStart = soaV.contactStart,
                 vContactCounts = soaV.contactCounts,
                 cOffAX = soaV.cOffAX,
                 cOffAY = soaV.cOffAY,
@@ -9702,6 +9804,23 @@ var Bounds = __webpack_require__(1);
             soaV.idxB = aIdxB;
             soaV.nx = aNx;
             soaV.ny = aNy;
+
+            // the position solve wrote every active pair's separation into its
+            // own snapshot in this same slot order, so alias that too. Only a
+            // step whose position solve never ran needs the per-pair copy off
+            // the pair objects, and that path takes a private array back.
+            var vSeparation;
+            if (aSepValid) {
+                vSeparation = soaV.separation = aSep;
+            } else {
+                vSeparation = soaV.separation;
+                if (vSeparation === aSep) {
+                    vSeparation = soaV.separation = [];
+                }
+                for (i = 0; i < aPairCount; i++) {
+                    vSeparation[i] = aPairRefs[i].separation;
+                }
+            }
 
             // per-body snapshot into the slots assigned by preSolvePosition
             // (same epoch, same _solverIndex ordering as _solverBodies). This
@@ -9738,9 +9857,6 @@ var Bounds = __webpack_require__(1);
                     vTangentX = -vNormalY,
                     vTangentY = vNormalX;
 
-                vTx[i] = vTangentX;
-                vTy[i] = vTangentY;
-
                 var vInverseMassTotal = vPair.inverseMass,
                     vPairContactShare = 1 / vContactCount,
                     vInvInertiaA = bInvInertia[slotA],
@@ -9754,12 +9870,6 @@ var Bounds = __webpack_require__(1);
                 vFrictionTimesStatic[i] = vPair.friction * vPair.frictionStatic;
                 vFriction[i] = vPair.friction;
                 vRestitutionPlus1[i] = 1 + vPair.restitution;
-                // the position solve's separations, unless it never ran this
-                // step, in which case the pair still carries the value the
-                // classic path would read
-                vSeparation[i] = aSepValid ? aSep[i] : vPair.separation;
-                vContactShare[i] = vPairContactShare;
-                vContactStart[i] = vContactIndex;
                 vContactCounts[i] = vContactCount;
 
                 for (j = 0; j < vContactCount; j++) {
@@ -9960,13 +10070,10 @@ var Bounds = __webpack_require__(1);
                 vIdxB = soaV.idxB,
                 vNx = soaV.nx,
                 vNy = soaV.ny,
-                vTx = soaV.tx,
-                vTy = soaV.ty,
                 vFrictionTimesStatic = soaV.frictionTimesStatic,
                 vFriction = soaV.friction,
                 vRestitutionPlus1 = soaV.restitutionPlus1,
                 vSeparation = soaV.separation,
-                vContactStart = soaV.contactStart,
                 vContactCounts = soaV.contactCounts,
                 cOffAX = soaV.cOffAX,
                 cOffAY = soaV.cOffAY,
@@ -9985,18 +10092,24 @@ var Bounds = __webpack_require__(1);
                 bInvInertia = soaV.bInvInertia,
                 bCanMove = soaV.bCanMove;
 
+            // the contact block of pair p follows pair p-1's, exactly as
+            // preSolveVelocity laid them down, so the start index is carried
+            // rather than stored per pair
+            var contactStart = 0;
+
             for (var p = 0; p < pairCount; p++) {
                 var ia = vIdxA[p],
                     ib = vIdxB[p],
                     normalX = vNx[p],
                     normalY = vNy[p],
-                    tangentX = vTx[p],
-                    tangentY = vTy[p],
+                    // exactly the values preSolveVelocity derived, from the
+                    // same normal, so the negation reproduces them bit for bit
+                    tangentX = -normalY,
+                    tangentY = normalX,
                     friction = vFrictionTimesStatic[p] * frictionNormalMultiplier,
                     pairSeparation = vSeparation[p],
                     pairFriction = vFriction[p],
                     restitutionPlus1 = vRestitutionPlus1[p],
-                    contactStart = vContactStart[p],
                     contactEnd = contactStart + vContactCounts[p];
 
                 // cache body properties that are invariant across the contact loop
@@ -10110,6 +10223,8 @@ var Bounds = __webpack_require__(1);
                         bAnglePrev[ib] -= (offsetBX * impulseY - offsetBY * impulseX) * bodyBInverseInertia;
                     }
                 }
+
+                contactStart = contactEnd;
             }
 
             return;
@@ -11368,6 +11483,8 @@ var deprecated = Common.deprecated;
             if (pair[2] > 0) {
                 pairs.push(pair);
             } else {
+                // legacy Grid module (the game never runs it); key absence is its bucket semantics
+                // eslint-disable-next-line no-restricted-syntax
                 delete gridPairs[pairKeys[k]];
             }
         }
