@@ -225,6 +225,7 @@ In both modes:
 
 - Change `body.isStatic` / `body.isSleeping` through `Body.setStatic` / `Sleeping.set` (which is what upstream documents anyway). Direct assignment leaves cached mover lists stale.
 - A resting body's `force` / `torque` is only zeroed once it starts moving again. Unchanged when sleeping is enabled.
+- `Matter.version` reports the fork tag (`0.20.0-perf16`) rather than `0.20.0`, so a consumer can assert in CI that it resolved the release it pinned. Version RANGES are unaffected (`^0.20.0` and `~0.20.0` still match, since `Plugin.versionSatisfies` compares major/minor/patch and ignores the suffix); only a plugin pinning the exact string `matter-js@0.20.0` would stop matching.
 - `pair.id` is a number rather than a string.
 - `collision.penetration` no longer exists. Derive it as `normal` scaled by `depth`, which is how the built-in debug renderer now draws it.
 - A body removed from a composite has its `positionImpulse` cleared, so it stops being simulated (this matches what upstream effectively did).

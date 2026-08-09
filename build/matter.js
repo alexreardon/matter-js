@@ -1,5 +1,5 @@
 /*!
- * matter-js 0.20.0 by @liabru
+ * matter-js 0.20.0-perf16 by @liabru
  * http://brm.io/matter-js/
  * License MIT
  * 
@@ -10745,7 +10745,7 @@ var Common = __webpack_require__(0);
      * @readOnly
      * @type {String}
      */
-    Matter.version =  true ? "0.20.0" : undefined;
+    Matter.version =  true ? "0.20.0-perf16" : undefined;
 
     /**
      * A list of plugin dependencies to be installed. These are normally set and installed through `Matter.use`.
