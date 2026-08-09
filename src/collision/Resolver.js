@@ -61,6 +61,7 @@ var Bounds = require('../geometry/Bounds');
                     idxA: [], idxB: [], nx: [], ny: [], depth: [], slop: [],
                     mul2: [], sep: [], pairRefs: [],
                     impX: [], impY: [], tc: [], canMove: [],
+                    share: [], shareDampen: 0, shareEpoch: -1,
                     pairCount: 0, bodyCount: 0, epoch: 0,
                     sepValid: false, dirty: false
                 }),
@@ -207,9 +208,28 @@ var Bounds = require('../geometry/Bounds');
                 impY = soa.impY,
                 tcArr = soa.tc,
                 canMove = soa.canMove,
+                shareArr = soa.share,
                 p,
                 ia,
                 ib;
+
+            // each body's contact share is constant across the six iterations,
+            // so the divide is done once per body per step instead of once per
+            // pair side per iteration. The saved value is the identical
+            // quotient of the identical operands, not a reciprocal, so the
+            // impulse arithmetic below is unchanged bit for bit.
+            if (soa.shareEpoch !== soa.epoch || soa.shareDampen !== positionDampen) {
+                soa.shareEpoch = soa.epoch;
+                soa.shareDampen = positionDampen;
+
+                var shareBodyCount = soa.bodyCount;
+
+                // immovable slots are written 0 rather than skipped, so the
+                // array stays packed (a hole would put it in dictionary mode)
+                for (var shareIndex = 0; shareIndex < shareBodyCount; shareIndex++) {
+                    shareArr[shareIndex] = canMove[shareIndex] === 1 ? positionDampen / tcArr[shareIndex] : 0;
+                }
+            }
 
             // get current separation between body edges involved in collision
             for (p = 0; p < pairCount; p++) {
@@ -235,13 +255,13 @@ var Bounds = require('../geometry/Bounds');
                     soaNormalY = nyArr[p];
 
                 if (canMove[ia] === 1) {
-                    contactShare = positionDampen / tcArr[ia];
+                    contactShare = shareArr[ia];
                     impX[ia] += soaNormalX * soaImpulse * contactShare;
                     impY[ia] += soaNormalY * soaImpulse * contactShare;
                 }
 
                 if (canMove[ib] === 1) {
-                    contactShare = positionDampen / tcArr[ib];
+                    contactShare = shareArr[ib];
                     impX[ib] -= soaNormalX * soaImpulse * contactShare;
                     impY[ib] -= soaNormalY * soaImpulse * contactShare;
                 }
