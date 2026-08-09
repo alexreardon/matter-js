@@ -18,7 +18,7 @@ For scenes that are mostly static bodies, the opt-in `gridStatic` mode goes furt
 Install from a release tag (`v0.20.0-perfN`). The built bundle (`build/matter.js`) is committed, so there is no build step.
 
 ```bash
-npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-perf14.tar.gz
+npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-perf15.tar.gz
 ```
 
 ## Usage
@@ -45,7 +45,9 @@ Matter.Detector.setGridDynamic(body, true);
 
 ## Performance
 
-Measured at [`v0.20.0-perf14`](https://github.com/alexreardon/matter-js/releases/tag/v0.20.0-perf14).
+Timing measured at [`v0.20.0-perf14`](https://github.com/alexreardon/matter-js/releases/tag/v0.20.0-perf14); allocation re-measured at [`v0.20.0-perf15`](https://github.com/alexreardon/matter-js/releases/tag/v0.20.0-perf15).
+
+`perf15` is worth a further `2-5%` per `Engine.update`. That is measured against `perf14` directly rather than through this table: the two builds run in one process on identical worlds in alternating blocks, which reads `-2%` to `-5%` on the general scenes and `-3%` to `-5%` on a calm page. A fork-vs-upstream table cannot resolve a change that size, since the upstream arm alone swings further than that between sessions (see below), so the timing numbers here are still `perf14`'s.
 
 Time for one `Engine.update` (lower is faster):
 
@@ -70,18 +72,18 @@ Heap growth per step (less garbage means fewer GC pauses mid-simulation):
 
 | Scenario | Upstream `0.20.0` | Fork (drop-in) | Fork (`gridStatic`) |
 | --- | --- | --- | --- |
-| Box stack settling | `35.8 KB` | `4.5 KB` (`-87%`) | `1.7 KB` (`-95%`) |
+| Box stack settling | `35.8 KB` | `4.6 KB` (`-87%`) | `1.7 KB` (`-95%`) |
 | Mixed shapes pile | `86.6 KB` | `19.5 KB` (`-77%`) | `12.5 KB` (`-86%`) |
 | Constraint chains | `193.7 KB` | `173.1 KB` (`-11%`) | `156.9 KB` (`-19%`) |
-| Sleeping enabled | `46.4 KB` | `10.9 KB` (`-76%`) | `9.1 KB` (`-80%`) |
+| Sleeping enabled | `45.6 KB` | `10.9 KB` (`-76%`) | `9.1 KB` (`-80%`) |
 | Moving static platforms | `89.3 KB` | `45.8 KB` (`-49%`) | `36.1 KB` (`-60%`) |
-| Page, calm | `133.0 KB` | `57.5 KB` (`-57%`) | `5.1 KB` (`-96%`) |
-| Page, debris raining | `127.4 KB` | `62.5 KB` (`-51%`) | `9.6 KB` (`-92%`) |
-| Page, firing | `136.5 KB` | `69.2 KB` (`-49%`) | `11.4 KB` (`-92%`) |
-| Page, 800-mover storm | `288.7 KB` | `99.0 KB` (`-66%`) | `26.7 KB` (`-91%`) |
-| Page, being destroyed | `1283.8 KB` | `1145.7 KB` (`-11%`) | `208.0 KB` (`-84%`) |
-| Page, calm (2000 tiles) | `87.7 KB` | `27.6 KB` (`-69%`) | `5.0 KB` (`-94%`) |
-| Page, calm (8000 tiles) | `159.6 KB` | `90.8 KB` (`-43%`) | `3.6 KB` (`-98%`) |
+| Page, calm | `127.6 KB` | `59.9 KB` (`-53%`) | `5.1 KB` (`-96%`) |
+| Page, debris raining | `127.2 KB` | `62.5 KB` (`-51%`) | `9.6 KB` (`-92%`) |
+| Page, firing | `136.0 KB` | `64.5 KB` (`-53%`) | `11.4 KB` (`-92%`) |
+| Page, 800-mover storm | `288.7 KB` | `99.0 KB` (`-66%`) | `26.6 KB` (`-91%`) |
+| Page, being destroyed | `1283.8 KB` | `1146.4 KB` (`-11%`) | `207.4 KB` (`-84%`) |
+| Page, calm (2000 tiles) | `87.5 KB` | `27.7 KB` (`-68%`) | `5.0 KB` (`-94%`) |
+| Page, calm (8000 tiles) | `161.9 KB` | `90.6 KB` (`-44%`) | `3.7 KB` (`-98%`) |
 
 <details>
 <summary>How these are measured</summary>
@@ -90,7 +92,9 @@ Heap growth per step (less garbage means fewer GC pauses mid-simulation):
 
 Simulation time is microseconds per `Engine.update`, on an Apple M1 Pro under Node 24: the mean of the fastest fifth of blocks per arm (`24` blocks for the general scenes, `40` for the page scenes), each arm keeping its best across three processes per scenario, and each published cell then the fastest of three full suite runs. Memory is heap growth per step across collection-free windows (`npm run bench-suite -- --alloc`), so short-lived garbage counts too.
 
-Three full runs rather than one, because the upstream arm is the volatile one: its sweep broadphase insertion-sorts every body every step, so it is memory-bound and takes the brunt of whatever else the machine is doing. One scenario read `24%` apart between two runs of identical code. Keeping the fastest reading per cell (the least-contended sample) is what brings every upstream number back within `7%` of the previous release's, and that agreement is the check that the table is measuring the engine and not a busy laptop. The two fork columns are far steadier, because they touch much less memory. Allocation needs none of this: the upstream figures reproduce to the decimal across runs.
+Three full runs rather than one, because the upstream arm is the volatile one: its sweep broadphase insertion-sorts every body every step, so it is memory-bound and takes the brunt of whatever else the machine is doing. One scenario read `24%` apart between two runs of identical code. Keeping the fastest reading per cell (the least-contended sample) is what brings every upstream number back within `7%` of the previous release's, and that agreement is the check that the table is measuring the engine and not a busy laptop. The two fork columns are far steadier, because they touch much less memory. Allocation needs almost none of this: the upstream figures reproduce within `1%` across runs, and most to the decimal.
+
+That check is also what decides when NOT to republish. At `perf15` the machine could not reproduce four upstream cells within `7%` however many samples were taken (`page-8k` read `+20%` over ten), while the fork columns held a `1.4%` spread on the same cell across the same ten samples. Republishing would have moved the published percentages for environmental reasons rather than engine ones, in both directions at once, so the timing table was left at `perf14` and `perf15` was measured against `perf14` directly instead. **A release whose win is smaller than this table's session noise gets measured build-to-build, not published into these cells.**
 
 The general scenes are typical matter scenes — a few hundred dynamic bodies, no static field — and exist to catch regressions outside the regime this fork targets. The page scenes are that regime.
 
@@ -99,8 +103,9 @@ What the tables say:
 - The win grows with the size of the static field: `-58%` at `2000` tiles, `-80%` at `5000`, `-86%` at `8000`.
 - `gridStatic` costs `0-7%` on the general scenes (nothing to skip) and is worth a further `1.6x` to `5.4x` on a page. That is why it is opt-in.
 - The narrowest win is the storm, dominated by contact solving, which this fork speeds up but does not do less of.
-- The destruction scene used to be the narrow one, at `-67%` and allocating `364 KB` a step at `perf11`. `perf12` made body creation `61%` cheaper, `perf13` stopped a candidate cache being thrown away every step, and `perf14` stopped the detector copying the whole body array on every membership change, together taking it to `-76%` and `208 KB`.
+- The destruction scene used to be the narrow one, at `-67%` and allocating `364 KB` a step at `perf11`. `perf12` made body creation `61%` cheaper, `perf13` stopped a candidate cache being thrown away every step, and `perf14` stopped the detector copying the whole body array on every membership change, together taking it to `-76%` and `207 KB`.
 - The general scenes are not static either: the mixed shapes pile went from `-16%` to `-34%` drop-in at `perf13` (the memoised self-projection pays most on bodies with many axes), and to `-37%` at `perf14` (the solver's per-contact constants are computed once per step instead of once per iteration).
+- `perf15` is not in these cells (above): it is a further `-2%` to `-5%`, from deleting four solver arrays that carried no information and walking a body's edges once per support pair instead of twice.
 
 </details>
 
@@ -113,7 +118,7 @@ With that readback included, Rapier and this fork are level on a calm or firing 
 <details>
 <summary>The full comparison</summary>
 
-_The Rapier tables were measured at `v0.20.0-perf13`; the fork's `gridStatic` column is a further `6-15%` faster (and allocates `~20%` less during destruction) at `v0.20.0-perf14`, per the suite tables above._
+_The Rapier tables were measured at `v0.20.0-perf13`; the fork's `gridStatic` column is a further `6-15%` faster (and allocates `~20%` less during destruction) at `v0.20.0-perf14`, per the suite tables above, and `2-5%` faster again at `v0.20.0-perf15`._
 
 [`bench/vs-rapier.js`](bench/vs-rapier.js) runs the suite scenes on both engines, and gives Rapier every advantage: the SIMD build, `lengthUnit` set for pixel worlds as its docs recommend, cached body references, and poses read into a preallocated `Float64Array`. The worlds are identical workloads (same seeded geometry, matched gravity, damping and combine rules). Sleeping is off in both engines, because [Page Rage](https://page-rage.com) cannot use it.
 
@@ -210,6 +215,8 @@ Each change was A/B'd on its own against the previous release tag. Benefit is wh
 | **The detector stops copying the body array** — the copy existed only so the sweep could sort in place; grid modes reference the caller's array, and the sweep copies lazily on first use | `-9%` while bodies are added and removed every step |
 | **Shorter broadphase chain walks** — a mover starts its cell walk at its own entry rather than the chain head, skipping a prefix it would only reject | `-2%` to `-3%` |
 | **Dead work dropped** — the unread `collision.penetration` write is gone (the debug renderer derives it from `normal` and `depth`), the `gridStatic` candidate pass reuses the cell spans the insert pass already computed, and collision event payloads are only built when a listener exists | `-0.5%` to `-0.8%` while bodies are added and removed every step |
+| **Dead solver arrays deleted** — four of the velocity snapshot's twelve pair-parallel arrays carried no information (one was written and never read, one held an exact negation of another, one a running index the consumer can carry, one a copy of an array it can alias), and every iteration re-streamed all twelve | `-2%` to `-3%` |
+| **One vertex walk per support pair** — the two containment tests against a body's vertices share every edge's loads and its two point-independent deltas, so they run as one walk returning both answers | `-1%` to `-2.5%` |
 | **Allocation micro-optimisations** — numeric pair ids, a collision record cache, an unrolled box-vs-box SAT path | `-34%` allocation per update |
 
 ## Differences from upstream
