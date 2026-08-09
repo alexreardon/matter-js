@@ -528,10 +528,9 @@ var Bounds = require('../geometry/Bounds');
 
         if (soa && soa.epoch === container._solverEpoch) {
             var soaV = container._soaV || (container._soaV = {
-                    idxA: [], idxB: [], nx: [], ny: [], tx: [], ty: [],
+                    idxA: [], idxB: [], nx: [], ny: [],
                     frictionTimesStatic: [], friction: [],
-                    restitutionPlus1: [], separation: [], contactShare: [],
-                    contactStart: [], contactCounts: [],
+                    restitutionPlus1: [], separation: [], contactCounts: [],
                     // per-contact constants of the iterations, hoisted here:
                     // contact offsets from both body centres, and the share
                     // factor whose divide otherwise runs once per contact per
@@ -552,14 +551,9 @@ var Bounds = require('../geometry/Bounds');
                 aNy = soa.ny,
                 aSep = soa.sep,
                 aSepValid = soa.sepValid,
-                vTx = soaV.tx,
-                vTy = soaV.ty,
                 vFrictionTimesStatic = soaV.frictionTimesStatic,
                 vFriction = soaV.friction,
                 vRestitutionPlus1 = soaV.restitutionPlus1,
-                vSeparation = soaV.separation,
-                vContactShare = soaV.contactShare,
-                vContactStart = soaV.contactStart,
                 vContactCounts = soaV.contactCounts,
                 cOffAX = soaV.cOffAX,
                 cOffAY = soaV.cOffAY,
@@ -586,6 +580,23 @@ var Bounds = require('../geometry/Bounds');
             soaV.idxB = aIdxB;
             soaV.nx = aNx;
             soaV.ny = aNy;
+
+            // the position solve wrote every active pair's separation into its
+            // own snapshot in this same slot order, so alias that too. Only a
+            // step whose position solve never ran needs the per-pair copy off
+            // the pair objects, and that path takes a private array back.
+            var vSeparation;
+            if (aSepValid) {
+                vSeparation = soaV.separation = aSep;
+            } else {
+                vSeparation = soaV.separation;
+                if (vSeparation === aSep) {
+                    vSeparation = soaV.separation = [];
+                }
+                for (i = 0; i < aPairCount; i++) {
+                    vSeparation[i] = aPairRefs[i].separation;
+                }
+            }
 
             // per-body snapshot into the slots assigned by preSolvePosition
             // (same epoch, same _solverIndex ordering as _solverBodies). This
@@ -622,9 +633,6 @@ var Bounds = require('../geometry/Bounds');
                     vTangentX = -vNormalY,
                     vTangentY = vNormalX;
 
-                vTx[i] = vTangentX;
-                vTy[i] = vTangentY;
-
                 var vInverseMassTotal = vPair.inverseMass,
                     vPairContactShare = 1 / vContactCount,
                     vInvInertiaA = bInvInertia[slotA],
@@ -638,12 +646,6 @@ var Bounds = require('../geometry/Bounds');
                 vFrictionTimesStatic[i] = vPair.friction * vPair.frictionStatic;
                 vFriction[i] = vPair.friction;
                 vRestitutionPlus1[i] = 1 + vPair.restitution;
-                // the position solve's separations, unless it never ran this
-                // step, in which case the pair still carries the value the
-                // classic path would read
-                vSeparation[i] = aSepValid ? aSep[i] : vPair.separation;
-                vContactShare[i] = vPairContactShare;
-                vContactStart[i] = vContactIndex;
                 vContactCounts[i] = vContactCount;
 
                 for (j = 0; j < vContactCount; j++) {
@@ -844,13 +846,10 @@ var Bounds = require('../geometry/Bounds');
                 vIdxB = soaV.idxB,
                 vNx = soaV.nx,
                 vNy = soaV.ny,
-                vTx = soaV.tx,
-                vTy = soaV.ty,
                 vFrictionTimesStatic = soaV.frictionTimesStatic,
                 vFriction = soaV.friction,
                 vRestitutionPlus1 = soaV.restitutionPlus1,
                 vSeparation = soaV.separation,
-                vContactStart = soaV.contactStart,
                 vContactCounts = soaV.contactCounts,
                 cOffAX = soaV.cOffAX,
                 cOffAY = soaV.cOffAY,
@@ -869,18 +868,24 @@ var Bounds = require('../geometry/Bounds');
                 bInvInertia = soaV.bInvInertia,
                 bCanMove = soaV.bCanMove;
 
+            // the contact block of pair p follows pair p-1's, exactly as
+            // preSolveVelocity laid them down, so the start index is carried
+            // rather than stored per pair
+            var contactStart = 0;
+
             for (var p = 0; p < pairCount; p++) {
                 var ia = vIdxA[p],
                     ib = vIdxB[p],
                     normalX = vNx[p],
                     normalY = vNy[p],
-                    tangentX = vTx[p],
-                    tangentY = vTy[p],
+                    // exactly the values preSolveVelocity derived, from the
+                    // same normal, so the negation reproduces them bit for bit
+                    tangentX = -normalY,
+                    tangentY = normalX,
                     friction = vFrictionTimesStatic[p] * frictionNormalMultiplier,
                     pairSeparation = vSeparation[p],
                     pairFriction = vFriction[p],
                     restitutionPlus1 = vRestitutionPlus1[p],
-                    contactStart = vContactStart[p],
                     contactEnd = contactStart + vContactCounts[p];
 
                 // cache body properties that are invariant across the contact loop
@@ -994,6 +999,8 @@ var Bounds = require('../geometry/Bounds');
                         bAnglePrev[ib] -= (offsetBX * impulseY - offsetBY * impulseX) * bodyBInverseInertia;
                     }
                 }
+
+                contactStart = contactEnd;
             }
 
             return;
