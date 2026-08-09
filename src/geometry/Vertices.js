@@ -240,17 +240,27 @@ var Common = require('../core/Common');
             pointY = point.y,
             verticesLength = vertices.length,
             vertex = vertices[verticesLength - 1],
-            nextVertex;
+            // this iteration's start point is the previous iteration's end
+            // point, so it is carried as numbers rather than re-read off the
+            // vertex object every edge
+            vertexX = vertex.x,
+            vertexY = vertex.y,
+            nextVertex,
+            nextVertexX,
+            nextVertexY;
 
         for (var i = 0; i < verticesLength; i++) {
             nextVertex = vertices[i];
+            nextVertexX = nextVertex.x;
+            nextVertexY = nextVertex.y;
 
-            if ((pointX - vertex.x) * (nextVertex.y - vertex.y) 
-                + (pointY - vertex.y) * (vertex.x - nextVertex.x) > 0) {
+            if ((pointX - vertexX) * (nextVertexY - vertexY)
+                + (pointY - vertexY) * (vertexX - nextVertexX) > 0) {
                 return false;
             }
 
-            vertex = nextVertex;
+            vertexX = nextVertexX;
+            vertexY = nextVertexY;
         }
 
         return true;

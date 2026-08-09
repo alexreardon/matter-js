@@ -153,12 +153,16 @@ var Pair = require('./Pair');
         var supportsB = Collision._findSupports(bodyA, bodyB, normal, 1),
             supportCount = 0;
 
-        // find the supports from bodyB that are inside bodyA
-        if (Vertices.contains(bodyA.vertices, supportsB[0])) {
+        // find the supports from bodyB that are inside bodyA. Both points are
+        // always tested against the same vertex set, so one fused walk shares
+        // every edge's loads and deltas between them
+        var containsB = Collision._containsPair(bodyA.vertices, supportsB[0], supportsB[1]);
+
+        if ((containsB & 1) !== 0) {
             supports[supportCount++] = supportsB[0];
         }
 
-        if (Vertices.contains(bodyA.vertices, supportsB[1])) {
+        if ((containsB & 2) !== 0) {
             supports[supportCount++] = supportsB[1];
         }
 
@@ -166,12 +170,28 @@ var Pair = require('./Pair');
         if (supportCount < 2) {
             var supportsA = Collision._findSupports(bodyB, bodyA, normal, -1);
 
-            if (Vertices.contains(bodyB.vertices, supportsA[0])) {
-                supports[supportCount++] = supportsA[0];
-            }
+            if (supportCount === 0) {
+                // nothing the first test can do takes the count to 2, so the
+                // second test always runs and the fused walk is free here too
+                var containsA = Collision._containsPair(bodyB.vertices, supportsA[0], supportsA[1]);
 
-            if (supportCount < 2 && Vertices.contains(bodyB.vertices, supportsA[1])) {
-                supports[supportCount++] = supportsA[1];
+                if ((containsA & 1) !== 0) {
+                    supports[supportCount++] = supportsA[0];
+                }
+
+                if ((containsA & 2) !== 0) {
+                    supports[supportCount++] = supportsA[1];
+                }
+            } else {
+                // entering with one support already, the second test can be
+                // skipped outright, which beats sharing the walk with it
+                if (Vertices.contains(bodyB.vertices, supportsA[0])) {
+                    supports[supportCount++] = supportsA[0];
+                }
+
+                if (supportCount < 2 && Vertices.contains(bodyB.vertices, supportsA[1])) {
+                    supports[supportCount++] = supportsA[1];
+                }
             }
         }
 
@@ -446,6 +466,71 @@ var Pair = require('./Pair');
         _supports[1] = vertexC;
 
         return _supports;
+    };
+
+    /**
+     * Tests TWO points against the same vertex set in one walk of its edges.
+     *
+     * Each edge contributes two terms that do not depend on the point being
+     * tested, `nextVertex.y - vertex.y` and `vertex.x - nextVertex.x`, plus the
+     * element and property loads that produce them. Testing the points
+     * separately does all of that twice. A point drops out of the arithmetic on
+     * the first edge it fails, exactly as `Vertices.contains` returns early, so
+     * the per-point work is unchanged and only the shared edge setup is saved.
+     * @method _containsPair
+     * @private
+     * @param {vertices} vertices
+     * @param {vector} pointA
+     * @param {vector} pointB
+     * @return {number} Bit 1 set if `pointA` is inside, bit 2 if `pointB` is
+     */
+    Collision._containsPair = function(vertices, pointA, pointB) {
+        var pointAX = pointA.x,
+            pointAY = pointA.y,
+            pointBX = pointB.x,
+            pointBY = pointB.y,
+            verticesLength = vertices.length,
+            vertex = vertices[verticesLength - 1],
+            vertexX = vertex.x,
+            vertexY = vertex.y,
+            inside = 3,
+            nextVertex,
+            nextVertexX,
+            nextVertexY,
+            edgeDeltaY,
+            edgeDeltaX;
+
+        for (var i = 0; i < verticesLength; i++) {
+            nextVertex = vertices[i];
+            nextVertexX = nextVertex.x;
+            nextVertexY = nextVertex.y;
+            // the two exact subexpressions `Vertices.contains` forms per edge
+            edgeDeltaY = nextVertexY - vertexY;
+            edgeDeltaX = vertexX - nextVertexX;
+
+            if ((inside & 1) !== 0
+                && (pointAX - vertexX) * edgeDeltaY + (pointAY - vertexY) * edgeDeltaX > 0) {
+                inside &= ~1;
+
+                if (inside === 0) {
+                    return 0;
+                }
+            }
+
+            if ((inside & 2) !== 0
+                && (pointBX - vertexX) * edgeDeltaY + (pointBY - vertexY) * edgeDeltaX > 0) {
+                inside &= ~2;
+
+                if (inside === 0) {
+                    return 0;
+                }
+            }
+
+            vertexX = nextVertexX;
+            vertexY = nextVertexY;
+        }
+
+        return inside;
     };
 
     /*
