@@ -18,7 +18,7 @@ For scenes that are mostly static bodies, the opt-in `gridStatic` mode goes furt
 Install from a release tag (`v0.20.0-perfN`). The built bundle (`build/matter.js`) is committed, so there is no build step.
 
 ```bash
-npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-perf15.tar.gz
+npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-perf17.tar.gz
 ```
 
 ## Usage
@@ -48,6 +48,8 @@ Matter.Detector.setGridDynamic(body, true);
 Timing measured at [`v0.20.0-perf14`](https://github.com/alexreardon/matter-js/releases/tag/v0.20.0-perf14); allocation re-measured at [`v0.20.0-perf15`](https://github.com/alexreardon/matter-js/releases/tag/v0.20.0-perf15).
 
 `perf15` is worth a further `2-5%` per `Engine.update`. That is measured against `perf14` directly rather than through this table: the two builds run in one process on identical worlds in alternating blocks, which reads `-2%` to `-5%` on the general scenes and `-3%` to `-5%` on a calm page. A fork-vs-upstream table cannot resolve a change that size, since the upstream arm alone swings further than that between sessions (see below), so the timing numbers here are still `perf14`'s.
+
+`perf17` is worth a further `~0.5%` on a calm page, and is the point at which this fork ran out of resolvable leaf-level wins. It could not be measured directly at all: a hunt over the whole profiled frontier produced `21` candidates of which `20` were killed on counted evidence, and the survivor sits an order of magnitude below the noise floor. It was resolved by AMPLIFICATION instead, raising the position iteration count to scale only the work the change removes, where it reads `-2.63%` at `8x` over `15` interleaved runs (`t = -2.25`) and extrapolates back to `~-0.5%` at the shipped six iterations. Numbers this small belong in the change table, not in the cells below.
 
 Time for one `Engine.update` (lower is faster):
 
@@ -105,7 +107,7 @@ What the tables say:
 - The narrowest win is the storm, dominated by contact solving, which this fork speeds up but does not do less of.
 - The destruction scene used to be the narrow one, at `-67%` and allocating `364 KB` a step at `perf11`. `perf12` made body creation `61%` cheaper, `perf13` stopped a candidate cache being thrown away every step, and `perf14` stopped the detector copying the whole body array on every membership change, together taking it to `-76%` and `207 KB`.
 - The general scenes are not static either: the mixed shapes pile went from `-16%` to `-34%` drop-in at `perf13` (the memoised self-projection pays most on bodies with many axes), and to `-37%` at `perf14` (the solver's per-contact constants are computed once per step instead of once per iteration).
-- `perf15` is not in these cells (above): it is a further `-2%` to `-5%`, from deleting four solver arrays that carried no information and walking a body's edges once per support pair instead of twice.
+- `perf15` is not in these cells (above): it is a further `-2%` to `-5%`, from deleting four solver arrays that carried no information and walking a body's edges once per support pair instead of twice. Nor is `perf17`, at a further `~0.5%`.
 
 </details>
 
@@ -118,7 +120,7 @@ With that readback included, Rapier and this fork are level on a calm or firing 
 <details>
 <summary>The full comparison</summary>
 
-_The Rapier tables were measured at `v0.20.0-perf13`; the fork's `gridStatic` column is a further `6-15%` faster (and allocates `~20%` less during destruction) at `v0.20.0-perf14`, per the suite tables above, and `2-5%` faster again at `v0.20.0-perf15`._
+_The Rapier tables were measured at `v0.20.0-perf13`; the fork's `gridStatic` column is a further `6-15%` faster (and allocates `~20%` less during destruction) at `v0.20.0-perf14`, per the suite tables above, `2-5%` faster again at `v0.20.0-perf15`, and `~0.5%` again at `v0.20.0-perf17`._
 
 [`bench/vs-rapier.js`](bench/vs-rapier.js) runs the suite scenes on both engines, and gives Rapier every advantage: the SIMD build, `lengthUnit` set for pixel worlds as its docs recommend, cached body references, and poses read into a preallocated `Float64Array`. The worlds are identical workloads (same seeded geometry, matched gravity, damping and combine rules). Sleeping is off in both engines, because [Page Rage](https://page-rage.com) cannot use it.
 
@@ -195,13 +197,14 @@ Rapier is not a devDependency. To reproduce: `npm install --no-save @dimforge/ra
 
 ## What changed
 
-Each change was A/B'd on its own against the previous release tag. Benefit is whole-step `Engine.update` time on the target scene unless stated otherwise.
+Each change was A/B'd on its own, in almost every case against the previous release tag. Benefit is whole-step `Engine.update` time on the target scene unless stated otherwise. Two rows were measured differently, because their effect could not be isolated that way: the constraint skip is this build against this build with the skip forced off, and the position solver share divide was resolved by amplification (above).
 
 | Change | Benefit |
 | --- | --- |
 | **`gridStatic` broadphase (the opt-in mode)** — statics are indexed once; each step only movers are re-bucketed and generate candidate pairs | `-65%` to `-89%` on dense static scenes |
 | **Hidden-class hygiene** — every per-body scratch field is declared in `Body.create` instead of added on first use | lazily-added fields split object shapes and made every hot phase `1.3-4.8x` slower |
 | **Engine pass scoping** — gravity, integration and solver passes iterate a movers list instead of scanning every body | `-14%` to `-31%` |
+| **Constraint passes skipped when there are none** — with no constraints in the world every body's `constraintImpulse` is zero, so the two full-body pre/post scans and the solve loop are all no-ops and are skipped outright | `-15%` on a calm `5303`-body page, growing with body count |
 | **Flat solver data** — solver iterations run over flat snapshot arrays; grid cell tables are open-addressed flat arrays | `-14%` to `-19%` |
 | **No whole-world walk per step** — the last full-body scans are gone (cached mover lists, typed-array bounds) | `-22%` to `-25%`, growing with scene size |
 | **Static index maintained, not rebuilt** — membership changes are applied as a difference instead of firing a full rebuild | `-45%` while bodies are added and removed every step |
@@ -217,7 +220,9 @@ Each change was A/B'd on its own against the previous release tag. Benefit is wh
 | **Dead work dropped** — the unread `collision.penetration` write is gone (the debug renderer derives it from `normal` and `depth`), the `gridStatic` candidate pass reuses the cell spans the insert pass already computed, and collision event payloads are only built when a listener exists | `-0.5%` to `-0.8%` while bodies are added and removed every step |
 | **Dead solver arrays deleted** — four of the velocity snapshot's twelve pair-parallel arrays carried no information (one was written and never read, one held an exact negation of another, one a running index the consumer can carry, one a copy of an array it can alias), and every iteration re-streamed all twelve | `-2%` to `-3%` |
 | **One vertex walk per support pair** — the two containment tests against a body's vertices share every edge's loads and its two point-independent deltas, so they run as one walk returning both answers | `-1%` to `-2.5%` |
-| **Allocation micro-optimisations** — numeric pair ids, a collision record cache, an unrolled box-vs-box SAT path | `-34%` allocation per update |
+| **Position solver share divide hoisted** — each body's contact share is constant across the six position iterations, so it is computed once per movable body per step rather than once per pair side per iteration (`5856` divides per calm step down to `300`) | `~-0.5%` |
+| **Unrolled box-vs-box SAT** — the separating-axis test is quad-unrolled for the four-vertex case, which is what a page of rectangular tiles is made of | `-21%` on the narrowphase squeeze bench |
+| **Allocation micro-optimisations** — numeric pair ids, a collision record cache, a pairs table that is a `Map` rather than a string-keyed object | `-34%` allocation per update |
 
 ## Differences from upstream
 
@@ -225,10 +230,12 @@ In both modes:
 
 - Change `body.isStatic` / `body.isSleeping` through `Body.setStatic` / `Sleeping.set` (which is what upstream documents anyway). Direct assignment leaves cached mover lists stale.
 - A resting body's `force` / `torque` is only zeroed once it starts moving again. Unchanged when sleeping is enabled.
-- `Matter.version` reports the fork tag (`0.20.0-perf16`) rather than `0.20.0`, so a consumer can assert in CI that it resolved the release it pinned. Version RANGES are unaffected (`^0.20.0` and `~0.20.0` still match, since `Plugin.versionSatisfies` compares major/minor/patch and ignores the suffix); only a plugin pinning the exact string `matter-js@0.20.0` would stop matching.
+- `Matter.version` reports the fork tag (`0.20.0-perf17`) rather than `0.20.0`, so a consumer can assert in CI that it resolved the release it pinned. Version RANGES are unaffected (`^0.20.0` and `~0.20.0` still match, since `Plugin.versionSatisfies` compares major/minor/patch and ignores the suffix); only a plugin pinning the exact string `matter-js@0.20.0` would stop matching.
 - `pair.id` is a number rather than a string.
 - `collision.penetration` no longer exists. Derive it as `normal` scaled by `depth`, which is how the built-in debug renderer now draws it.
 - A body removed from a composite has its `positionImpulse` cleared, so it stops being simulated (this matches what upstream effectively did).
+- A world with no constraints skips the constraint passes entirely. If the LAST constraint is removed while a body's warmed `constraintImpulse` is still non-zero, that residual is frozen rather than applied over a few more decaying steps, until a constraint exists again.
+- The position solver derives each body's contact share once per step. Mutating `body.totalContacts` or `Resolver._positionDampen` BETWEEN two `Resolver.solvePosition` calls of the same step is no longer picked up; `Engine.update` does neither.
 - `Bodies.rectangle` accepts dimensions upstream could not. Upstream builds the body from a path string, and its parser's character class omits `+`, so any dimension `String()` renders in exponent form (`1e+21` and above) silently produced a `NaN` body. Here the corners are built directly, so there is no parse to get wrong.
 
 Only in `gridStatic` mode:
