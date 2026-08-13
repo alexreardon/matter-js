@@ -38,9 +38,53 @@ const BLOCK_UPDATES = Number(process.env.BLOCK_UPDATES || 40);
 
 const hr = () => Number(process.hrtime.bigint());
 
+// The gridStatic oversize predicate: a static spanning more than `maxCells` (24)
+// cells of the broadphase grid is not bucketed at all. It goes on `sOver`, an
+// unindexed list EVERY mover rescans every step, so three big bodies cost
+// movers x 3 bounds tests a step forever.
+//
+// The real game holds ZERO oversized statics, so a floor and two walls built as
+// single bodies put work in this harness that the shipped workload never pays.
+// It is worse here than in a profiler: that cost scales with MOVERS, which is
+// FIXED, so it dilutes a per-body delta more at low STATICS than at high, which
+// manufactures a growing trend in a population sweep. Build the bounds as tiles,
+// matching bench/profile-game.js.
+const BOUND_CELL_SIZE = 32;
+const BOUND_MAX_CELLS = 24;
+
+function addBound(Matter, world, centreX, centreY, width, height) {
+    const { Composite, Bodies } = Matter;
+    const cellSpan = (size) => Math.floor(size / BOUND_CELL_SIZE) + 2;
+    const horizontal = width >= height;
+    const longSide = horizontal ? width : height;
+    const shortCells = cellSpan(horizontal ? height : width);
+    const maxLongPx = (Math.floor(BOUND_MAX_CELLS / shortCells) - 2) * BOUND_CELL_SIZE;
+    const pieces = Math.ceil(longSide / maxLongPx);
+    const pieceLength = longSide / pieces;
+
+    for (let piece = 0; piece < pieces; piece++) {
+        const offset = -longSide / 2 + pieceLength * (piece + 0.5);
+        Composite.add(world, Bodies.rectangle(
+            horizontal ? centreX + offset : centreX,
+            horizontal ? centreY : centreY + offset,
+            horizontal ? pieceLength : width,
+            horizontal ? height : pieceLength,
+            { isStatic: true }
+        ));
+    }
+}
+
 function buildScene(Matter) {
     const { Engine, Composite, Bodies, Body, Detector } = Matter;
     Detector._mode = MODE;
+
+    // The piece size is baked against BOUND_CELL_SIZE so the scene stays
+    // byte-stable across engine changes. If the engine's cell size moves, the
+    // bake is wrong and the bounds go oversized again SILENTLY.
+    if ((Detector._cellSize || 32) !== BOUND_CELL_SIZE) {
+        throw new Error('bench bound tiling is baked for cellSize ' + BOUND_CELL_SIZE
+            + ' but Detector._cellSize is ' + Detector._cellSize);
+    }
 
     let seed = 24681;
     const rand = () => {
@@ -51,9 +95,10 @@ function buildScene(Matter) {
     const engine = Engine.create({ enableSleeping: false });
     const world = engine.world;
 
-    Composite.add(world, Bodies.rectangle(1000, 2400, 2200, 60, { isStatic: true }));
-    Composite.add(world, Bodies.rectangle(-40, 1200, 60, 2600, { isStatic: true }));
-    Composite.add(world, Bodies.rectangle(2040, 1200, 60, 2600, { isStatic: true }));
+    // floor + walls so debris piles instead of escaping, TILED (see addBound)
+    addBound(Matter, world, 1000, 2400, 2200, 60);
+    addBound(Matter, world, -40, 1200, 60, 2600);
+    addBound(Matter, world, 2040, 1200, 60, 2600);
 
     const cols = Math.round(Math.sqrt(STATICS * (2000 / 2300)));
     const rows = Math.ceil(STATICS / cols);
