@@ -70,9 +70,50 @@ const rand = () => {
 const engine = Engine.create({ enableSleeping: false });
 const world = engine.world;
 
-Composite.add(world, Bodies.rectangle(1000, 2600, 2200, 60, { isStatic: true }));
-Composite.add(world, Bodies.rectangle(-40, 1200, 60, 2600, { isStatic: true }));
-Composite.add(world, Bodies.rectangle(2040, 1200, 60, 2600, { isStatic: true }));
+// The gridStatic oversize predicate: a static spanning more than `maxCells` (24)
+// cells of the broadphase grid is not bucketed. It goes on `sOver`, an unindexed
+// list EVERY mover rescans every step. Three big bounds cost 1476.00 such tests
+// per churn step here, of which 99.87% reject, and the shipped game holds ZERO
+// oversized statics (worldgen subdivides before the body reaches the world), so
+// that whole cross product is profile noise the game never pays.
+//
+// Build the bounds as tiles: same geometry, no oversized static.
+const BOUND_CELL_SIZE = 32;
+const BOUND_MAX_CELLS = 24;
+
+// The piece size is baked against BOUND_CELL_SIZE so the scene stays byte-stable
+// across engine changes. If the engine's cell size moves, the bake is wrong and
+// the bounds go oversized again SILENTLY, which is the exact bug this replaces.
+// Fail loudly instead, and re-bake the constant deliberately.
+if ((Detector._cellSize || 32) !== BOUND_CELL_SIZE) {
+    throw new Error('bench bound tiling is baked for cellSize ' + BOUND_CELL_SIZE
+        + ' but Detector._cellSize is ' + Detector._cellSize);
+}
+
+function addBound(centreX, centreY, width, height) {
+    const cellSpan = (size) => Math.floor(size / BOUND_CELL_SIZE) + 2;
+    const horizontal = width >= height;
+    const longSide = horizontal ? width : height;
+    const shortCells = cellSpan(horizontal ? height : width);
+    const maxLongPx = (Math.floor(BOUND_MAX_CELLS / shortCells) - 2) * BOUND_CELL_SIZE;
+    const pieces = Math.ceil(longSide / maxLongPx);
+    const pieceLength = longSide / pieces;
+
+    for (let piece = 0; piece < pieces; piece++) {
+        const offset = -longSide / 2 + pieceLength * (piece + 0.5);
+        Composite.add(world, Bodies.rectangle(
+            horizontal ? centreX + offset : centreX,
+            horizontal ? centreY : centreY + offset,
+            horizontal ? pieceLength : width,
+            horizontal ? height : pieceLength,
+            { isStatic: true }
+        ));
+    }
+}
+
+addBound(1000, 2600, 2200, 60);
+addBound(-40, 1200, 60, 2600);
+addBound(2040, 1200, 60, 2600);
 
 const tiles = [];
 const cols = Math.round(Math.sqrt(STATICS * (2000 / 2300)));
