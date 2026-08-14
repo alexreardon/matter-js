@@ -115,6 +115,14 @@ form in the release loop above, or remove the worktree first.
   constant, so every cache in this fork hits 100% of the time, which is the
   opposite of a page being destroyed. `bench/profile-churn.js` and
   `bench/ab-churn.js` cover it.
+- **Before converting any count into a share of "the step", read what the
+  harness actually TIMES.** `bench/profile-churn.js` and `bench/ab-churn.js`
+  both call `churn()` BEFORE starting the timer, so the whole membership-change
+  path, `Composite.removeBody` included, is 0% of `us/update`. It still shows in
+  a profile: `Composite.removeBodyAt`, `Composite.removeBody` and
+  `Bodies.rectangle` are ~3.8% of churn samples and none of it is step cost.
+  Three of four hunters on 2026-08-14 priced that path as a share of the churn
+  step before anyone read the harness.
 - **To compare two RELEASES**, use `BASELINE_REF`:
   `BASELINE_REF=v0.20.0-perf16 npm run bench-suite`. This is the only
   whole-suite instrument that can see a single release. Two cautions: read its
