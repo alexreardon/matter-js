@@ -1139,17 +1139,17 @@ var Collision = require('./Collision');
             // the trim is NOT optional. `movers` holds INDICES into `bodies`,
             // and the ONE read of `movers.length` below (snapshotted into
             // `moversLength`) is what bounds every consumer of it, so a slot
-            // left over from a longer previous list would be read as a live
-            // mover and index past the end of a shrunken body array. The guard
-            // skips the assignment on a step whose mover count did not move,
-            // matching the shape `Engine.update` already uses.
+            // left over from a longer previous list is read as a live mover and
+            // indexes past the end of a shrunken body array. Held by
+            // Detector.spec's shrinking-mover-set test, which is the only gate
+            // that can see it: every other one either builds a fresh detector
+            // per scene or only ever shrinks the STATIC set.
             //
-            // A strictly safer shape exists and is what the other `.length = 0`
+            // A strictly safer shape exists, and is what the other `.length = 0`
             // sites in this file should use if they are ever converted: keep a
             // `g.moverCount` beside the existing `g.staticCount` and bound the
-            // consumers on that instead. Then no trim is needed and the
-            // stale-slot hazard cannot arise at all. Not applied here only
-            // because this code is now proven correct and measured
+            // consumers on that, so no trim is needed and the stale slot cannot
+            // be reached at all
             if (movers.length !== moverCount) {
                 movers.length = moverCount;
             }

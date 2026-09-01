@@ -159,6 +159,59 @@ describe('Detector gridStatic broadphase', function() {
         expect(countCollisionsBetween(engine.detector.collisions, oversizedA, oversizedB)).toBe(1);
     });
 
+    // Regression: the classification walk fills `movers` BY INDEX
+    // (`movers[moverCount++] = i`) and trims it once, rather than clearing it to
+    // zero and re-pushing, because clearing drops the backing store and every
+    // rebuild then regrows it from empty. `movers` holds INDICES into
+    // `detector.bodies`, and the ONE read of `movers.length` further down is
+    // what bounds every consumer, so without the trim a slot left over from a
+    // longer previous list is read as a live mover and indexes past the end of a
+    // SHRUNKEN body array: `TypeError: Cannot read properties of undefined`.
+    //
+    // Nothing else in the suite reaches this. Every other case here builds a
+    // fresh detector per scene, so the cached mover list starts empty; and
+    // `bench/grid-correctness.js`'s `removeStatics` scene shrinks the STATIC
+    // set, which never shortens the mover list. Deleting the trim leaves the
+    // whole gate set green, which is what this test exists to stop.
+    test('a shrinking mover set does not leave stale indices behind', function() {
+        var engine = Engine.create({ enableSleeping: false });
+        engine.gravity.x = 0;
+        engine.gravity.y = 0;
+
+        var floor = Bodies.rectangle(400, 600, 800, 40, { isStatic: true });
+        Composite.add(engine.world, floor);
+
+        var movers = [];
+        for (var index = 0; index < 40; index++) {
+            movers.push(Bodies.rectangle(60 + index * 16, 100, 12, 12));
+        }
+        Composite.add(engine.world, movers);
+
+        // builds the mover list at its longest
+        Engine.update(engine, DELTA);
+        expect(engine.detector._sgrid.movers.length).toBe(40);
+
+        // the regime the consumer runs: debris is evicted every step, so the
+        // body array and the mover list both shorten together
+        Composite.remove(engine.world, movers.slice(5), true);
+        Engine.update(engine, DELTA);
+
+        var grid = engine.detector._sgrid;
+        expect(grid.movers.length).toBe(5);
+
+        var bodyCount = engine.detector.bodies.length;
+        var stale = grid.movers.filter(function(moverIndex) {
+            return moverIndex >= bodyCount;
+        });
+        expect(stale).toEqual([]);
+
+        // and the survivors are still simulated
+        var remaining = movers.slice(0, 5);
+        for (var check = 0; check < remaining.length; check++) {
+            expect(engine.detector.bodies.indexOf(remaining[check])).toBeGreaterThan(-1);
+        }
+    });
+
     test('confirms the same pairs as the sweep across fuzzed scenes', function() {
         // The grid and sweep broadphases feed the same narrow phase, so for any
         // scene they must confirm the exact same set of body pairs. Sweep is the
