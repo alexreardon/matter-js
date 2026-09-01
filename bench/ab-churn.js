@@ -16,6 +16,7 @@
 "use strict";
 
 const path = require('path');
+const { addTiledBound, assertBoundsBucketed } = require('./lib/bounds');
 
 const baselinePath = process.argv[2];
 const steps = Number(process.argv[3] || 600);
@@ -46,9 +47,13 @@ function makeArm(buildPath) {
     const engine = Engine.create({ enableSleeping: false });
     const world = engine.world;
 
-    Composite.add(world, Bodies.rectangle(1000, 2600, 2200, 60, { isStatic: true }));
-    Composite.add(world, Bodies.rectangle(-40, 1200, 60, 2600, { isStatic: true }));
-    Composite.add(world, Bodies.rectangle(2040, 1200, 60, 2600, { isStatic: true }));
+    // floor + walls so debris piles instead of escaping, TILED so none of them
+    // is an oversized static (see bench/lib/bounds.js for why that matters here)
+    const bounds = [
+        ...addTiledBound({ Matter, world, centreX: 1000, centreY: 2600, width: 2200, height: 60 }),
+        ...addTiledBound({ Matter, world, centreX: -40, centreY: 1200, width: 60, height: 2600 }),
+        ...addTiledBound({ Matter, world, centreX: 2040, centreY: 1200, width: 60, height: 2600 })
+    ];
 
     const tiles = [];
     let staticCount = 0;
@@ -67,7 +72,7 @@ function makeArm(buildPath) {
         }
     }
 
-    return { Matter, engine, world, tiles, live: [], parked: [], released: 0, frame: 0 };
+    return { Matter, engine, world, bounds, tiles, live: [], parked: [], released: 0, frame: 0 };
 }
 
 // one shared deterministic stream, consumed identically by both arms
@@ -203,6 +208,15 @@ const workBlocks = [];
 let blockBase = 0;
 let blockWork = 0;
 let blockSteps = 0;
+
+// one step ahead of the loop below, so the static index exists to be asserted
+// against. Both arms, because the two builds can disagree about what is
+// oversized and that is exactly the disagreement this would otherwise time
+churnBoth();
+base.Matter.Engine.update(base.engine, delta);
+work.Matter.Engine.update(work.engine, delta);
+assertBoundsBucketed({ Matter: base.Matter, engine: base.engine, bounds: base.bounds, label: 'ab-churn base' });
+assertBoundsBucketed({ Matter: work.Matter, engine: work.engine, bounds: work.bounds, label: 'ab-churn work' });
 
 for (let step = 0; step < steps; step++) {
     churnBoth();

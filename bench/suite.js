@@ -55,13 +55,23 @@ function makeRandom(seed) {
 // The "page": a dense field of small static tiles with dynamic debris moving
 // through it. Mirrors `bench/profile-game.js` so numbers stay comparable with
 // the per-change benches.
+//
+// EXCEPT for the bounds. `profile-game.js`, `profile-churn.js`, `ab-inline.js`
+// and `ab-churn.js` all build the floor and the two walls as TILES, because a
+// single body of this size exceeds the gridStatic oversize predicate and lands
+// on `g.sOver`, which every mover rescans in full every step, at a cost the
+// shipped game never pays (see bench/lib/bounds.js). This file DELIBERATELY
+// keeps the three oversized bodies: every published README cell was measured on
+// this scene, and retiling it would silently move all of them. Retile it only
+// as part of a full remeasure of those tables.
 function buildPage(Matter, options) {
     const { Engine, Composite, Bodies, Body } = Matter;
     const random = makeRandom(24681);
     const engine = Engine.create({ enableSleeping: false });
     const world = engine.world;
 
-    // floor and walls so debris piles instead of escaping
+    // floor and walls so debris piles instead of escaping. Oversized on purpose;
+    // see the note above buildPage before "fixing" this to match the other benches
     Composite.add(world, Bodies.rectangle(1000, 2400, 2200, 60, { isStatic: true }));
     Composite.add(world, Bodies.rectangle(-40, 1200, 60, 2600, { isStatic: true }));
     Composite.add(world, Bodies.rectangle(2040, 1200, 60, 2600, { isStatic: true }));
