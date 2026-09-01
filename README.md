@@ -18,7 +18,7 @@ For scenes that are mostly static bodies, the opt-in `gridStatic` mode goes furt
 Install from a release tag (`v0.20.0-perfN`). The built bundle (`build/matter.js`) is committed, so there is no build step.
 
 ```bash
-npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-perf17.tar.gz
+npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-perf18.tar.gz
 ```
 
 ## Usage
@@ -197,7 +197,7 @@ Rapier is not a devDependency. To reproduce: `npm install --no-save @dimforge/ra
 
 ## What changed
 
-Each change was A/B'd on its own, in almost every case against the previous release tag. Benefit is whole-step `Engine.update` time on the target scene unless stated otherwise. Two rows were measured differently, because their effect could not be isolated that way: the constraint skip is this build against this build with the skip forced off, and the position solver share divide was resolved by amplification (above).
+Each change was A/B'd on its own, in almost every case against the previous release tag. Benefit is whole-step `Engine.update` time on the target scene unless stated otherwise. Three rows were measured differently, because their effect could not be isolated that way: the constraint skip is this build against this build with the skip forced off, the position solver share divide was resolved by amplification (above), and the `gridStatic` mover list is an ALLOCATION result with a null timing result, measured in the consumer against a byte-identical null arm.
 
 | Change | Benefit |
 | --- | --- |
@@ -223,6 +223,7 @@ Each change was A/B'd on its own, in almost every case against the previous rele
 | **Position solver share divide hoisted** — each body's contact share is constant across the six position iterations, so it is computed once per movable body per step rather than once per pair side per iteration (`5856` divides per calm step down to `300`) | `~-0.5%` |
 | **Unrolled box-vs-box SAT** — the separating-axis test is quad-unrolled for the four-vertex case, which is what a page of rectangular tiles is made of | `-21%` on the narrowphase squeeze bench |
 | **Allocation micro-optimisations** — numeric pair ids, a collision record cache, a pairs table that is a `Map` rather than a string-keyed object | `-34%` allocation per update |
+| **`gridStatic` mover list filled by index** — the classification walk writes `movers` in place and trims once, instead of clearing it to zero and re-pushing; clearing drops the backing store, so every rebuild regrew it from empty. The walk rebuilds every step while the body set is changing | `-5.6%` of all allocation per step while bodies are added and removed |
 
 ## Differences from upstream
 
@@ -230,7 +231,7 @@ In both modes:
 
 - Change `body.isStatic` / `body.isSleeping` through `Body.setStatic` / `Sleeping.set` (which is what upstream documents anyway). Direct assignment leaves cached mover lists stale.
 - A resting body's `force` / `torque` is only zeroed once it starts moving again. Unchanged when sleeping is enabled.
-- `Matter.version` reports the fork tag (`0.20.0-perf17`) rather than `0.20.0`, so a consumer can assert in CI that it resolved the release it pinned. Version RANGES are unaffected (`^0.20.0` and `~0.20.0` still match, since `Plugin.versionSatisfies` compares major/minor/patch and ignores the suffix); only a plugin pinning the exact string `matter-js@0.20.0` would stop matching.
+- `Matter.version` reports the fork tag (`0.20.0-perf18`) rather than `0.20.0`, so a consumer can assert in CI that it resolved the release it pinned. Version RANGES are unaffected (`^0.20.0` and `~0.20.0` still match, since `Plugin.versionSatisfies` compares major/minor/patch and ignores the suffix); only a plugin pinning the exact string `matter-js@0.20.0` would stop matching.
 - `pair.id` is a number rather than a string.
 - `collision.penetration` no longer exists. Derive it as `normal` scaled by `depth`, which is how the built-in debug renderer now draws it.
 - A body removed from a composite has its `positionImpulse` cleared, so it stops being simulated (this matches what upstream effectively did).

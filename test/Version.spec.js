@@ -16,6 +16,13 @@
 *
 * Part of `npm run test-unit`, which the release loop runs before building, so
 * it fails on the version bump and passes once the rebuild lands.
+*
+* The README carries the version in two places a reader ACTS on: the install
+* command someone copies, and the fork-tag example under "Differences from
+* upstream". Both shipped one release stale at `perf18`, because the release
+* loop had four mechanical steps and no README step. They are asserted here for
+* the same reason the bundle is: a checklist item that nothing checks is the one
+* that gets skipped.
 */
 const path = require('path');
 const fs = require('fs');
@@ -29,6 +36,22 @@ describe('release hygiene', () => {
         // A bare `0.20.0` means the bump was skipped, which is the mistake that
         // makes every consumer-side pin assertion useless.
         expect(pkg.version).toMatch(/^\d+\.\d+\.\d+-perf\d+$/);
+    });
+
+    it('README install command pins the current version', () => {
+        const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
+        const installed = /archive\/refs\/tags\/(v[^.]+\.[^.]+\.[^.]+-perf\d+)\.tar\.gz/.exec(readme);
+
+        expect(installed).not.toBeNull();
+        expect(installed[1]).toBe('v' + pkg.version);
+    });
+
+    it('README reports the current version as the fork tag', () => {
+        const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
+        const reported = /`Matter\.version` reports the fork tag \(`([^`]+)`\)/.exec(readme);
+
+        expect(reported).not.toBeNull();
+        expect(reported[1]).toBe(pkg.version);
     });
 
     it('committed build/matter.js reports the current package version', () => {

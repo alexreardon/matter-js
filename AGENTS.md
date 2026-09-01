@@ -15,8 +15,10 @@ Work happens here; the consumer pins a release TAG. Run it in this order, and do
 not skip step 1 or step 4.
 
 ```bash
-# 1. BUMP THE VERSION FIRST. `package.json` version IS the release tag without
-#    its leading `v`, e.g. tag v0.20.0-perf17 -> version "0.20.0-perf17".
+# 1. BUMP THE VERSION FIRST, in `package.json` AND in the two places README.md
+#    carries it: the install command, and the fork-tag example under
+#    "Differences from upstream". `package.json` version IS the release tag
+#    without its leading `v`, e.g. tag v0.20.0-perf18 -> version "0.20.0-perf18".
 #    Edit package.json directly; do NOT use `npm version`, whose `preversion`
 #    hook runs `test-node -- --save=true` and REWRITES the example references.
 
@@ -35,25 +37,31 @@ NODE_OPTIONS=--openssl-legacy-provider npm run build
 
 # 5. commit, tag, push to the fork remote (NOT `origin`, which is upstream)
 git commit -am "perf: ..."
-git tag v0.20.0-perf17
-git push fork master v0.20.0-perf17
+git tag v0.20.0-perf18
+git push fork master v0.20.0-perf18
 ```
+
+Add a row to the README's "What changed" table in the same commit. It is the
+only public record of what a release bought, and a release whose row is missing
+reads as a release that did nothing.
 
 ### Why the version bump is load-bearing
 
-`Matter.version` reports the fork tag (`0.20.0-perf17`), not `0.20.0`. That
+`Matter.version` reports the fork tag (`0.20.0-perf18`), not `0.20.0`. That
 exists so a consumer can assert in CI that it resolved the release it pinned;
 Page Rage does this in a unit test and again over its built bundle. Before
 `perf16` every tag reported `0.20.0`, so telling `perf7` from `perf15` meant
 grepping the bundle for a symbol that happened to be added in the release you
 wanted, which is a guess that rots silently.
 
-`test/Version.spec.js` (part of `npm run test-unit`) makes two thirds of this
-mechanical: it fails if the version is not a `-perfN` release version, and if
-the committed `build/matter.js` does not report the current `package.json`
-version. That is the forgot-to-rebuild case. **The remaining gap is a tag name
-that disagrees with `package.json`**, which nothing here can see, because the
-tag does not exist yet when the tests run. Read the version back before tagging:
+`test/Version.spec.js` (part of `npm run test-unit`) makes most of this
+mechanical: it fails if the version is not a `-perfN` release version, if the
+committed `build/matter.js` does not report the current `package.json` version
+(the forgot-to-rebuild case), and if either README version is stale (the
+forgot-the-README case, which shipped at `perf18`). **The remaining gap is a tag
+name that disagrees with `package.json`**, which nothing here can see, because
+the tag does not exist yet when the tests run. Read the version back before
+tagging:
 
 ```bash
 node -e "console.log(require('./build/matter.js').version)"   # must equal the tag, minus the leading v
@@ -123,6 +131,17 @@ form in the release loop above, or remove the worktree first.
   `Bodies.rectangle` are ~3.8% of churn samples and none of it is step cost.
   Three of four hunters on 2026-08-14 priced that path as a share of the churn
   step before anyone read the harness.
+- **A bench scene must not hold a body the game never builds.** The floor and
+  the two walls exceed the gridStatic oversize predicate as single bodies, so
+  each lands on `g.sOver`, which EVERY mover rescans in full EVERY step: 900
+  tests per calm step and 1476 per churn step, against ZERO oversized statics in
+  the shipped game. Worse than a flat tax, because the cost scales with MOVERS,
+  which a population sweep holds fixed, so it dilutes a per-body delta more at
+  low STATICS than at high and manufactures a trend. `bench/lib/bounds.js` builds
+  the same geometry as tiles and asserts, after a step, that no piece reached
+  `sOver`. Use it for any new page-regime scene. `bench/suite.js` is the ONE
+  deliberate exception (its scene is what every published README cell was
+  measured on) and says so at `buildPage`.
 - **To compare two RELEASES**, use `BASELINE_REF`:
   `BASELINE_REF=v0.20.0-perf16 npm run bench-suite`. This is the only
   whole-suite instrument that can see a single release. Two cautions: read its
