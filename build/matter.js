@@ -1,5 +1,5 @@
 /*!
- * matter-js 0.20.0-perf17 by @liabru
+ * matter-js 0.20.0-perf18 by @liabru
  * http://brm.io/matter-js/
  * License MIT
  * 
@@ -7301,7 +7301,13 @@ var Collision = __webpack_require__(8);
             g.classifyBodies = bodies;
             g.classifyLength = n;
             g.classifyEpoch = classifyEpoch;
-            movers.length = 0;
+            // `movers` is filled BY INDEX and trimmed once below, rather than
+            // cleared with `movers.length = 0` and re-pushed. Clearing to zero
+            // drops the backing store, so every rebuild regrows it from empty
+            // and allocates; writing in place reuses it. This is the idiom the
+            // engine's own mover classification already uses (`Engine.update`),
+            // and on a page being destroyed this walk rebuilds EVERY step
+            var moverCount = 0;
             staticCount = 0;
 
             // this walk is also where the static index learns what changed, so
@@ -7354,7 +7360,7 @@ var Collision = __webpack_require__(8);
                         staticDirty = true;
                     }
                 } else {
-                    movers.push(i);
+                    movers[moverCount++] = i;
                     if (body._sIndexed) {
                         // released into a mover: unindex it here, so the apply
                         // pass below never has to walk the membership list
@@ -7363,6 +7369,24 @@ var Collision = __webpack_require__(8);
                         staticDirty = true;
                     }
                 }
+            }
+
+            // the trim is NOT optional. `movers` holds INDICES into `bodies`,
+            // and the ONE read of `movers.length` below (snapshotted into
+            // `moversLength`) is what bounds every consumer of it, so a slot
+            // left over from a longer previous list would be read as a live
+            // mover and index past the end of a shrunken body array. The guard
+            // skips the assignment on a step whose mover count did not move,
+            // matching the shape `Engine.update` already uses.
+            //
+            // A strictly safer shape exists and is what the other `.length = 0`
+            // sites in this file should use if they are ever converted: keep a
+            // `g.moverCount` beside the existing `g.staticCount` and bound the
+            // consumers on that instead. Then no trim is needed and the
+            // stale-slot hazard cannot arise at all. Not applied here only
+            // because this code is now proven correct and measured
+            if (movers.length !== moverCount) {
+                movers.length = moverCount;
             }
 
             g.staticCount = staticCount;
@@ -10765,7 +10789,7 @@ var Common = __webpack_require__(0);
      * @readOnly
      * @type {String}
      */
-    Matter.version =  true ? "0.20.0-perf17" : undefined;
+    Matter.version =  true ? "0.20.0-perf18" : undefined;
 
     /**
      * A list of plugin dependencies to be installed. These are normally set and installed through `Matter.use`.
