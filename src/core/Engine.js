@@ -113,13 +113,19 @@ var Body = require('../body/Body');
         timing.timestamp += delta;
         timing.lastDelta = delta;
 
-        // create an event object
-        var event = {
-            timestamp: timing.timestamp,
-            delta: delta
-        };
+        // the timestamp every per-update event reports, fixed here as the
+        // event object used to be, so a listener that moves the clock does
+        // not change what a later event of this update reads
+        var eventTimestamp = timing.timestamp;
 
-        Events.trigger(engine, 'beforeUpdate', event);
+        // each per-update event is triggered, and its payload built, only
+        // when it has a listener: Events.trigger would no-op without one, but
+        // only after the payload was allocated. Each listener receives its
+        // own copy of the payload, so building one per event is equivalent
+        // to sharing one
+        if (Engine._hasListener(engine, 'beforeUpdate')) {
+            Events.trigger(engine, 'beforeUpdate', { timestamp: eventTimestamp, delta: delta });
+        }
 
         // get all bodies and all constraints in the world
         var allBodies = Composite.allBodies(world),
@@ -186,7 +192,9 @@ var Body = require('../body/Body');
             Engine._bodiesUpdate(moverBodies, delta);
         }
 
-        Events.trigger(engine, 'beforeSolve', event);
+        if (Engine._hasListener(engine, 'beforeSolve')) {
+            Events.trigger(engine, 'beforeSolve', { timestamp: eventTimestamp, delta: delta });
+        }
 
         // with no constraints in the world every body's constraintImpulse is
         // zero, so the pre/post passes (full-body scans) and the solve loop
@@ -291,7 +299,9 @@ var Body = require('../body/Body');
         // value there would hold that body awake.
         Engine._bodiesClearForces(engine.enableSleeping ? allBodies : moverBodies);
 
-        Events.trigger(engine, 'afterUpdate', event);
+        if (Engine._hasListener(engine, 'afterUpdate')) {
+            Events.trigger(engine, 'afterUpdate', { timestamp: eventTimestamp, delta: delta });
+        }
 
         // log the time elapsed computing this update
         engine.timing.lastElapsed = Common.now() - startTime;
@@ -331,6 +341,22 @@ var Body = require('../body/Body');
     Engine.clear = function(engine) {
         Pairs.clear(engine.pairs);
         Detector.clear(engine.detector);
+    };
+
+    /**
+     * Whether `name` has at least one listener on `engine`, read at the call
+     * so a listener added or removed earlier in the same update is seen.
+     * @method _hasListener
+     * @private
+     * @param {engine} engine
+     * @param {string} name
+     * @return {boolean}
+     */
+    Engine._hasListener = function(engine, name) {
+        var events = engine.events,
+            callbacks = events && events[name];
+
+        return Boolean(callbacks) && callbacks.length > 0;
     };
 
     /**

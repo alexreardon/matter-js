@@ -121,3 +121,125 @@ describe('Engine resting-body passes', () => {
         expect(body.force).toEqual({ x: 0, y: 0 });
     });
 });
+
+describe('Engine per-update events', () => {
+    const Events = require('../src/core/Events');
+
+    test('each event reaches its listener with the name, source, timestamp and delta of the update', () => {
+        const engine = Engine.create();
+        const seen = [];
+        ['beforeUpdate', 'beforeSolve', 'afterUpdate'].forEach((name) => {
+            Events.on(engine, name, (event) => {
+                seen.push([event.name, event.source === engine, event.timestamp, event.delta]);
+            });
+        });
+
+        Engine.update(engine, DELTA);
+
+        expect(seen).toEqual([
+            ['beforeUpdate', true, DELTA, DELTA],
+            ['beforeSolve', true, DELTA, DELTA],
+            ['afterUpdate', true, DELTA, DELTA]
+        ]);
+    });
+
+    test('a listener that moves the clock does not change the timestamp a later event of the same update reports', () => {
+        const engine = Engine.create();
+        let afterTimestamp = null;
+        Events.on(engine, 'beforeUpdate', () => {
+            engine.timing.timestamp += 1000;
+        });
+        Events.on(engine, 'afterUpdate', (event) => {
+            afterTimestamp = event.timestamp;
+        });
+
+        Engine.update(engine, DELTA);
+
+        expect(afterTimestamp).toBe(DELTA);
+    });
+
+    test('a listener added by an earlier event of the same update is called in that update', () => {
+        const engine = Engine.create();
+        let added = false;
+        let afterCalls = 0;
+        Events.on(engine, 'beforeUpdate', () => {
+            if (!added) {
+                added = true;
+                Events.on(engine, 'afterUpdate', () => {
+                    afterCalls += 1;
+                });
+            }
+        });
+
+        Engine.update(engine, DELTA);
+
+        expect(afterCalls).toBe(1);
+    });
+
+    test('an update with no listeners triggers nothing', () => {
+        const engine = Engine.create();
+        Composite.add(engine.world, [
+            Bodies.rectangle(0, 0, 50, 50),
+            Bodies.rectangle(0, 60, 400, 20, { isStatic: true })
+        ]);
+        const trigger = jest.spyOn(Events, 'trigger');
+
+        try {
+            for (let i = 0; i < 30; i++) {
+                Engine.update(engine, DELTA);
+            }
+            expect(engine.pairs.list.length).toBeGreaterThan(0);
+            expect(trigger).not.toHaveBeenCalled();
+        } finally {
+            trigger.mockRestore();
+        }
+    });
+
+    test('a single-name trigger calls exactly what the multi-name form calls, each listener with its own copy of the payload', () => {
+        const target = { events: null };
+        const calls = [];
+        Events.on(target, 'alpha', (event) => {
+            calls.push(['alpha', event.name, event.source === target, event.value]);
+            event.value = 'changed';
+        });
+        Events.on(target, 'beta', (event) => {
+            calls.push(['beta', event.name, event.source === target, event.value]);
+        });
+        const payload = { value: 1 };
+
+        Events.trigger(target, 'alpha', payload);
+        Events.trigger(target, 'beta', payload);
+        Events.trigger(target, 'alpha beta', payload);
+        Events.trigger(target, 'gamma', payload);
+        Events.trigger({ events: {} }, 'alpha', payload);
+        Events.trigger({ events: null }, 'alpha', payload);
+
+        expect(calls).toEqual([
+            ['alpha', 'alpha', true, 1],
+            ['beta', 'beta', true, 1],
+            ['alpha', 'alpha', true, 1],
+            ['beta', 'beta', true, 1]
+        ]);
+        expect(payload).toEqual({ value: 1 });
+    });
+
+    test('a trigger with no payload hands the listener an event carrying only its name and source', () => {
+        const target = { events: null };
+        let received = null;
+        Events.on(target, 'alpha', (event) => {
+            received = event;
+        });
+
+        Events.trigger(target, 'alpha');
+
+        expect(received).toEqual({ name: 'alpha', source: target });
+    });
+
+    test('an event name that exists only on the prototype has no listener', () => {
+        const target = { events: {} };
+        Events.on(target, 'alpha', () => {});
+
+        expect(() => Events.trigger(target, 'constructor', {})).not.toThrow();
+        expect(() => Events.trigger({ events: [] }, 'push', {})).not.toThrow();
+    });
+});

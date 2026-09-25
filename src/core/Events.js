@@ -14,6 +14,8 @@ var Common = require('./Common');
 
 (function() {
 
+    Events._hasOwn = Object.prototype.hasOwnProperty;
+
     /**
      * Subscribes a callback function to the given object's `eventName`.
      * @method on
@@ -85,8 +87,32 @@ var Common = require('./Common');
             eventClone;
 
         var events = object.events;
-        
-        if (events && Common.keys(events).length > 0) {
+
+        if (!events) {
+            return;
+        }
+
+        // a single event name, which is every trigger inside the library:
+        // no split and no key list built only to test for emptiness. Events.on
+        // only ever writes own properties, so an own entry here is exactly
+        // the case the general path below reaches with a non-empty key list
+        if (eventNames.indexOf(' ') === -1) {
+            callbacks = events[eventNames];
+
+            if (callbacks && callbacks.length > 0 && Events._hasOwn.call(events, eventNames)) {
+                eventClone = Common.clone(event || {}, false);
+                eventClone.name = eventNames;
+                eventClone.source = object;
+
+                for (var k = 0; k < callbacks.length; k++) {
+                    callbacks[k].apply(object, [eventClone]);
+                }
+            }
+
+            return;
+        }
+
+        if (Common.keys(events).length > 0) {
             if (!event)
                 event = {};
 
