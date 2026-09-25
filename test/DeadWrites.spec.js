@@ -15,6 +15,11 @@
 // a debris body frozen back to static on a later update (the one path where
 // the static index reads a body's bounds after the position solve), and age
 // eviction with the page topped back up.
+//
+// `enableSolvedVelocityAndBounds: false` is held to the same bar from the other
+// side: a run with it off must fingerprint identically to a run with it on,
+// where the consumer of the run with it off DERIVES each moving body's velocity
+// the way `Body.updateVelocities` does instead of reading the engine's.
 
 const Common = require('../src/core/Common');
 const Engine = require('../src/core/Engine');
@@ -37,7 +42,18 @@ function mix(hash, value) {
     return Math.imul(hash ^ scratch32[1], 16777619);
 }
 
-function fingerprint(engine) {
+// what a consumer of an engine with the option off sends, derived exactly as
+// Body.updateVelocities computes it
+function derivedVelocity(body) {
+    const timeScale = Body._baseDelta / body.deltaTime;
+    return [
+        (body.position.x - body.positionPrev.x) * timeScale,
+        (body.position.y - body.positionPrev.y) * timeScale,
+        (body.angle - body.anglePrev) * timeScale
+    ];
+}
+
+function fingerprint(engine, consumer) {
     let hash = 2166136261;
     const bodies = Composite.allBodies(engine.world);
     for (const body of bodies) {
@@ -54,12 +70,24 @@ function fingerprint(engine) {
             hash = mix(hash, vertex.x);
             hash = mix(hash, vertex.y);
         }
-        if (body.isStatic) {
-            // the static index's input
+        if (body.isStatic || body.isSleeping) {
+            // the static index's input, and a resting body's box
             hash = mix(hash, body.bounds.min.x);
             hash = mix(hash, body.bounds.max.x);
             hash = mix(hash, body.bounds.min.y);
             hash = mix(hash, body.bounds.max.y);
+        }
+        // the velocity a consumer reads of a MOVING body: the engine's own, or
+        // derived. Not of a sleeping one: `Sleeping.set` zeroes `velocity` but
+        // not `angularVelocity`, so the engine's reading there is stale where
+        // the derived one is 0
+        if (consumer && !body.isStatic && !body.isSleeping) {
+            const velocity = consumer === 'derived'
+                ? derivedVelocity(body)
+                : [body.velocity.x, body.velocity.y, body.angularVelocity];
+            hash = mix(hash, velocity[0]);
+            hash = mix(hash, velocity[1]);
+            hash = mix(hash, velocity[2]);
         }
     }
     // pair order, and the warm-start state the next update starts from
@@ -77,7 +105,9 @@ function fingerprint(engine) {
     return hash;
 }
 
-function run({ refreeze = true, atStepEnd = null } = {}) {
+const SOLVED_OFF = { enableSolvedVelocityAndBounds: false };
+
+function run({ options = {}, consumer = null, refreeze = true, pauseEvery = 0, atStepEnd = null } = {}) {
     Common._nextId = 0;
     Detector._mode = 'gridStatic';
     Detector._cellSize = 32;
@@ -88,7 +118,7 @@ function run({ refreeze = true, atStepEnd = null } = {}) {
         return seed / 0x7fffffff;
     };
 
-    const engine = Engine.create({ enableSleeping: false });
+    const engine = Engine.create(Object.assign({ enableSleeping: false }, options));
     const world = engine.world;
     for (let i = 0; i < 12; i++) {
         Composite.add(world, Bodies.rectangle(40 + i * 80, 700, 80, 40, { isStatic: true }));
@@ -131,10 +161,14 @@ function run({ refreeze = true, atStepEnd = null } = {}) {
             Composite.add(world, replacement);
             tiles.push(replacement);
         }
+        // a paused update (timeScale 0) integrates nothing but still solves
+        const paused = pauseEvery > 0 && step % pauseEvery === pauseEvery - 1;
+        engine.timing.timeScale = paused ? 0 : 1;
         Engine.update(engine, 1000 / 60);
-        hashes.push(fingerprint(engine));
+        hashes.push(fingerprint(engine, consumer));
         if (atStepEnd) {
-            atStepEnd({ engine, movers: movers() });
+            // told whether the NEXT update is paused
+            atStepEnd({ engine, movers: movers(), beforePause: pauseEvery > 0 && (step + 1) % pauseEvery === pauseEvery - 1 });
         }
     }
     return { hashes, refrozen, engine };
@@ -197,5 +231,88 @@ describe('dead writes: pair records', () => {
             })
         });
         expect(firstDivergence(run().hashes, poisoned.hashes)).not.toBe(-1);
+    });
+});
+
+describe('dead writes: the end-of-update velocity pass', () => {
+    const poisonVelocity = (body) => {
+        body.velocity.x = NaN;
+        body.velocity.y = NaN;
+        body.angularVelocity = NaN;
+        body.speed = NaN;
+        body.angularSpeed = NaN;
+    };
+
+    test('the four properties it writes are dead at the end of an update (poisoned: identical)', () => {
+        const poisoned = run({
+            atStepEnd: ({ movers }) => movers.forEach(poisonVelocity)
+        });
+        expect(firstDivergence(run().hashes, poisoned.hashes)).toBe(-1);
+    });
+
+    test('with the option off the run is bit-identical, and the derived velocity is the engine\'s', () => {
+        const kept = run({ consumer: 'engine' });
+        const skipped = run({ options: SOLVED_OFF, consumer: 'derived' });
+        expect(firstDivergence(kept.hashes, skipped.hashes)).toBe(-1);
+    });
+
+    test('with the option off and sleeping enabled the simulation is bit-identical', () => {
+        // the simulation only, not the consumer's velocity: a body woken part-way
+        // through an update joins the velocity pass on the NEXT update, so for
+        // that one update the engine reports 0 where the derived value is the
+        // body's real motion (and see the sleeping note in fingerprint)
+        const sleeping = { enableSleeping: true };
+        const kept = run({ options: sleeping });
+        const skipped = run({ options: Object.assign({}, sleeping, SOLVED_OFF) });
+        expect(kept.engine.world.bodies.some((body) => body.isSleeping)).toBe(true);
+        expect(firstDivergence(kept.hashes, skipped.hashes)).toBe(-1);
+    });
+
+    test('with the option off and paused updates the run is bit-identical', () => {
+        const kept = run({ pauseEvery: 7, consumer: 'engine' });
+        const skipped = run({ options: SOLVED_OFF, pauseEvery: 7, consumer: 'derived' });
+        expect(firstDivergence(kept.hashes, skipped.hashes)).toBe(-1);
+    });
+
+    test('with the option off a paused update recomputes velocity before it solves', () => {
+        const poisonBeforePause = ({ movers, beforePause }) => {
+            if (beforePause) {
+                movers.forEach(poisonVelocity);
+            }
+        };
+        const skipped = run({ options: SOLVED_OFF, pauseEvery: 7 });
+        const poisoned = run({ options: SOLVED_OFF, pauseEvery: 7, atStepEnd: poisonBeforePause });
+        expect(firstDivergence(skipped.hashes, poisoned.hashes)).toBe(-1);
+    });
+
+    test('NEGATIVE: with the option on, velocity poisoned before a paused update diverges (the solve reads it)', () => {
+        const poisoned = run({
+            pauseEvery: 7,
+            atStepEnd: ({ movers, beforePause }) => {
+                if (beforePause) {
+                    movers.forEach(poisonVelocity);
+                }
+            }
+        });
+        expect(firstDivergence(run({ pauseEvery: 7 }).hashes, poisoned.hashes)).not.toBe(-1);
+    });
+
+    test('NEGATIVE: positionPrev nudged by 1e-9 at the end of an update diverges', () => {
+        const poisoned = run({
+            atStepEnd: ({ movers }) => movers.forEach((body) => {
+                body.positionPrev.x += 1e-9;
+            })
+        });
+        expect(firstDivergence(run().hashes, poisoned.hashes)).not.toBe(-1);
+    });
+
+    test('NEGATIVE: the consumer fingerprint sees a moving body\'s velocity', () => {
+        const { engine } = run();
+        const engineRead = fingerprint(engine, 'engine');
+        const mover = Composite.allBodies(engine.world).find((body) => !body.isStatic);
+
+        expect(fingerprint(engine, 'derived')).toBe(engineRead);
+        mover.velocity.x += 1e-9;
+        expect(fingerprint(engine, 'engine')).not.toBe(engineRead);
     });
 });

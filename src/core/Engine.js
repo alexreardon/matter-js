@@ -42,6 +42,7 @@ var Body = require('../body/Body');
             velocityIterations: 4,
             constraintIterations: 2,
             enableSleeping: false,
+            enableSolvedVelocityAndBounds: true,
             events: [],
             plugin: {},
             gravity: {
@@ -191,9 +192,18 @@ var Body = require('../body/Body');
         // apply gravity to all moving bodies
         Engine._bodiesApplyGravity(moverBodies, engine.gravity);
 
+        // whether this update ends by bringing the moving bodies' velocity
+        // properties up to date with the solve (see the option's docs)
+        var keepSolved = engine.enableSolvedVelocityAndBounds !== false;
+
         // update all body position and rotation by integration
         if (delta > 0) {
             Engine._bodiesUpdate(moverBodies, delta);
+        } else if (!keepSolved) {
+            // nothing is integrated, so the solve below reads velocity as the
+            // last update left it: recompute it from the positions exactly as
+            // the skipped end-of-update pass would have
+            Engine._bodiesUpdateVelocities(moverBodies);
         }
 
         if (Engine._hasListener(engine, 'beforeSolve')) {
@@ -275,8 +285,12 @@ var Body = require('../body/Body');
         }
         Resolver.postSolveVelocity(pairs);
 
-        // update body speed and velocity properties
-        Engine._bodiesUpdateVelocities(moverBodies);
+        // update body speed and velocity properties. Nothing in the engine
+        // reads them before the next integration overwrites velocity and
+        // angular velocity, so an engine that opted out skips the pass
+        if (keepSolved) {
+            Engine._bodiesUpdateVelocities(moverBodies);
+        }
 
         // trigger collision events, gated the same way as collisionStart
         if (pairs.collisionActive.length > 0 && engineEvents && engineEvents.collisionActive && engineEvents.collisionActive.length > 0) {
@@ -576,6 +590,28 @@ var Body = require('../body/Body');
      * @property enableSleeping
      * @type boolean
      * @default false
+     */
+
+    /**
+     * A flag that specifies whether each update ends by bringing every moving body's `velocity`,
+     * `angularVelocity`, `speed` and `angularSpeed` up to date with the collision solve.
+     *
+     * The engine itself never reads these between updates (integration recomputes velocity from
+     * `position` and `positionPrev`), so a consumer that does not read them, or that derives what it
+     * needs from `position`, `positionPrev`, `angle`, `anglePrev` and `deltaTime` the way
+     * `Body.updateVelocities` does, can set this to `false` and skip that work.
+     *
+     * When `false`, between updates a moving body's `velocity` and `angularVelocity` hold the values
+     * integration set before the solve, and its `speed` and `angularSpeed` are not kept, so bounds
+     * recomputed between updates (`Body.setPosition`, `Body.setAngle`) are padded by that velocity. An
+     * update that integrates nothing (a `delta` of `0`, e.g. `timing.timeScale` of `0`) recomputes the
+     * four from the positions before it solves, as the skipped pass would have left them. Keep this
+     * `true` if anything reads those properties between updates, such as `Render`'s velocity views
+     * or your own code.
+     *
+     * @property enableSolvedVelocityAndBounds
+     * @type boolean
+     * @default true
      */
 
     /**
