@@ -653,8 +653,13 @@ var Bounds = require('../geometry/Bounds');
                     vTangentX = -vNormalY,
                     vTangentY = vNormalX;
 
+                // `1 / vContactCount` without the divide. An active pair's count
+                // is the collision's support count, always 1 or 2
+                // (Collision.collides), and 1/1 and 1/2 are exact, so this is the
+                // identical value. A count of 0 (a pair re-activated without an
+                // update) runs no contact below, so its share is never read
                 var vInverseMassTotal = vPair.inverseMass,
-                    vPairContactShare = 1 / vContactCount,
+                    vPairContactShare = vContactCount === 1 ? 1 : 0.5,
                     vInvInertiaA = bInvInertia[slotA],
                     vInvInertiaB = bInvInertia[slotB],
                     vPosAX = bPosX[slotA],
