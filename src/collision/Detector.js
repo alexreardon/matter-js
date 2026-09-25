@@ -665,7 +665,11 @@ var Collision = require('./Collision');
         if (buckets === null) {
             buckets = body._sBuckets = [];
         } else {
-            buckets.length = 0;
+            // popped rather than `length = 0`, as the candidate list in
+            // `_collisionsGridStatic` is: no StoreIC call, capacity kept
+            while (buckets.length !== 0) {
+                buckets.pop();
+            }
         }
 
         body._sIndexed = true;
@@ -785,7 +789,10 @@ var Collision = require('./Collision');
             }
         }
 
-        buckets.length = 0;
+        // popped rather than `length = 0` (see `_staticIndexInsert`)
+        while (buckets.length !== 0) {
+            buckets.pop();
+        }
     };
 
     /**
@@ -1496,7 +1503,13 @@ var Collision = require('./Collision');
                     if (scList === null) {
                         scList = m._scList = [];
                     }
-                    scList.length = 0;
+                    // popped, not `scList.length = 0`: TurboFan compiles a length
+                    // store to a StoreIC call, and a store to zero also drops the
+                    // backing store the pushes below then regrow. The inlined pop
+                    // loop has neither. 291 of these per storm step
+                    while (scList.length !== 0) {
+                        scList.pop();
+                    }
                     if (m._scBounds === null) {
                         m._scBounds = new Float64Array(32);
                     }
