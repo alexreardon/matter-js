@@ -517,7 +517,10 @@ describe('a resting body moved after the grid indexed it', function() {
             Body.set(body, 'position', { x: body.position.x, y: body.position.y - 1 });
         }],
         ['Body.setPositionAndAngle', function(body, step) {
-            Body.setPositionAndAngle(body, body.position.x, body.position.y - 1, 0.002 * step);
+            // both change on every call, the first included, so the fused
+            // path is the one that promotes (with either unchanged it
+            // delegates to setPosition or setAngle)
+            Body.setPositionAndAngle(body, body.position.x, body.position.y - 1, 0.002 * (step + 1));
         }],
         ['Body.setAngle', function(body) {
             Body.setAngle(body, body.angle + 0.004);
