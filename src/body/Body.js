@@ -28,6 +28,18 @@ var Axes = require('../geometry/Axes');
     Body._nextCategory = 0x0001;
     Body._baseDelta = 1000 / 60;
 
+    // box tag tolerances (see Body._updateBoxTag). The axes come out of
+    // Axes.fromVertices normalised, so a real box is unit and orthogonal to
+    // float precision (~1e-16); the corner test is in world units, far above
+    // the ~1e-11 a centred, translated rectangle carries and far below any
+    // non-box shape
+    Body._boxAxisTolerance = 1e-9;
+    Body._boxCornerTolerance = 1e-6;
+
+    // per-corner scratch for Body._updateBoxTag, filled before it is read
+    var _boxTagOffsets0 = [0, 0, 0, 0],
+        _boxTagOffsets1 = [0, 0, 0, 0];
+
     /**
      * Creates a new rigid body model. The options parameter is an object that specifies any properties you wish to override the defaults.
      * All properties have default values, and many are pre-calculated automatically based on other properties.
@@ -183,6 +195,14 @@ var Axes = require('../geometry/Axes');
             _sCx1: 0,
             _sCy0: 0,
             _sCy1: 0,
+            // Box tag, read by Collision.collides to choose the closed-form
+            // support search (see Body._updateBoxTag). _boxCorners is -1
+            // unless this body is geometrically a rectangle centred on
+            // `position`; then it packs which vertex sits on which side of
+            // each axis. Declared BEFORE the memo so the last key is unchanged.
+            _boxHalf0: 0,
+            _boxHalf1: 0,
+            _boxCorners: -1,
             // Collision._selfProjection memo: this body's own vertices projected
             // onto its own axes, packed flat as [min0, max0, min1, max1, ...],
             // one pair per axis. _spValid is cleared by every site that moves a
@@ -341,9 +361,13 @@ var Axes = require('../geometry/Axes');
                 break;
             case 'axes':
                 // same assignment the default branch makes, plus the
-                // self-projection memo invalidation replacing axes needs
+                // self-projection memo invalidation replacing axes needs, and
+                // the box tag, which is derived from the axes. `_initProperties`
+                // always sets `axes` last among the geometry, so this is also
+                // where a new body takes its tag on its finished geometry
                 body.axes = value;
                 body._spValid = false;
+                Body._updateBoxTag(body);
                 break;
             case 'centre':
                 Body.setCentre(body, value);
@@ -492,6 +516,130 @@ var Axes = require('../geometry/Axes');
     };
 
     /**
+     * Takes the box tag that `Collision.collides` reads to choose the
+     * closed-form support search, `Collision._findSupportsBox`: `_boxCorners`,
+     * `_boxHalf0` and `_boxHalf1` (see `Body.create`).
+     *
+     * The tag is decided by ACTUAL geometry, never by the factory that built
+     * the body: four vertices, two unit and mutually orthogonal axes, one part,
+     * and every corner sitting at plus or minus the half extent on both axes
+     * about `position`. That last test is what rejects a parallelogram (two
+     * axes, four vertices, not a box), a compound parent (four hull corners
+     * about a centre of mass that is not the hull's centre), and a body whose
+     * centre was moved off its vertices by `Body.setCentre`. The vertex ring
+     * must also walk the perimeter, never a diagonal, because the support
+     * search reads a corner's two ring neighbours as its two box neighbours.
+     *
+     * Rotation and translation move the vertices, the axes and `position`
+     * together, so they change none of this; only the mutators that reshape a
+     * body call here.
+     * @method _updateBoxTag
+     * @private
+     * @param {body} body
+     */
+    Body._updateBoxTag = function(body) {
+        var vertices = body.vertices,
+            axes = body.axes;
+
+        body._boxCorners = -1;
+        body._boxHalf0 = 0;
+        body._boxHalf1 = 0;
+
+        if (body.parts.length !== 1 || !vertices || vertices.length !== 4 || !axes || axes.length !== 2) {
+            return;
+        }
+
+        var axis0X = axes[0].x,
+            axis0Y = axes[0].y,
+            axis1X = axes[1].x,
+            axis1Y = axes[1].y;
+
+        if (Math.abs(axis0X * axis0X + axis0Y * axis0Y - 1) > Body._boxAxisTolerance
+            || Math.abs(axis1X * axis1X + axis1Y * axis1Y - 1) > Body._boxAxisTolerance
+            || Math.abs(axis0X * axis1X + axis0Y * axis1Y) > Body._boxAxisTolerance) {
+            return;
+        }
+
+        var positionX = body.position.x,
+            positionY = body.position.y,
+            offsets0 = _boxTagOffsets0,
+            offsets1 = _boxTagOffsets1,
+            min0 = 0,
+            max0 = 0,
+            min1 = 0,
+            max1 = 0,
+            k;
+
+        for (k = 0; k < 4; k++) {
+            // the support search walks neighbours by array position, the
+            // general one by `vertex.index`; they must name the same vertex
+            if (vertices[k].index !== k) {
+                return;
+            }
+
+            var offsetX = vertices[k].x - positionX,
+                offsetY = vertices[k].y - positionY,
+                offset0 = offsetX * axis0X + offsetY * axis0Y,
+                offset1 = offsetX * axis1X + offsetY * axis1Y;
+
+            offsets0[k] = offset0;
+            offsets1[k] = offset1;
+
+            if (k === 0 || offset0 < min0) { min0 = offset0; }
+            if (k === 0 || offset0 > max0) { max0 = offset0; }
+            if (k === 0 || offset1 < min1) { min1 = offset1; }
+            if (k === 0 || offset1 > max1) { max1 = offset1; }
+        }
+
+        var half0 = (max0 - min0) * 0.5,
+            half1 = (max1 - min1) * 0.5,
+            corners = 0,
+            seen = 0,
+            firstCode = 0,
+            previousCode = 0;
+
+        if (!(half0 > 0) || !(half1 > 0)) {
+            return;
+        }
+
+        for (k = 0; k < 4; k++) {
+            var side0 = offsets0[k],
+                side1 = offsets1[k];
+
+            if (Math.abs(Math.abs(side0) - half0) > Body._boxCornerTolerance
+                || Math.abs(Math.abs(side1) - half1) > Body._boxCornerTolerance) {
+                return;
+            }
+
+            var code = (side0 > 0 ? 1 : 0) | (side1 > 0 ? 2 : 0);
+
+            // two corners in one quadrant about `position`: not a box about it
+            if ((seen & (1 << code)) !== 0) {
+                return;
+            }
+
+            // ring neighbours differ in exactly one side; both is a diagonal
+            if (k === 0) {
+                firstCode = code;
+            } else if ((code ^ previousCode) === 3) {
+                return;
+            }
+
+            previousCode = code;
+            seen |= 1 << code;
+            corners |= k << (code * 2);
+        }
+
+        if ((firstCode ^ previousCode) === 3) {
+            return;
+        }
+
+        body._boxHalf0 = half0;
+        body._boxHalf1 = half1;
+        body._boxCorners = corners;
+    };
+
+    /**
      * Sets the body's vertices and updates body properties accordingly, including inertia, area and mass (with respect to `body.density`).
      * Vertices will be automatically transformed to be orientated around their centre of mass as the origin.
      * They are then automatically translated to world space based on `body.position`.
@@ -529,6 +677,9 @@ var Axes = require('../geometry/Axes');
         // update geometry
         Vertices.translate(body.vertices, body.position);
         Bounds.update(body.bounds, body.vertices, body.velocity);
+
+        // both the vertices and the axes have been replaced
+        Body._updateBoxTag(body);
     };
 
     /**
@@ -568,6 +719,10 @@ var Axes = require('../geometry/Axes');
                 body.parts.push(part);
             }
         }
+
+        // a compound parent is never a box: its position is the parts' centre
+        // of mass, not its hull's centre, even when the hull has four corners
+        Body._updateBoxTag(body);
 
         if (body.parts.length === 1)
             return;
@@ -628,6 +783,9 @@ var Axes = require('../geometry/Axes');
             body.position.x += centre.x;
             body.position.y += centre.y;
         }
+
+        // `position` no longer sits at the centre of the vertices
+        Body._updateBoxTag(body);
     };
 
     /**
@@ -988,6 +1146,10 @@ var Axes = require('../geometry/Axes');
             // scale position
             part.position.x = point.x + (part.position.x - point.x) * scaleX;
             part.position.y = point.y + (part.position.y - point.y) * scaleY;
+
+            // the extents changed, and a non-uniform scale of a rotated box is
+            // a parallelogram, which keeps two axes but is no longer a box
+            Body._updateBoxTag(part);
 
             // update bounds
             Bounds.update(part.bounds, part.vertices, body.velocity);

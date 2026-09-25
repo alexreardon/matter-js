@@ -18,6 +18,14 @@ var Pair = require('./Pair');
 (function() {
     var _supports = [];
 
+    // Below this depth margin (world units) two box corners are treated as
+    // LEVEL along a support direction, and `Collision._findSupportsBox` makes
+    // the general search's own comparisons instead of reading the answer off
+    // the axes. It must sit far above the float error of those comparisons
+    // (~1e-11 at page coordinates) and far below any real corner separation
+    // (a box is at least a pixel on a side).
+    Collision._boxSupportTolerance = 1e-6;
+
     var _overlapAB = {
         overlap: 0,
         axis: null
@@ -59,6 +67,10 @@ var Pair = require('./Pair');
      * @return {collision|null} A collision record if detected, otherwise null
      */
     Collision.collides = function(bodyA, bodyB, pairs) {
+        // both sides tagged by Body._updateBoxTag: the closed-form support
+        // search replaces the hill-climb, returning the same vertices
+        var isBoxPair = bodyA._boxCorners >= 0 && bodyB._boxCorners >= 0;
+
         Collision._overlapAxes(_overlapAB, bodyA, bodyB.vertices, bodyA.axes);
 
         if (_overlapAB.overlap <= 0) {
@@ -145,7 +157,9 @@ var Pair = require('./Pair');
         collision.depth = depth;
 
         // find support points, there is always either exactly one or two
-        var supportsB = Collision._findSupports(bodyA, bodyB, normal, 1),
+        var supportsB = isBoxPair
+                ? Collision._findSupportsBox(bodyA, bodyB, normal, 1)
+                : Collision._findSupports(bodyA, bodyB, normal, 1),
             supportCount = 0;
 
         // find the supports from bodyB that are inside bodyA. Both points are
@@ -163,7 +177,9 @@ var Pair = require('./Pair');
 
         // find the supports from bodyA that are inside bodyB
         if (supportCount < 2) {
-            var supportsA = Collision._findSupports(bodyB, bodyA, normal, -1);
+            var supportsA = isBoxPair
+                ? Collision._findSupportsBox(bodyB, bodyA, normal, -1)
+                : Collision._findSupports(bodyB, bodyA, normal, -1);
 
             if (supportCount === 0) {
                 // nothing the first test can do takes the count to 2, so the
@@ -459,6 +475,150 @@ var Pair = require('./Pair');
 
         _supports[0] = vertexA;
         _supports[1] = vertexC;
+
+        return _supports;
+    };
+
+    /**
+     * The support search for a box (tagged by `Body._updateBoxTag`) in closed
+     * form. It returns the SAME two vertex objects, in the SAME order, as
+     * `Collision._findSupports`, so contacts, their identity matching in
+     * `Pair.update`, and the solver's contact order are all unchanged.
+     *
+     * Along the search direction `n`, each side of axis `k` moves a corner
+     * `half_k * (n . axis_k)` deeper, so the deepest corner is on the positive
+     * side of both dot products, and its deeper neighbour is across the axis
+     * whose side costs less depth (`margin_k = half_k * |n . axis_k|`). The
+     * vertex a side pair names is read from `_boxCorners`.
+     *
+     * That reading is trusted only where the hill-climb's own float
+     * comparisons cannot disagree with it. A margin under
+     * `Collision._boxSupportTolerance` is a tie the general search settles by
+     * rounding and by vertex index, so there this makes the general search's
+     * own comparisons on the two candidates alone. That is every contact whose
+     * normal is this box's own face normal, where the two corners of the face
+     * are level along it.
+     * @method _findSupportsBox
+     * @private
+     * @param {body} bodyA
+     * @param {body} bodyB
+     * @param {vector} normal
+     * @param {number} direction
+     * @return [vector]
+     */
+    Collision._findSupportsBox = function(bodyA, bodyB, normal, direction) {
+        var axes = bodyB.axes,
+            axis0 = axes[0],
+            axis1 = axes[1],
+            normalX = normal.x * direction,
+            normalY = normal.y * direction,
+            dot0 = normalX * axis0.x + normalY * axis0.y,
+            dot1 = normalX * axis1.x + normalY * axis1.y,
+            margin0 = bodyB._boxHalf0 * (dot0 < 0 ? -dot0 : dot0),
+            margin1 = bodyB._boxHalf1 * (dot1 < 0 ? -dot1 : dot1),
+            tolerance = Collision._boxSupportTolerance,
+            corners = bodyB._boxCorners,
+            side0 = dot0 > 0 ? 1 : 0,
+            side1 = dot1 > 0 ? 2 : 0,
+            vertices = bodyB.vertices,
+            deepestIndex,
+            partnerIndex;
+
+        if (margin0 > tolerance && margin1 > tolerance) {
+            deepestIndex = (corners >> ((side0 | side1) << 1)) & 3;
+
+            if (margin0 + tolerance < margin1) {
+                partnerIndex = (corners >> (((side0 ^ 1) | side1) << 1)) & 3;
+            } else if (margin1 + tolerance < margin0) {
+                partnerIndex = (corners >> ((side0 | (side1 ^ 2)) << 1)) & 3;
+            } else {
+                // both neighbours are level with each other
+                return Collision._supportsBesideDeepest(bodyA, vertices, deepestIndex, normalX, normalY);
+            }
+
+            _supports[0] = vertices[deepestIndex];
+            _supports[1] = vertices[partnerIndex];
+
+            return _supports;
+        }
+
+        if (margin1 > tolerance) {
+            // the two corners across axis 0 are level
+            return Collision._supportsFromLevelPair(bodyA, vertices,
+                (corners >> (side1 << 1)) & 3, (corners >> ((1 | side1) << 1)) & 3, normalX, normalY);
+        }
+
+        if (margin0 > tolerance) {
+            // the two corners across axis 1 are level
+            return Collision._supportsFromLevelPair(bodyA, vertices,
+                (corners >> (side0 << 1)) & 3, (corners >> ((side0 | 2) << 1)) & 3, normalX, normalY);
+        }
+
+        // both margins inside the tolerance: a box too small to reason about
+        return Collision._findSupports(bodyA, bodyB, normal, direction);
+    };
+
+    /**
+     * The general search's last step, verbatim, for a deepest vertex already
+     * known: of its two neighbours, the next one wins only when strictly
+     * deeper.
+     * @method _supportsBesideDeepest
+     * @private
+     * @param {body} bodyA
+     * @param {vertices} vertices
+     * @param {number} deepestIndex
+     * @param {number} normalX
+     * @param {number} normalY
+     * @return [vector]
+     */
+    Collision._supportsBesideDeepest = function(bodyA, vertices, deepestIndex, normalX, normalY) {
+        var bodyAPositionX = bodyA.position.x,
+            bodyAPositionY = bodyA.position.y,
+            vertexA = vertices[deepestIndex],
+            vertexB = vertices[(deepestIndex + 1) & 3],
+            vertexC = vertices[(deepestIndex + 3) & 3];
+
+        _supports[0] = vertexA;
+
+        if (normalX * (bodyAPositionX - vertexB.x) + normalY * (bodyAPositionY - vertexB.y)
+            < normalX * (bodyAPositionX - vertexC.x) + normalY * (bodyAPositionY - vertexC.y)) {
+            _supports[1] = vertexB;
+        } else {
+            _supports[1] = vertexC;
+        }
+
+        return _supports;
+    };
+
+    /**
+     * Two level corners, one of which the general search picks as deepest and
+     * the other as its partner. The search scans in index order and replaces
+     * only on a strictly smaller distance, so the deeper one wins by the
+     * search's own distance expression and the lower index wins an exact tie.
+     * @method _supportsFromLevelPair
+     * @private
+     * @param {body} bodyA
+     * @param {vertices} vertices
+     * @param {number} indexA
+     * @param {number} indexB
+     * @param {number} normalX
+     * @param {number} normalY
+     * @return [vector]
+     */
+    Collision._supportsFromLevelPair = function(bodyA, vertices, indexA, indexB, normalX, normalY) {
+        var bodyAPositionX = bodyA.position.x,
+            bodyAPositionY = bodyA.position.y,
+            lower = vertices[indexA < indexB ? indexA : indexB],
+            upper = vertices[indexA < indexB ? indexB : indexA];
+
+        if (normalX * (bodyAPositionX - upper.x) + normalY * (bodyAPositionY - upper.y)
+            < normalX * (bodyAPositionX - lower.x) + normalY * (bodyAPositionY - lower.y)) {
+            _supports[0] = upper;
+            _supports[1] = lower;
+        } else {
+            _supports[0] = lower;
+            _supports[1] = upper;
+        }
 
         return _supports;
     };
