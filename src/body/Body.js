@@ -143,9 +143,7 @@ var Axes = require('../geometry/Axes');
             _sWalk: -1,
             _sWorldIndex: 0,
             _scEpoch: 0,
-            _stamp: 0,
             _gsStamp: 0,
-            _ov: false,
             // set when an engine running with `enableSolvedVelocityAndBounds`
             // false skipped this body's bounds refresh after a position
             // correction: its bounds MAY lag its vertices until integration
