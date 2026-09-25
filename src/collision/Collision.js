@@ -24,7 +24,7 @@ var Pair = require('./Pair');
     // the axes. It must sit far above the float error of those comparisons
     // (~1e-11 at page coordinates) and far below any real corner separation
     // (a box is at least a pixel on a side).
-    Collision._boxSupportTolerance = 1e-6;
+    var _boxSupportTolerance = 1e-6;
 
     var _overlapAB = {
         overlap: 0,
@@ -493,7 +493,7 @@ var Pair = require('./Pair');
      *
      * That reading is trusted only where the hill-climb's own float
      * comparisons cannot disagree with it. A margin under
-     * `Collision._boxSupportTolerance` is a tie the general search settles by
+     * `_boxSupportTolerance` is a tie the general search settles by
      * rounding and by vertex index, so there this makes the general search's
      * own comparisons on the two candidates alone. That is every contact whose
      * normal is this box's own face normal, where the two corners of the face
@@ -516,7 +516,7 @@ var Pair = require('./Pair');
             dot1 = normalX * axis1.x + normalY * axis1.y,
             margin0 = bodyB._boxHalf0 * (dot0 < 0 ? -dot0 : dot0),
             margin1 = bodyB._boxHalf1 * (dot1 < 0 ? -dot1 : dot1),
-            tolerance = Collision._boxSupportTolerance,
+            tolerance = _boxSupportTolerance,
             corners = bodyB._boxCorners,
             side0 = dot0 > 0 ? 1 : 0,
             side1 = dot1 > 0 ? 2 : 0,
