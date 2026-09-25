@@ -3,7 +3,7 @@
 A performance fork of [`matter-js@0.20.0`](https://github.com/liabru/matter-js) (a 2D rigid body physics engine). Two modes:
 
 1. **Drop-in** (default) — same API, everything is just faster.
-2. **`gridStatic`** (opt-in) — faster again for scenes that are mostly static bodies.
+2. **The `grid` broadphase** (opt-in) — faster again for scenes that are mostly static bodies.
 
 Built for [Page Rage](https://page-rage.com), where a web page is shattered into thousands of static tiles with debris moving through them. Upstream is dormant, so the work lives here.
 
@@ -11,7 +11,7 @@ Built for [Page Rage](https://page-rage.com), where a web page is shattered into
 
 As a drop-in replacement this fork is always faster than upstream: `17-38%` faster per `Engine.update` on every benchmarked scene, with less allocation everywhere.
 
-For scenes that are mostly static bodies, the opt-in `gridStatic` mode goes further. Upstream's per-step work scales with _total_ body count — the sweep broadphase re-sorts every body on every step, and the engine walks the whole world several times per update, so on a scene with `5000` static tiles and `50` movers almost all of that work rediscovers that nothing moved. The opt-in `gridStatic` broadphase makes per-step cost scale with the number of _moving_ bodies instead: `2.4-7.3x` faster than upstream on [Page Rage](https://page-rage.com) scenes, with up to `-98%` allocation per step.
+For scenes that are mostly static bodies, the opt-in `grid` broadphase goes further. Upstream's per-step work scales with _total_ body count — the sweep broadphase re-sorts every body on every step, and the engine walks the whole world several times per update, so on a scene with `5000` static tiles and `50` movers almost all of that work rediscovers that nothing moved. The `grid` broadphase makes per-step cost scale with the number of _moving_ bodies instead: `2.4-7.3x` faster than upstream on [Page Rage](https://page-rage.com) scenes, with up to `-98%` allocation per step.
 
 ## Installation
 
@@ -27,23 +27,29 @@ npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-p
 
 Nothing to change: the API and the classic sweep broadphase are the same as upstream, and every scene runs faster.
 
-### `gridStatic` mode (opt-in)
+### The `grid` broadphase (opt-in)
 
-For scenes that are mostly static bodies:
+For scenes that are mostly static bodies, give the engine a detector on the grid:
 
 ```js
-Matter.Detector._mode = 'gridStatic';
-
-// optional (defaults to 32): tune to roughly your typical static body size
-Matter.Detector._cellSize = 32;
-
-// a static body that moves must be tagged, or the grid will not re-index it
-Matter.Detector.setGridDynamic(body, true);
+const engine = Matter.Engine.create({
+    detector: Matter.Detector.create({
+        broadphase: 'grid',
+        // optional (defaults to 32): tune to roughly your typical static body size
+        cellSize: 32
+    })
+});
 ```
 
-`gridStatic` buckets static bodies into a grid once and keeps the index up to date as bodies come and go. Each step only movers are re-bucketed, and only movers generate candidate pairs — the static field is never tested against itself. Use it when your scene is mostly static scenery: tile maps, level geometry, destructible terrain. On scenes with few statics there is nothing to skip and the bookkeeping costs `1-8%`, which is why it is opt-in.
+The grid buckets static bodies into cells once and keeps that index up to date as bodies come and go. Each step only movers are re-bucketed, and only movers generate candidate pairs — the static field is never tested against itself. Use it when your scene is mostly static scenery: tile maps, level geometry, destructible terrain. On scenes with few statics there is nothing to skip and the bookkeeping costs `1-8%`, which is why it is opt-in.
+
+A static body that moves needs nothing extra: move it with a `Body` setter (`setPosition`, `setAngle`, `setPositionAndAngle`, `translate`, `rotate`, `scale`, `setVertices`, `Body.set`) and the grid runs it as a moving body from then on.
+
+`broadphase` is `'sweep'` (the default) or `'grid'`; anything else throws, at `Detector.create` and on every step. Both fields can be changed between updates, and a new `engine.detector.cellSize` rebuilds the index once. The broadphase belongs to the detector, so `Engine.create({ broadphase: 'grid' })` throws rather than quietly running the sweep.
 
 ## Performance
+
+_Naming: the tables and the change list below were measured through `perf18`, when the grid broadphase was the `gridStatic` mode (`Detector._mode = 'gridStatic'`). `gridStatic` in them is `broadphase: 'grid'`._
 
 Timing measured at [`v0.20.0-perf14`](https://github.com/alexreardon/matter-js/releases/tag/v0.20.0-perf14); allocation re-measured at [`v0.20.0-perf15`](https://github.com/alexreardon/matter-js/releases/tag/v0.20.0-perf15).
 
@@ -90,7 +96,7 @@ Heap growth per step (less garbage means fewer GC pauses mid-simulation):
 <details>
 <summary>How these are measured</summary>
 
-`npm run bench-suite` runs [`bench/suite.js`](bench/suite.js): this fork against upstream `matter-js@0.20.0`, in one process, on identical worlds, in alternating timed blocks. The upstream baseline is provisioned automatically as a git worktree of the `0.20.0` tag. Three arms keep the broadphase separable from the rest of the work: upstream, the fork in drop-in mode (upstream's sweep broadphase), and the fork in `gridStatic` mode.
+`npm run bench-suite` runs [`bench/suite.js`](bench/suite.js): this fork against upstream `matter-js@0.20.0`, in one process, on identical worlds, in alternating timed blocks. The upstream baseline is provisioned automatically as a git worktree of the `0.20.0` tag. Three arms keep the broadphase separable from the rest of the work: upstream, the fork in drop-in mode (upstream's sweep broadphase), and the fork on the `grid` broadphase.
 
 Simulation time is microseconds per `Engine.update`, on an Apple M1 Pro under Node 24: the mean of the fastest fifth of blocks per arm (`24` blocks for the general scenes, `40` for the page scenes), each arm keeping its best across three processes per scenario, and each published cell then the fastest of three full suite runs. Memory is heap growth per step across collection-free windows (`npm run bench-suite -- --alloc`), so short-lived garbage counts too.
 
@@ -103,7 +109,7 @@ The general scenes are typical matter scenes — a few hundred dynamic bodies, n
 What the tables say:
 
 - The win grows with the size of the static field: `-58%` at `2000` tiles, `-80%` at `5000`, `-86%` at `8000`.
-- `gridStatic` costs `0-7%` on the general scenes (nothing to skip) and is worth a further `1.6x` to `5.4x` on a page. That is why it is opt-in.
+- The grid costs `0-7%` on the general scenes (nothing to skip) and is worth a further `1.6x` to `5.4x` on a page. That is why it is opt-in.
 - The narrowest win is the storm, dominated by contact solving, which this fork speeds up but does not do less of.
 - The destruction scene used to be the narrow one, at `-67%` and allocating `364 KB` a step at `perf11`. `perf12` made body creation `61%` cheaper, `perf13` stopped a candidate cache being thrown away every step, and `perf14` stopped the detector copying the whole body array on every membership change, together taking it to `-76%` and `207 KB`.
 - The general scenes are not static either: the mixed shapes pile went from `-16%` to `-34%` drop-in at `perf13` (the memoised self-projection pays most on bodies with many axes), and to `-37%` at `perf14` (the solver's per-contact constants are computed once per step instead of once per iteration).
@@ -236,6 +242,7 @@ In both modes:
 - For a world with no child composites, `Engine.update` works over `world.bodies` itself rather than a copy, and `engine.detector.bodies` IS that array between updates, so an add or remove made between updates shows in it at once (`Composite.allBodies` still returns a copy). A change a listener makes DURING an update goes to a fresh `world.bodies`, so the update keeps the membership it started with, as upstream did. Code that edits `world.bodies` directly must call `Composite.setModified(world, true, true, false)` afterwards (upstream needed that too, for the `allBodies` cache), and must not do it during an update. To take many bodies out at once, prefer `Composite.removeBodies(world, bodies)` (below) to a hand-rolled compaction.
 - `Composite.removeBodies(composite, bodies)` is new: it takes every listed body out of the composite in ONE order-preserving pass, doing to each exactly what `Composite.removeBody` does, where a `removeBody` per body is a scan of the array each. A listed body that is not in the composite is left alone; a body in it twice is removed both times. It does not search child composites or trigger the `beforeRemove` / `afterRemove` events.
 - `pair.id` is a number rather than a string.
+- A detector carries its broadphase (`broadphase`, `cellSize`; see [the `grid` broadphase](#the-grid-broadphase-opt-in)). `Detector.collisions` throws on a detector whose `broadphase` is neither `'sweep'` nor `'grid'`, which includes one built by hand as a plain `{ bodies, pairs }` object: build it with `Detector.create`. `Engine.create` throws on a string `broadphase` option, which upstream overwrote with its back-compatibility `engine.broadphase` field.
 - `engine.pairs.collisionActive` and `engine.pairs.collisionEnd` are only filled while their engine event has a listener, and are otherwise left empty. `engine.pairs.collisionStart` is filled on every update.
 - `collision.penetration` no longer exists. Derive it as `normal` scaled by `depth`, which is how the built-in debug renderer now draws it.
 - `collision.tangent` no longer exists. Derive it from the normal as `{ x: -normal.y, y: normal.x }`, which is exactly the value it held.
@@ -245,11 +252,11 @@ In both modes:
 - The position solver derives each body's contact share once per step. Mutating `body.totalContacts` or `Resolver._positionDampen` BETWEEN two `Resolver.solvePosition` calls of the same step is no longer picked up; `Engine.update` does neither.
 - `Bodies.rectangle` accepts dimensions upstream could not. Upstream builds the body from a path string, and its parser's character class omits `+`, so any dimension `String()` renders in exponent form (`1e+21` and above) silently produced a `NaN` body. Here the corners are built directly, so there is no parse to get wrong.
 
-Only in `gridStatic` mode:
+Only on the `grid` broadphase:
 
-- `Detector.setGridDynamic(body, true)` is the only supported way to tag a static body that moves. Setting `body._gridDynamic` by hand no longer works.
-- A body belongs to one `gridStatic` detector at a time.
-- For a world with no child composites, the broadphase and the engine's mover list learn what changed from a body journal the world keeps (`Composite.add`, `Composite.remove`, `Composite.removeBodies`, `Body.setStatic`, `Sleeping.set` and `Detector.setGridDynamic` record into it) rather than by walking every body, while movers are at most a quarter of the world. A direct edit of `world.bodies`, signalled by `Composite.setModified`, is still correct but costs that walk on the next update. The setter contract above matters more here: a flag assigned directly is picked up only at the next full walk, which may be many updates away.
+- A resting body (static or asleep) that a `Body` setter moves or reshapes after the grid indexed it becomes a moving body for the grid for the rest of its life, which is exactly as costly as any other mover. One moved by assigning `position` or `vertices` directly is NOT noticed, and the grid keeps answering for where it was. A resting body moved before its first grid step is simply indexed where it is.
+- A body belongs to one grid detector at a time.
+- For a world with no child composites, the broadphase and the engine's mover list learn what changed from a body journal the world keeps (`Composite.add`, `Composite.remove`, `Composite.removeBodies`, `Body.setStatic`, `Sleeping.set` and the setter promotion above record into it) rather than by walking every body, while movers are at most a quarter of the world. A direct edit of `world.bodies`, signalled by `Composite.setModified`, is still correct but costs that walk on the next update. The setter contract above matters more here: a flag assigned directly is picked up only at the next full walk, which may be many updates away.
 
 ## Correctness
 

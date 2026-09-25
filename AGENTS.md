@@ -86,8 +86,28 @@ These are load-bearing; each has cost real time when broken.
   `npm run audit-shapes`.
 - **No holey arrays reachable from the engine.** A bare `new Array(n)` without
   `.fill` is that class. `npm run audit-shapes` checks it.
-- **`gridStatic` is what the consumer runs**, pinned at boot. The sweep path
-  must keep working but is not the hot path.
+- **The grid broadphase is what the consumer runs**, pinned at boot:
+  `Engine.create({ detector: Detector.create({ broadphase: 'grid', cellSize }) })`.
+  Through `perf18` it was the `gridStatic` mode, set on module globals
+  (`Detector._mode`, `Detector._cellSize`), and every older tag still reads
+  those. The sweep path must keep working but is not the hot path.
+- **A bench configures the broadphase through `bench/lib/broadphase.js`,
+  never by hand.** It knows both APIs, so an A/B of this tree against an older
+  release still runs BOTH arms on the grid; a bench that set `_mode` on a
+  current build would set a field nothing reads and silently time the sweep.
+  `ab-churn`, `ab-inline`, `profile-churn` and `profile-game` count each
+  arm's grid calls and fail on a mismatch.
+- **The consumer greps its built bundle for `_collisionsGrid`** to prove it
+  shipped this fork rather than upstream (both builds keep property names).
+  Renaming `Detector._collisionsGrid` breaks the consumer's build, loudly and
+  on purpose: change its marker in the same release.
+- **A resting body a setter moves is promoted, not tagged.** `Body.setPosition`,
+  `setAngle`, `setPositionAndAngle`, `scale` and `setVertices` (so also
+  `translate`, `rotate`, `setParts` and `Body.set`) call
+  `Body._promoteIfIndexed`, which turns a static or sleeping body the grid has
+  already indexed into a mover for good. A NEW method that moves or reshapes
+  a body must call it too, or the grid keeps answering for the old pose.
+  `test/Detector.spec.js` runs every setter against the sweep.
 
 ## Gates
 
@@ -96,7 +116,7 @@ These are load-bearing; each has cost real time when broken.
 | `npm run test-unit` | Body, Engine, Detector, Pairs, Determinism, Shape, Version, DeadWrites, BoxTag, BoxNarrowphase, RestRow, BodyJournal |
 | `npm run audit-shapes` | V8 natives: one body map per population, no dictionary-mode objects, no sizeable holey arrays |
 | Examples suite (below) | the 46-example similarity gate |
-| `node bench/grid-correctness.js` | gridStatic vs sweep pair differential, 5 scenes x 5 cell sizes |
+| `node bench/grid-correctness.js` | grid vs sweep pair differential, 5 scenes x 5 cell sizes, one a static moved every step with no tag |
 | `CHECK=1 node bench/ab-churn.js <baseline> 500` | per-step body-state equivalence under membership change |
 
 **`npm run test-node` cannot run while `.bench/` exists.** `bench-suite`
@@ -132,7 +152,7 @@ form in the release loop above, or remove the worktree first.
   Three of four hunters on 2026-08-14 priced that path as a share of the churn
   step before anyone read the harness.
 - **A bench scene must not hold a body the game never builds.** The floor and
-  the two walls exceed the gridStatic oversize predicate as single bodies, so
+  the two walls exceed the grid's oversize predicate as single bodies, so
   each lands on `g.sOver`, which EVERY mover rescans in full EVERY step: 900
   tests per calm step and 1476 per churn step, against ZERO oversized statics in
   the shipped game. Worse than a flat tax, because the cost scales with MOVERS,
@@ -147,8 +167,8 @@ form in the release loop above, or remove the worktree first.
   whole-suite instrument that can see a single release. Two cautions: read its
   GENERAL scenes, which are small and hold a ~2% spread; its page scenes run on
   the sweep arm, which carries a much wider session spread. And its baseline arm
-  is hardcoded `mode: 'sweep'` (`bench/suite.js`), so its `gridStatic` column
-  compares gridStatic against the OTHER release's SWEEP and is not a release
+  is hardcoded `broadphase: 'sweep'` (`bench/suite.js`), so its grid column
+  compares the grid against the OTHER release's SWEEP and is not a release
   comparison at all.
 - **A bench that releases page tiles must build them DYNAMIC and then make them
   static.** `Body.setStatic(body, false)` on a body CREATED static leaves `mass`
@@ -169,7 +189,7 @@ machine could not reproduce four upstream cells within `7%` however many samples
 were taken (`page-8k` read `+20%` over ten) while the fork columns held a `1.4%`
 spread on the same cell. Republishing would have moved the public percentages in
 both directions for environmental reasons, making the drop-in headline worse and
-the `gridStatic` headline better, neither because of any code change. Allocation
+the grid headline better, neither because of any code change. Allocation
 IS safe to republish; it reproduces within `1%`.
 
 ## Gotchas
