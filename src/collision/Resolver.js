@@ -401,26 +401,22 @@ var Bounds = require('../geometry/Bounds');
                 postSolveBody = Resolver._postSolveBody,
                 carryCount = 0;
 
-            // write the flat solver snapshot back to the pairs and bodies
-            // before the per-body impulse application below reads them. Only
-            // when the SoA path actually ran this step (dirty): a caller that
-            // ran the classic solvePosition instead has already mutated the
-            // real objects, and stale array values must not clobber that.
+            // write the flat solver snapshot's body impulses back before the
+            // per-body impulse application below reads them. Only when the
+            // SoA path actually ran this step (dirty): a caller that ran the
+            // classic solvePosition instead has already mutated the real
+            // objects, and stale array values must not clobber that.
+            //
+            // The pair separations are NOT written back to `pair.separation`:
+            // the velocity solve reads them from the snapshot (see
+            // preSolveVelocity), and `Pair.update` overwrites every active
+            // pair's separation with its depth before anything reads it again
             var soaBack = container._soa;
             if (soaBack && soaBack.dirty && soaBack.epoch === epoch) {
-                var backPairRefs = soaBack.pairRefs,
-                    backSep = soaBack.sep,
-                    backImpX = soaBack.impX,
+                var backImpX = soaBack.impX,
                     backImpY = soaBack.impY,
-                    backPairCount = soaBack.pairCount,
                     backBodyCount = soaBack.bodyCount,
                     back;
-
-                if (soaBack.sepValid) {
-                    for (back = 0; back < backPairCount; back++) {
-                        backPairRefs[back].separation = backSep[back];
-                    }
-                }
 
                 // a body the position solve could not move has an unchanged
                 // snapshot, so its write-back is a no-op by value; skip it
@@ -604,7 +600,8 @@ var Bounds = require('../geometry/Bounds');
             // the position solve wrote every active pair's separation into its
             // own snapshot in this same slot order, so alias that too. Only a
             // step whose position solve never ran needs the per-pair copy off
-            // the pair objects, and that path takes a private array back.
+            // the pair objects (the depth `Pair.update` set this step), and
+            // that path takes a private array back.
             var vSeparation;
             if (aSepValid) {
                 vSeparation = soaV.separation = aSep;
