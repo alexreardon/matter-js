@@ -16,6 +16,7 @@
 // Usage:
 //   node bench/ab-inline.js <baselineSrcMain> [scene] [blocks] [workSrcMain]
 //   MODE / STATICS / MOVERS / BULLETS as bench/profile-game.js
+//   BASE_OPTIONS / WORK_OPTIONS  engine options per arm, as JSON (see bench/lib/state.js)
 "use strict";
 
 const path = require('path');
@@ -39,8 +40,12 @@ const BLOCK_UPDATES = Number(process.env.BLOCK_UPDATES || 40);
 const hr = () => Number(process.hrtime.bigint());
 
 const { addTiledBound, assertBoundsBucketed } = require('./lib/bounds');
+const { readEngineOptions, keepsSolvedState, compareBodies, SOLVED_FIELDS_NOTE } = require('./lib/state');
 
-function buildScene(Matter) {
+const BASE_OPTIONS = readEngineOptions('BASE_OPTIONS');
+const WORK_OPTIONS = readEngineOptions('WORK_OPTIONS');
+
+function buildScene(Matter, engineOptions) {
     const { Engine, Composite, Bodies, Body, Detector } = Matter;
     Detector._mode = MODE;
 
@@ -50,7 +55,7 @@ function buildScene(Matter) {
         return seed / 0x7fffffff;
     };
 
-    const engine = Engine.create({ enableSleeping: false });
+    const engine = Engine.create(Object.assign({ enableSleeping: false }, engineOptions));
     const world = engine.world;
 
     // floor + walls so debris piles instead of escaping, TILED so none of them
@@ -103,10 +108,10 @@ function buildScene(Matter) {
     return { Matter, engine, bounds, bullets };
 }
 
-function makeArm(buildPath) {
+function makeArm(buildPath, engineOptions) {
     // eslint-disable-next-line global-require
     const Matter = require(buildPath);
-    const arm = buildScene(Matter);
+    const arm = buildScene(Matter, engineOptions);
     arm.step = function() {
         Matter.Engine.update(arm.engine, 1000 / 60);
         for (let i = 0; i < arm.bullets.length; i++) {
@@ -120,8 +125,8 @@ function makeArm(buildPath) {
     return arm;
 }
 
-const base = makeArm(path.resolve(baselinePath));
-const work = makeArm(path.resolve(workPath));
+const base = makeArm(path.resolve(baselinePath), BASE_OPTIONS);
+const work = makeArm(path.resolve(workPath), WORK_OPTIONS);
 
 const warmup = scene === 'settle' ? 240 : 600;
 for (let i = 0; i < warmup; i++) {
@@ -166,25 +171,12 @@ const meanOfBest = (values, take) => {
     return sorted.reduce((a, b) => a + b, 0) / sorted.length;
 };
 
-// determinism: identical scenes driven by identical inputs must end identical
+// determinism: identical scenes driven by identical inputs must end identical,
+// in every body field (see bench/lib/state.js for what an engine option skips)
 const baseBodies = base.Matter.Composite.allBodies(base.engine.world);
 const workBodies = work.Matter.Composite.allBodies(work.engine.world);
-let divergent = 0;
-let maxDelta = 0;
-for (let i = 0; i < baseBodies.length; i++) {
-    const a = baseBodies[i];
-    const b = workBodies[i];
-    const dx = Math.abs(a.position.x - b.position.x);
-    const dy = Math.abs(a.position.y - b.position.y);
-    const da = Math.abs(a.angle - b.angle);
-    const delta = Math.max(dx, dy, da);
-    if (delta !== 0) {
-        divergent++;
-        if (delta > maxDelta) {
-            maxDelta = delta;
-        }
-    }
-}
+const compareSolved = keepsSolvedState(BASE_OPTIONS) && keepsSolvedState(WORK_OPTIONS);
+const { divergent, maxDelta, first } = compareBodies({ baseBodies, workBodies, compareSolved });
 
 const takeBest = Math.max(3, Math.round(blocks * 0.2));
 const baseBest = meanOfBest(baseBlocks, takeBest);
@@ -194,4 +186,4 @@ console.log(`scene=${scene} mode=${MODE} bodies=${baseBodies.length} blocks=${bl
 console.log(`  best      : base ${min(baseBlocks).toFixed(1)}us  work ${min(workBlocks).toFixed(1)}us  delta ${(100 * (min(workBlocks) - min(baseBlocks)) / min(baseBlocks)).toFixed(2)}%`);
 console.log(`  best-${String(takeBest).padEnd(3)}: base ${baseBest.toFixed(1)}us  work ${workBest.toFixed(1)}us  delta ${(100 * (workBest - baseBest) / baseBest).toFixed(2)}%`);
 console.log(`  median    : base ${median(baseBlocks).toFixed(1)}us  work ${median(workBlocks).toFixed(1)}us  delta ${(100 * (median(workBlocks) - median(baseBlocks)) / median(baseBlocks)).toFixed(2)}%`);
-console.log(`  determinism: ${divergent === 0 ? 'IDENTICAL' : 'DIVERGED on ' + divergent + '/' + baseBodies.length + ' bodies, max ' + maxDelta.toExponential(3)}`);
+console.log(`  determinism: ${divergent === 0 ? 'IDENTICAL' : 'DIVERGED on ' + divergent + '/' + baseBodies.length + ' bodies, max ' + maxDelta.toExponential(3) + ', first: ' + first}${compareSolved ? '' : ' (not compared: ' + SOLVED_FIELDS_NOTE + ')'}`);

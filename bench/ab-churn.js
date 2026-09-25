@@ -13,10 +13,16 @@
 //   RELEASE=<n>   statics released per step (default 8)
 //   STATICS=<n>   static tile count         (default 5000)
 //   CHECK=<n>     compare every n steps     (default 25)
+//   BASE_OPTIONS / WORK_OPTIONS  engine options per arm, as JSON (see bench/lib/state.js)
 "use strict";
 
 const path = require('path');
 const { addTiledBound, assertBoundsBucketed } = require('./lib/bounds');
+const { readEngineOptions, keepsSolvedState, compareBodies, SOLVED_FIELDS_NOTE } = require('./lib/state');
+
+const BASE_OPTIONS = readEngineOptions('BASE_OPTIONS');
+const WORK_OPTIONS = readEngineOptions('WORK_OPTIONS');
+const COMPARE_SOLVED = keepsSolvedState(BASE_OPTIONS) && keepsSolvedState(WORK_OPTIONS);
 
 const baselinePath = process.argv[2];
 const steps = Number(process.argv[3] || 600);
@@ -38,13 +44,13 @@ const hr = () => Number(process.hrtime.bigint());
 const cols = Math.round(Math.sqrt(STATICS * (2000 / 2300)));
 const rows = Math.ceil(STATICS / cols);
 
-function makeArm(buildPath) {
+function makeArm(buildPath, engineOptions) {
     // eslint-disable-next-line global-require
     const Matter = require(buildPath);
     const { Engine, Composite, Bodies, Body, Detector } = Matter;
     Detector._mode = process.env.MODE || 'gridStatic';
 
-    const engine = Engine.create({ enableSleeping: false });
+    const engine = Engine.create(Object.assign({ enableSleeping: false }, engineOptions));
     const world = engine.world;
 
     // floor + walls so debris piles instead of escaping, TILED so none of them
@@ -82,8 +88,8 @@ const rand = () => {
     return seed / 0x7fffffff;
 };
 
-const base = makeArm(path.resolve(baselinePath));
-const work = makeArm(path.resolve(workPath));
+const base = makeArm(path.resolve(baselinePath), BASE_OPTIONS);
+const work = makeArm(path.resolve(workPath), WORK_OPTIONS);
 
 const order = base.tiles.map((_, index) => index);
 for (let i = order.length - 1; i > 0; i--) {
@@ -168,30 +174,15 @@ function churnBoth() {
     }
 }
 
-// bit equality, but NaN matching NaN counts as equal: a tile released flush
-// against its neighbours can blow up in this synthetic scene, and what is being
-// tested is whether the two arms agree, not whether the scene is well behaved
-const same = (x, y) => x === y || (x !== x && y !== y);
-
+// every body field, NaN matching NaN (see bench/lib/state.js)
 function compare(step) {
-    const baseBodies = base.Matter.Composite.allBodies(base.world);
-    const workBodies = work.Matter.Composite.allBodies(work.world);
+    const result = compareBodies({
+        baseBodies: base.Matter.Composite.allBodies(base.world),
+        workBodies: work.Matter.Composite.allBodies(work.world),
+        compareSolved: COMPARE_SOLVED
+    });
 
-    if (baseBodies.length !== workBodies.length) {
-        return `step ${step}: body count ${baseBodies.length} vs ${workBodies.length}`;
-    }
-
-    for (let i = 0; i < baseBodies.length; i++) {
-        const a = baseBodies[i];
-        const b = workBodies[i];
-        if (!same(a.position.x, b.position.x) || !same(a.position.y, b.position.y) || !same(a.angle, b.angle)) {
-            return `step ${step}: body ${i} (id ${a.id}/${b.id}) `
-                + `pos ${a.position.x},${a.position.y} vs ${b.position.x},${b.position.y} `
-                + `angle ${a.angle} vs ${b.angle}`;
-        }
-    }
-
-    return null;
+    return result.divergent === 0 ? null : `step ${step}: ${result.first}`;
 }
 
 const delta = 1000 / 60;
@@ -257,4 +248,4 @@ const workBest = meanOfBest(workBlocks, takeBest);
 
 console.log(`churn: ${STATICS} statics, ${RELEASE_PER_STEP} released/step, ${steps} steps`);
 console.log(`  best-${takeBest}: base ${baseBest.toFixed(1)}us  work ${workBest.toFixed(1)}us  delta ${(100 * (workBest - baseBest) / baseBest).toFixed(2)}%`);
-console.log(`  equivalence: ${divergence === null ? 'IDENTICAL' : 'DIVERGED -> ' + divergence}`);
+console.log(`  equivalence: ${divergence === null ? 'IDENTICAL' : 'DIVERGED -> ' + divergence}${COMPARE_SOLVED ? '' : ' (not compared: ' + SOLVED_FIELDS_NOTE + ')'}`);

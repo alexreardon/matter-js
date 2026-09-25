@@ -17,12 +17,14 @@
 //   RELEASE=<n>     statics released per frame  (default 12)
 //   STATICS=<n>     static tile count           (default 5000)
 //   UPDATES=<n>     measured frames            (default 900)
+//   ENGINE_OPTIONS=<json>  extra Engine.create options (see bench/lib/state.js)
 "use strict";
 
 const buildPath = process.argv[2] || '../src/module/main.js';
 const Matter = require(buildPath);
 const { Engine, Composite, Bodies, Body, Detector, Pairs, Resolver, Collision } = Matter;
 const { addTiledBound, assertBoundsBucketed } = require('./lib/bounds');
+const { readEngineOptions } = require('./lib/state');
 
 const MODE = process.env.MODE || 'gridStatic';
 const STATICS = Number(process.env.STATICS || 5000);
@@ -68,7 +70,7 @@ const rand = () => {
     return seed / 0x7fffffff;
 };
 
-const engine = Engine.create({ enableSleeping: false });
+const engine = Engine.create(Object.assign({ enableSleeping: false }, readEngineOptions('ENGINE_OPTIONS')));
 const world = engine.world;
 
 // floor + walls so debris piles instead of escaping, TILED so none of them is
