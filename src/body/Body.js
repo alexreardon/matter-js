@@ -134,6 +134,10 @@ var Axes = require('../geometry/Axes');
             _stamp: 0,
             _gsStamp: 0,
             _ov: false,
+            // no writer or reader since squeeze-10 (the gridStatic oversize
+            // flag moved to the detector's flat `mOver` array in 67ec902, and
+            // its per-step write was dead from then). Still declared so the
+            // in-object layout of every field after it does not shift
             _ovD: false,
             _solverStamp: 0,
             // slot index into the resolver's flat solver arrays (valid only

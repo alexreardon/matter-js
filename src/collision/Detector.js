@@ -962,7 +962,7 @@ var Collision = require('./Collision');
      * fires only on static-membership changes, a stored index could point at the
      * wrong body or past the array end on a later step; a reference cannot.
      *
-     * Every per-body field this path writes (`_sPrev`, `_gsStamp`, `_ovD`,
+     * Every per-body field this path writes (`_sPrev`, `_gsStamp`,
      * `_gridDynamic`, `_sc*`, `_s*` index membership) is pre-declared in
      * `Body.create`; see the rule there before introducing a new one (a lazily
      * added field splits body hidden classes and slows the whole engine,
@@ -1296,7 +1296,6 @@ var Collision = require('./Collision');
             mStamp[mIns] = -1;
 
             if ((dcx1 - dcx0 + 1) * (dcy1 - dcy0 + 1) > maxCells) {
-                dbody._ovD = true;
                 mOver[mIns] = 1;
                 dOver.push(mIns);
                 // an unwalkable span, so the insert pass skips this mover
@@ -1305,7 +1304,6 @@ var Collision = require('./Collision');
                 continue;
             }
 
-            dbody._ovD = false;
             mOver[mIns] = 0;
             dSpan[spanBase] = dcx0;
             dSpan[spanBase + 1] = dcx1;
