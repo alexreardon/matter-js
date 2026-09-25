@@ -93,7 +93,7 @@ These are load-bearing; each has cost real time when broken.
 
 | command | covers |
 | --- | --- |
-| `npm run test-unit` | Body, Engine, Detector, Determinism, Shape, Version |
+| `npm run test-unit` | Body, Engine, Detector, Pairs, Determinism, Shape, Version, DeadWrites |
 | `npm run audit-shapes` | V8 natives: one body map per population, no dictionary-mode objects, no sizeable holey arrays |
 | Examples suite (below) | the 46-example similarity gate |
 | `node bench/grid-correctness.js` | gridStatic vs sweep pair differential, 5 scenes x 5 cell sizes |
