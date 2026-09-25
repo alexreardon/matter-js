@@ -17,7 +17,7 @@
 *    Asserting the last own key equals the factory literal's last key catches
 *    every lazy addition, including one made inside the factory after the
 *    literal (that is exactly how `inverseMass` used to spill out-of-object).
-* 2. UNIFORM KEY ORDER: after a full churn scenario in BOTH broadphase modes,
+* 2. UNIFORM KEY ORDER: after a full churn scenario on BOTH broadphases,
 *    every live object of a kind must share the identical key list.
 *
 * If a spec here fails after you added a field: declare it in the factory
@@ -44,6 +44,7 @@ var LAST_BODY_KEY = '_sOwner';
 var LAST_PAIR_KEY = 'slop';
 var LAST_CONTACT_KEY = 'tangentImpulse';
 var LAST_COLLISION_KEY = 'supportCount';
+var LAST_DETECTOR_KEY = '_sgrid';
 
 function lastKey(object) {
     var keys = Object.keys(object);
@@ -62,11 +63,14 @@ function makeRandom(seed) {
 * A small page-like world driven through every mutation path the game and the
 * examples exercise: settling contacts, churn (release / remove / re-add),
 * static flips, sleeping flips, velocity writes, scaling, a compound body and
-* a sensor, in the given broadphase mode.
+* a sensor, on the given broadphase.
 */
-function runScenario(mode, solved) {
-    var engine = Engine.create({ enableSleeping: mode === 'sweep', enableSolvedVelocityAndBounds: solved });
-    Detector._mode = mode;
+function runScenario(broadphase, solved) {
+    var engine = Engine.create({
+        enableSleeping: broadphase === 'sweep',
+        enableSolvedVelocityAndBounds: solved,
+        detector: Detector.create({ broadphase: broadphase })
+    });
 
     var random = makeRandom(7);
     var world = engine.world;
@@ -132,8 +136,8 @@ function runScenario(mode, solved) {
 
 // the third row is the consumer's configuration, which marks bodies
 // `_boundsStale` in the position post-solve
-describe.each([['sweep', true], ['gridStatic', true], ['gridStatic', false]])('object shapes stay factory-shaped (%s, solved state kept: %s)', function(mode, solved) {
-    var engine = runScenario(mode, solved);
+describe.each([['sweep', true], ['grid', true], ['grid', false]])('object shapes stay factory-shaped (%s, solved state kept: %s)', function(broadphase, solved) {
+    var engine = runScenario(broadphase, solved);
     var bodies = Composite.allBodies(engine.world);
     var pairsList = engine.pairs.list;
 
@@ -169,6 +173,11 @@ describe.each([['sweep', true], ['gridStatic', true], ['gridStatic', false]])('o
         }
     });
 
+    it('the detector gained no field (its grid state is declared in Detector.create)', function() {
+        expect(lastKey(engine.detector)).toBe(LAST_DETECTOR_KEY);
+        expect(Object.keys(engine.detector)).toEqual(Object.keys(Detector.create()));
+    });
+
     it('pairs and records share one key order', function() {
         var pairReference = Object.keys(pairsList[0]).join(',');
         var recordReference = Object.keys(pairsList[0].collision).join(',');
@@ -182,6 +191,11 @@ describe.each([['sweep', true], ['gridStatic', true], ['gridStatic', false]])('o
 describe('factory outputs agree with the pinned last keys', function() {
     it('Body.create', function() {
         expect(lastKey(Bodies.rectangle(0, 0, 40, 20))).toBe(LAST_BODY_KEY);
+    });
+
+    it('Detector.create', function() {
+        expect(lastKey(Detector.create())).toBe(LAST_DETECTOR_KEY);
+        expect(lastKey(Detector.create({ broadphase: 'grid', cellSize: 48 }))).toBe(LAST_DETECTOR_KEY);
     });
 
     it('Pair.create, Contact.create, Collision.create', function() {

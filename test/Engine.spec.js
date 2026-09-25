@@ -365,15 +365,13 @@ describe('Engine body list', () => {
         return hash;
     }
 
-    // a static floor with one mover falling onto it, in gridStatic. The two
+    // a static floor with one mover falling onto it, on the grid. The two
     // bodies that later arrive by direct edit are built BEFORE the priming
     // updates, because building a body bumps the static epoch, which would
     // rebuild the mover lists on its own and hide a missing body-set signal
     function makeScene() {
         Common._nextId = 0;
-        Detector._mode = 'gridStatic';
-        Detector._cellSize = 32;
-        const engine = Engine.create();
+        const engine = Engine.create({ detector: Detector.create({ broadphase: 'grid', cellSize: 32 }) });
         const world = engine.world;
         const floor = [];
         for (let i = 0; i < 10; i++) {
@@ -471,8 +469,6 @@ describe('Engine body list', () => {
     // The child is created in both runs, so both consume the same ids
     function runListeners({ nested, owned = true }) {
         Common._nextId = 0;
-        Detector._mode = 'gridStatic';
-        Detector._cellSize = 32;
 
         const ownBodies = Composite._ownBodies;
         if (!owned) {
@@ -486,7 +482,7 @@ describe('Engine body list', () => {
                 return seed / 0x7fffffff;
             };
 
-            const engine = Engine.create({ enableSleeping: true });
+            const engine = Engine.create({ enableSleeping: true, detector: Detector.create({ broadphase: 'grid', cellSize: 32 }) });
             const world = engine.world;
             const child = Composite.create();
             const everyBody = [];

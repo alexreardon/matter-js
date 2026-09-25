@@ -1,7 +1,7 @@
 /* eslint-env es6, jest */
 "use strict";
 
-// The body journal (see Common._journalTouch): the gridStatic broadphase
+// The body journal (see Common._journalTouch): the grid broadphase
 // classifies a flat world from the bodies recorded as changed instead of
 // walking every body. These specs step two identical worlds in lockstep, one
 // reading its journal and one forced onto the full walk every step (its journal
@@ -32,9 +32,10 @@ function createRandom(seed) {
     };
 }
 
-// one world of the pair: its engine, and every body it was given, by index
+// one world of the pair: its engine on the grid, and every body it was given,
+// by index
 function createArm(options) {
-    const engine = Engine.create({ enableSleeping: Boolean(options.sleeping) });
+    const engine = Engine.create({ enableSleeping: Boolean(options.sleeping), detector: Detector.create({ broadphase: 'grid' }) });
     return { engine, world: engine.world, bodies: [], indexOf: new Map() };
 }
 
@@ -63,12 +64,10 @@ function armState(arm) {
  * `perStep(step, arms, random)` changes it; both act on the two arms alike.
  */
 function runPair({ steps, sleeping, setup, perStep, listen, moverShare }) {
-    const previousMode = Detector._mode;
     const previousShare = Detector._journalMoverShare;
     const readJournal = Detector._classifyFromJournal;
     let journalReads = 0;
 
-    Detector._mode = 'gridStatic';
     // the journal at every mover share unless a spec says otherwise (see
     // Detector._journalMoverShare)
     Detector._journalMoverShare = moverShare === undefined ? 1 : moverShare;
@@ -113,7 +112,6 @@ function runPair({ steps, sleeping, setup, perStep, listen, moverShare }) {
 
         return { journalReads };
     } finally {
-        Detector._mode = previousMode;
         Detector._journalMoverShare = previousShare;
         Detector._classifyFromJournal = readJournal;
     }
@@ -144,7 +142,7 @@ function inWorld(arm, body) {
     return arm.world.bodies.indexOf(body) !== -1;
 }
 
-describe('the gridStatic body journal', () => {
+describe('the grid body journal', () => {
     it('matches the full walk through releases, re-freezes, adds and removals', () => {
         const { journalReads } = runPair({
             steps: 160,
@@ -456,27 +454,21 @@ describe('Composite.removeBodies', () => {
     });
 
     it('keeps the journal live, where a direct edit signalled by setModified switches it off', () => {
-        const engine = Engine.create();
-        const previousMode = Detector._mode;
-        Detector._mode = 'gridStatic';
-        try {
-            const bodies = [];
-            for (let i = 0; i < 40; i++) {
-                bodies.push(Bodies.rectangle(i * 25, 100, 20, 20, { isStatic: true }));
-            }
-            Composite.add(engine.world, bodies);
-            Engine.update(engine, DELTA);
-            expect(engine.world._journalLive).toBe(true);
-
-            Composite.removeBodies(engine.world, [bodies[3], bodies[9]]);
-            expect(engine.world._journalLive).toBe(true);
-            expect(engine.world._touchedCount).toBe(2);
-
-            engine.world.bodies.pop();
-            Composite.setModified(engine.world, true, true, false);
-            expect(engine.world._journalLive).toBe(false);
-        } finally {
-            Detector._mode = previousMode;
+        const engine = Engine.create({ detector: Detector.create({ broadphase: 'grid' }) });
+        const bodies = [];
+        for (let i = 0; i < 40; i++) {
+            bodies.push(Bodies.rectangle(i * 25, 100, 20, 20, { isStatic: true }));
         }
+        Composite.add(engine.world, bodies);
+        Engine.update(engine, DELTA);
+        expect(engine.world._journalLive).toBe(true);
+
+        Composite.removeBodies(engine.world, [bodies[3], bodies[9]]);
+        expect(engine.world._journalLive).toBe(true);
+        expect(engine.world._touchedCount).toBe(2);
+
+        engine.world.bodies.pop();
+        Composite.setModified(engine.world, true, true, false);
+        expect(engine.world._journalLive).toBe(false);
     });
 });

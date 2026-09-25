@@ -1,8 +1,9 @@
 /* eslint-env es6, jest */
 "use strict";
 
-// Unit tests for the static-index grid broadphase (Detector._mode ===
-// 'gridStatic'). Requires the source modules directly (no build step).
+// Unit tests for the static-index grid broadphase (a detector made with
+// `broadphase: 'grid'`), and for how a detector is configured. Requires the
+// source modules directly (no build step).
 //
 // Regression: the candidate-generation pass walked every mover's full
 // bounding-box cell span:
@@ -14,8 +15,8 @@
 // velocity, so a runaway-velocity body gets bounds spanning thousands of cells
 // (millions of Map lookups per step), and an Infinity bound makes
 // `mcx1 = Math.floor(Infinity)` Infinity, so the loop never terminates. The
-// insert pass and the sibling _collisionsGrid both divert oversized bodies to a
-// bounded path; this pass did not. An oversized mover now scans a flat static
+// insert pass and the old rebuild-every-step grid both diverted oversized
+// bodies to a bounded path; this pass did not. An oversized mover now scans a flat static
 // list instead of walking its cell span.
 //
 // Finite-but-large spans are used here (never Infinity): on unfixed code a
@@ -27,6 +28,7 @@ const Bodies = require('../src/factory/Bodies');
 const Composite = require('../src/body/Composite');
 const Body = require('../src/body/Body');
 const Bounds = require('../src/geometry/Bounds');
+const Common = require('../src/core/Common');
 
 const DELTA = 1000 / 60;
 
@@ -66,22 +68,48 @@ function sortedPairKeys(collisions) {
     return collisions.map(pairKey).sort();
 }
 
-describe('Detector gridStatic broadphase', function() {
-    var savedMode = Detector._mode;
-    var savedCellSize = Detector._cellSize;
+// Runs `fn` with every grid broadphase call checked against the sweep over
+// the SAME bodies at the same moment (the grid index persists across calls,
+// which is what can go stale; the sweep reads live bounds). Returns how many
+// grid calls ran and how many confirmed a different set of pairs.
+function checkedAgainstSweep(fn) {
+    var grid = Detector._collisionsGrid;
+    var result = { calls: 0, mismatches: 0, first: null };
 
-    beforeEach(function() {
-        Detector._mode = 'gridStatic';
-        Detector._cellSize = 32;
-    });
+    Detector._collisionsGrid = function(detector) {
+        var collisions = grid(detector);
+        var found = sortedPairKeys(collisions).join(',');
+        var sweep = Detector._collisionsSweep({
+            bodies: detector.bodies.slice(), collisions: [], pairs: null, _bodiesOwned: true
+        });
+        var expected = sortedPairKeys(sweep).join(',');
 
-    afterEach(function() {
-        Detector._mode = savedMode;
-        Detector._cellSize = savedCellSize;
-    });
+        result.calls++;
+        if (found !== expected) {
+            result.mismatches++;
+            result.first = result.first || { call: result.calls, found: found, expected: expected };
+        }
 
+        return collisions;
+    };
+
+    try {
+        fn();
+    } finally {
+        Detector._collisionsGrid = grid;
+    }
+
+    return result;
+}
+
+// an engine on the grid broadphase, at the default cell size
+function createGridEngine() {
+    return Engine.create({ enableSleeping: false, detector: Detector.create({ broadphase: 'grid', cellSize: 32 }) });
+}
+
+describe('Detector grid broadphase', function() {
     test('a mover with a huge bounds span completes quickly and still collides', function() {
-        var engine = Engine.create({ enableSleeping: false });
+        var engine = createGridEngine();
         engine.gravity.x = 0;
         engine.gravity.y = 0;
 
@@ -114,7 +142,7 @@ describe('Detector gridStatic broadphase', function() {
     });
 
     test('an oversized mover collides with a normal static', function() {
-        var engine = Engine.create({ enableSleeping: false });
+        var engine = createGridEngine();
         engine.gravity.x = 0;
         engine.gravity.y = 0;
 
@@ -130,7 +158,7 @@ describe('Detector gridStatic broadphase', function() {
     });
 
     test('an oversized mover collides with a normal mover', function() {
-        var engine = Engine.create({ enableSleeping: false });
+        var engine = createGridEngine();
         engine.gravity.x = 0;
         engine.gravity.y = 0;
 
@@ -144,7 +172,7 @@ describe('Detector gridStatic broadphase', function() {
     });
 
     test('two oversized movers collide exactly once', function() {
-        var engine = Engine.create({ enableSleeping: false });
+        var engine = createGridEngine();
         engine.gravity.x = 0;
         engine.gravity.y = 0;
 
@@ -174,7 +202,7 @@ describe('Detector gridStatic broadphase', function() {
     // set, which never shortens the mover list. Deleting the trim leaves the
     // whole gate set green, which is what this test exists to stop.
     test('a shrinking mover set does not leave stale indices behind', function() {
-        var engine = Engine.create({ enableSleeping: false });
+        var engine = createGridEngine();
         engine.gravity.x = 0;
         engine.gravity.y = 0;
 
@@ -247,12 +275,10 @@ describe('Detector gridStatic broadphase', function() {
                 bodies.push(body);
             }
 
-            Detector._mode = 'sweep';
-            var sweepDetector = Detector.create({ bodies: bodies.slice(), pairs: null });
+            var sweepDetector = Detector.create({ broadphase: 'sweep', bodies: bodies.slice(), pairs: null });
             var sweep = sortedPairKeys(Detector.collisions(sweepDetector));
 
-            Detector._mode = 'gridStatic';
-            var gridDetector = Detector.create({ bodies: bodies.slice(), pairs: null });
+            var gridDetector = Detector.create({ broadphase: 'grid', cellSize: 32, bodies: bodies.slice(), pairs: null });
             var grid = sortedPairKeys(Detector.collisions(gridDetector));
 
             totalCollisions += sweep.length;
@@ -261,5 +287,207 @@ describe('Detector gridStatic broadphase', function() {
 
         // Guard against a degenerate "agrees because nothing ever collides".
         expect(totalCollisions).toBeGreaterThan(50);
+    });
+});
+
+describe('Detector configuration', function() {
+    test('a detector defaults to the sweep at a 32px cell, with its grid state declared', function() {
+        var detector = Detector.create();
+
+        expect(detector.broadphase).toBe('sweep');
+        expect(detector.cellSize).toBe(32);
+        expect(detector._sgrid).toBe(null);
+        // declared, not added on the first grid step
+        expect(Object.keys(detector)).toEqual([
+            'bodies', 'collisions', 'pairs', 'broadphase', 'cellSize', '_bodiesOwned', '_world', '_sgrid'
+        ]);
+        expect(Engine.create().detector.broadphase).toBe('sweep');
+    });
+
+    test('Engine.create runs the detector it is given, with its broadphase and cell size', function() {
+        var detector = Detector.create({ broadphase: 'grid', cellSize: 48 });
+        var engine = Engine.create({ detector: detector });
+        var gridCalls = 0;
+        var grid = Detector._collisionsGrid;
+
+        expect(engine.detector).toBe(detector);
+        expect(detector.pairs).toBe(engine.pairs);
+
+        Composite.add(engine.world, [
+            Bodies.rectangle(100, 100, 40, 40, { isStatic: true }),
+            Bodies.rectangle(100, 70, 20, 20)
+        ]);
+
+        Detector._collisionsGrid = function() {
+            gridCalls++;
+            return grid.apply(this, arguments);
+        };
+        try {
+            Engine.update(engine, DELTA);
+        } finally {
+            Detector._collisionsGrid = grid;
+        }
+
+        expect(gridCalls).toBe(1);
+        expect(engine.detector.broadphase).toBe('grid');
+        expect(engine.detector._sgrid.cellSize).toBe(48);
+    });
+
+    test('an engine-level broadphase option throws rather than being ignored', function() {
+        // upstream's back-compatibility `engine.broadphase` would overwrite it
+        expect(function() { Engine.create({ broadphase: 'grid' }); }).toThrow(/detector/);
+    });
+
+    test.each([['gridStatic'], ['Grid'], [''], [null], [undefined], [1]])('an unknown broadphase %p throws at Detector.create', function(broadphase) {
+        expect(function() { Detector.create({ broadphase: broadphase }); }).toThrow(/unknown broadphase/);
+    });
+
+    test.each([['gridStatic'], [undefined]])('an unknown broadphase %p assigned after create throws at the next step', function(broadphase) {
+        var engine = createGridEngine();
+        Composite.add(engine.world, Bodies.rectangle(100, 100, 40, 40));
+        Engine.update(engine, DELTA);
+
+        engine.detector.broadphase = broadphase;
+        expect(function() { Engine.update(engine, DELTA); }).toThrow(/unknown broadphase/);
+
+        // and a detector made by hand, with no broadphase at all
+        expect(function() { Detector.collisions({ bodies: [], collisions: [], pairs: null }); }).toThrow(/unknown broadphase/);
+    });
+
+    test.each([[0], [-8], [NaN], [Infinity], ['32'], [undefined]])('a cell size of %p throws at create, and at the next grid step', function(cellSize) {
+        expect(function() { Detector.create({ broadphase: 'grid', cellSize: cellSize }); }).toThrow(/cellSize/);
+
+        var engine = createGridEngine();
+        Composite.add(engine.world, Bodies.rectangle(100, 100, 40, 40));
+        Engine.update(engine, DELTA);
+
+        engine.detector.cellSize = cellSize;
+        expect(function() { Engine.update(engine, DELTA); }).toThrow(/cellSize/);
+    });
+
+    test('a cell-size change between updates rebuilds the static index once, and the grid still matches the sweep', function() {
+        var engine = createGridEngine();
+        var random = createRandom(0x51ce);
+        for (var row = 0; row < 8; row++) {
+            for (var col = 0; col < 12; col++) {
+                Composite.add(engine.world, Bodies.rectangle(40 + col * 60, 300 + row * 30, 50, 20, { isStatic: true }));
+            }
+        }
+        for (var index = 0; index < 40; index++) {
+            Composite.add(engine.world, Bodies.rectangle(40 + random() * 700, 100 + random() * 150, 16, 16));
+        }
+
+        var rebuild = jest.spyOn(Detector, '_staticIndexRebuild');
+        var checked = checkedAgainstSweep(function() {
+            for (var step = 0; step < 90; step++) {
+                if (step === 30) {
+                    engine.detector.cellSize = 48;
+                }
+                if (step === 60) {
+                    engine.detector.cellSize = 20;
+                }
+                Engine.update(engine, DELTA);
+            }
+        });
+        var rebuilds = rebuild.mock.calls.length;
+        rebuild.mockRestore();
+
+        // the first step, and once per change
+        expect(rebuilds).toBe(3);
+        expect(engine.detector._sgrid.cellSize).toBe(20);
+        expect(checked.calls).toBe(90);
+        expect(checked.mismatches).toBe(0);
+    });
+
+    // Config lives on the detector and the index on each detector's `_sgrid`,
+    // but several counters are still shared across every engine in the process
+    // (the static and body-set epochs, the walk stamp). Sharing them may cost a
+    // wasted classification; it must never change an answer
+    test('engines with different broadphases and cell sizes, stepped interleaved, each match their solo run', function() {
+        var configs = [
+            { broadphase: 'grid', cellSize: 32 },
+            { broadphase: 'grid', cellSize: 48 },
+            { broadphase: 'sweep', cellSize: 32 },
+            { broadphase: 'grid', cellSize: 20 }
+        ];
+        var steps = 150;
+
+        function createScene(config, seed) {
+            Common._nextId = 0;
+            var engine = Engine.create({ enableSleeping: false, detector: Detector.create(config) });
+            var world = engine.world;
+            var random = createRandom(seed);
+            var tiles = [];
+            var live = [];
+            var tick = 0;
+
+            for (var k = 0; k < 12; k++) {
+                Composite.add(world, Bodies.rectangle(40 + k * 70, 620, 68, 30, { isStatic: true }));
+            }
+            for (var row = 0; row < 10; row++) {
+                for (var col = 0; col < 14; col++) {
+                    // built dynamic then frozen, so a release restores a real mass
+                    var tile = Bodies.rectangle(40 + col * 55 + (row % 2) * 9, 60 + row * 30, 44, 18);
+                    Body.setStatic(tile, true);
+                    Composite.add(world, tile);
+                    tiles.push(tile);
+                }
+            }
+
+            return {
+                step: function() {
+                    tick++;
+                    var released = tiles.splice(Math.floor(random() * tiles.length), 1)[0];
+                    if (released) {
+                        Body.setStatic(released, false);
+                        Body.setVelocity(released, { x: random() * 4 - 2, y: 1 });
+                        live.push({ body: released, born: tick });
+                    }
+                    while (live.length > 0 && tick - live[0].born > 60) {
+                        Composite.remove(world, live.shift().body);
+                    }
+                    Engine.update(engine, DELTA);
+                },
+                state: function() {
+                    return {
+                        bodies: world.bodies.map(function(body) {
+                            return [body.id, body.position.x, body.position.y, body.angle, body.velocity.x, body.velocity.y];
+                        }),
+                        pairs: engine.pairs.list.map(function(pair) { return pair.id; })
+                    };
+                }
+            };
+        }
+
+        var solo = configs.map(function(config, index) {
+            var scene = createScene(config, 1000 + index);
+            var states = [];
+            for (var step = 0; step < steps; step++) {
+                scene.step();
+                states.push(scene.state());
+            }
+            return states;
+        });
+
+        var scenes = configs.map(function(config, index) {
+            return createScene(config, 1000 + index);
+        });
+        var interleaved = configs.map(function() { return []; });
+        for (var step = 0; step < steps; step++) {
+            for (var index = 0; index < scenes.length; index++) {
+                scenes[index].step();
+                interleaved[index].push(scenes[index].state());
+            }
+        }
+
+        for (var check = 0; check < configs.length; check++) {
+            expect(interleaved[check]).toEqual(solo[check]);
+        }
+        // the configurations genuinely differ (the grid re-baselines the sweep,
+        // and its emission order follows the cell size), so an engine reading
+        // another's config would show here
+        expect(solo[0]).not.toEqual(solo[2]);
+        expect(solo[0]).not.toEqual(solo[1]);
+        expect(solo[1]).not.toEqual(solo[3]);
     });
 });

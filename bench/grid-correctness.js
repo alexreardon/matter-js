@@ -73,13 +73,11 @@ function setOf(cols) {
     return set;
 }
 
-function run(name, build, steps, cell, implName, impl, mutate) {
+function run(name, build, steps, cell, mutate) {
     seed = 1234567;
-    Detector._cellSize = cell;
-    // advance the reference simulation via the sweep, independent of whatever
-    // Detector._mode default is set; the impls are compared by direct call
-    Detector._mode = 'sweep';
-    const engine = Engine.create({ enableSleeping: false });
+    // the reference simulation advances on the sweep; the grid under test is a
+    // detector of its own, given the same bodies every step
+    const engine = Engine.create({ enableSleeping: false, detector: Detector.create({ broadphase: 'sweep' }) });
     walls(engine.world);
     build(engine.world);
     const delta = 1000 / 60;
@@ -87,7 +85,8 @@ function run(name, build, steps, cell, implName, impl, mutate) {
     // so the grid's visited-stamp counter increases monotonically and never
     // recycles into stale per-body stamps)
     const sweepDet = { bodies: [], pairs: Pairs.create(), collisions: [] };
-    const gridDet = { bodies: [], pairs: Pairs.create(), collisions: [] };
+    const gridDet = Detector.create({ broadphase: 'grid', cellSize: cell });
+    gridDet.pairs = Pairs.create();
     let maxMiss = 0, maxExtra = 0, firstBadStep = -1, totalChecked = 0;
     const samples = [];
     for (let s = 0; s < steps; s++) {
@@ -97,7 +96,7 @@ function run(name, build, steps, cell, implName, impl, mutate) {
         sweepDet.bodies = bodies.slice(0);
         gridDet.bodies = bodies.slice(0);
         const sweep = setOf(Detector._collisionsSweep(sweepDet));
-        const grid = setOf(impl(gridDet));
+        const grid = setOf(Detector.collisions(gridDet));
         let miss = 0, extra = 0;
         for (const k of sweep) if (!grid.has(k)) { miss++; if (samples.length < 6) samples.push('miss ' + k); }
         for (const k of grid) if (!sweep.has(k)) { extra++; if (samples.length < 6) samples.push('extra ' + k); }
@@ -108,7 +107,7 @@ function run(name, build, steps, cell, implName, impl, mutate) {
     }
     const ok = maxMiss === 0 && maxExtra === 0;
     console.log(
-        `${ok ? 'PASS' : 'FAIL'} ${implName.padEnd(10)} ${name.padEnd(13)} cell=${String(cell).padStart(2)} steps=${steps} | ` +
+        `${ok ? 'PASS' : 'FAIL'} grid ${name.padEnd(13)} cell=${String(cell).padStart(2)} steps=${steps} | ` +
         `checkedPairs~${totalChecked} maxMiss=${maxMiss} maxExtra=${maxExtra}` +
         (firstBadStep >= 0 ? ` firstBadStep=${firstBadStep} [${samples.slice(0, 6).join(', ')}]` : '')
     );
@@ -117,7 +116,7 @@ function run(name, build, steps, cell, implName, impl, mutate) {
 
 // static REMOVAL case (mimics windowing dropping off-screen statics): a static
 // field that shrinks during the run, plus movers colliding against it. Without
-// the static-count guard gridStatic would hold stale index entries for removed
+// the static-count guard the grid would hold stale index entries for removed
 // bodies; with it, it must still match the sweep.
 function makeRemovalCase() {
     const statics = [];
@@ -146,7 +145,7 @@ function makeRemovalCase() {
 
 // moving-static (inner-scroll) case: a body that is isStatic but MOVES each
 // frame (like a destructible inside a scrolling container repositioned by
-// syncScrollSurfaces). Tagged `_gridDynamic` so v2 treats it as a mover and it
+// syncScrollSurfaces). Tagged `_gridDynamic` so the grid treats it as a mover and it
 // never goes stale in the static index. It sweeps through the fixed page (must
 // skip static-static) and the falling debris (must detect).
 function makeMovingStaticCase() {
@@ -172,20 +171,15 @@ function makeMovingStaticCase() {
     return { build, mutate };
 }
 
-const impls = [
-    ['gridStatic', Detector._collisionsGridStatic]
-];
 let allOk = true;
-for (const [implName, impl] of impls) {
-    for (const cell of [16, 24, 32, 48, 64]) {
-        allOk = run('denseBullets', sceneDenseBullets, 400, cell, implName, impl) && allOk;
-        allOk = run('fallingMixed', sceneFallingMixed, 500, cell, implName, impl) && allOk;
-        allOk = run('pileStack', scenePileStack, 400, cell, implName, impl) && allOk;
-        const removal = makeRemovalCase();
-        allOk = run('removeStatics', removal.build, 300, cell, implName, impl, removal.mutate) && allOk;
-        const moving = makeMovingStaticCase();
-        allOk = run('movingStatic', moving.build, 300, cell, implName, impl, moving.mutate) && allOk;
-    }
+for (const cell of [16, 24, 32, 48, 64]) {
+    allOk = run('denseBullets', sceneDenseBullets, 400, cell) && allOk;
+    allOk = run('fallingMixed', sceneFallingMixed, 500, cell) && allOk;
+    allOk = run('pileStack', scenePileStack, 400, cell) && allOk;
+    const removal = makeRemovalCase();
+    allOk = run('removeStatics', removal.build, 300, cell, removal.mutate) && allOk;
+    const moving = makeMovingStaticCase();
+    allOk = run('movingStatic', moving.build, 300, cell, moving.mutate) && allOk;
 }
 console.log(allOk ? '\nALL SCENES IDENTICAL ✓' : '\nDIVERGENCE DETECTED ✗');
 process.exit(allOk ? 0 : 1);

@@ -37,6 +37,14 @@ var Body = require('../body/Body');
     Engine.create = function(options) {
         options = options || {};
 
+        // the broadphase is the DETECTOR's (see Detector.create). An engine
+        // option by that name is overwritten by the back-compatibility
+        // `engine.broadphase` below, so the engine would quietly run the sweep
+        if (typeof options.broadphase === 'string') {
+            throw new Error('Matter.Engine: the broadphase is set on the detector, e.g. '
+                + "Engine.create({ detector: Detector.create({ broadphase: '" + options.broadphase + "' }) })");
+        }
+
         var defaults = {
             positionIterations: 6,
             velocityIterations: 4,
@@ -162,7 +170,7 @@ var Body = require('../body/Body');
         }
 
         // a flat world's own array: its body journal describes changes to it,
-        // which the gridStatic broadphase reads instead of walking every body
+        // which the grid broadphase reads instead of walking every body
         // (see Common._journalTouch)
         detector._world = lendsBodies ? world : null;
 
@@ -201,7 +209,7 @@ var Body = require('../body/Body');
             engine._moverEpoch = staticEpoch;
             engine._moverSetEpoch = setEpoch;
 
-            // for a flat world the gridStatic classification and the body
+            // for a flat world the grid classification and the body
             // journal usually say what changed, which spares the walk (see
             // Detector._moversFromJournal)
             if (!(lendsBodies && Detector._moversFromJournal(detector, world, moverBodies))) {
@@ -705,7 +713,9 @@ var Body = require('../body/Body');
      */
 
     /**
-     * A `Matter.Detector` instance.
+     * A `Matter.Detector` instance. Pass one as `options.detector` to choose
+     * the broadphase: `Engine.create({ detector: Detector.create({ broadphase: 'grid' }) })`
+     * (see `Detector.create`).
      *
      * @property detector
      * @type detector

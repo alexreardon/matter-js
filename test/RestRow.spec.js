@@ -98,8 +98,6 @@ function run({ restRow = true, options = {}, beforeUpdate = null } = {}) {
     try {
         return withProbes((probe) => {
             Common._nextId = 0;
-            Detector._mode = 'gridStatic';
-            Detector._cellSize = 32;
 
             let seed = 13579;
             const rand = () => {
@@ -107,7 +105,7 @@ function run({ restRow = true, options = {}, beforeUpdate = null } = {}) {
                 return seed / 0x7fffffff;
             };
 
-            const engine = Engine.create(Object.assign({ enableSleeping: false }, options));
+            const engine = Engine.create(Object.assign({ enableSleeping: false, detector: Detector.create({ broadphase: 'grid', cellSize: 32 }) }, options));
             const world = engine.world;
 
             // a resting floor and a page of resting tiles

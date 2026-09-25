@@ -118,7 +118,7 @@ var Axes = require('../geometry/Axes');
             deltaTime: 1000 / 60,
             _original: null,
             // per-step scratch stamps and flags used by the broadphase
-            // (grid/gridStatic modes), the resolver body collection, and the
+            // (the grid), the resolver body collection, and the
             // page-destroyer moving-static tag. Pre-declared so every body
             // shares one hidden class: adding any of these lazily at first use
             // splits body object shapes and degrades every hot property access
@@ -129,7 +129,7 @@ var Axes = require('../geometry/Axes');
             // hold, never assigned onto a body for the first time elsewhere.
             //
             // Classification-walk cluster: the per-step walk in
-            // Detector._collisionsGridStatic touches every one of these for
+            // Detector._collisionsGrid touches every one of these for
             // every body in the world, so they are declared adjacently
             // (declaration order fixes the in-object layout) to land on as few
             // cache lines as possible. isStatic / isSleeping live here rather
@@ -152,14 +152,14 @@ var Axes = require('../geometry/Axes');
             // or `Body._updateStaleBounds` recomputes them. Never cleared by
             // integration (that would be a store per mover per update), which
             // is safe because the recompute is idempotent on fresh bounds.
-            // (This slot held the dead gridStatic `_ovD` flag, so reusing it
+            // (This slot held the dead grid `_ovD` flag, so reusing it
             // leaves the in-object layout of every field after it unchanged.)
             _boundsStale: false,
             _solverStamp: 0,
             // slot index into the resolver's flat solver arrays (valid only
             // while _solverStamp matches the current solver epoch)
             _solverIndex: 0,
-            // gridStatic static-candidate cache (see Detector._collisionsGridStatic;
+            // grid static-candidate cache (see Detector._collisionsGrid;
             // _scEpoch is up in the classification-walk cluster)
             _scStatic: false,
             // the cell span the list was built for. The span is read out of a
@@ -177,7 +177,7 @@ var Axes = require('../geometry/Axes');
             // test loop reads contiguous memory instead of dereferencing every
             // candidate's bounds objects
             _scBounds: null,
-            // gridStatic static-index membership (see
+            // grid static-index membership (see
             // Detector._staticIndexInsert). _sBuckets holds the cell buckets
             // this body's reference sits in, so it can be removed from them
             // without recomputing anything; an EMPTY array means an oversized
@@ -506,7 +506,7 @@ var Axes = require('../geometry/Axes');
             part._restStatic = Common._isRestingStatic(part);
         }
 
-        // invalidate the cached mover lists in Engine and the gridStatic
+        // invalidate the cached mover lists in Engine and the grid
         // broadphase (see Common._bodyStaticEpoch), and record the body in its
         // world's body journal (see Common._journalTouch)
         Common._bodyStaticEpoch++;

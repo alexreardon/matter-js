@@ -13,7 +13,7 @@
 //     solver/broadphase regression moves them well past EPS; a float-reordering
 //     micro-optimisation stays under it. EPS (not bit-exact) is the bar on
 //     purpose, so an intended reordering opt does not force a re-bless. The
-//     gridStatic run is the guard for the perf broadphase: it must reproduce the
+//     grid run is the guard for the perf broadphase: it must reproduce the
 //     trusted sweep pose (today it is bit-identical).
 //
 //   Tier 2 (chaotic scene, statistical only): a tumbling pile. Its exact pose is
@@ -42,12 +42,10 @@ const DELTA = 1000 / 60;
 const EPS = 1e-6;
 
 // Runs a scene to rest and returns its bodies. gravity is pinned so the golden
-// values are reproducible; the broadphase mode is a parameter so the same scene
-// can be checked under both sweep and the perf gridStatic index.
-function run({ steps, mode, setup }) {
-    Detector._mode = mode;
-    Detector._cellSize = 32;
-    const engine = Engine.create();
+// values are reproducible; the broadphase is a parameter so the same scene can
+// be checked under both the sweep and the perf grid index.
+function run({ steps, broadphase, setup }) {
+    const engine = Engine.create({ detector: Detector.create({ broadphase, cellSize: 32 }) });
     engine.gravity.x = 0;
     engine.gravity.y = 1;
     engine.gravity.scale = 0.001;
@@ -133,20 +131,20 @@ const RAMP_GOLDEN = [
 
 describe('Tier 1: non-chaotic regression guards (pinned pose, epsilon)', () => {
     test('a 5-box stack settles to the pinned pose (sweep)', () => {
-        const bodies = run({ steps: 180, mode: 'sweep', setup: buildStack });
+        const bodies = run({ steps: 180, broadphase: 'sweep', setup: buildStack });
         expectPose(bodies, STACK_GOLDEN);
     });
 
-    // The perf-broadphase guard: gridStatic must reproduce the trusted sweep
-    // pose. Detector.spec.js already proves gridStatic finds the same PAIRS as
-    // sweep; this proves the same pairs produce the same settled STATE.
-    test('the same stack under gridStatic matches the sweep pose', () => {
-        const bodies = run({ steps: 180, mode: 'gridStatic', setup: buildStack });
+    // The perf-broadphase guard: the grid must reproduce the trusted sweep
+    // pose. Detector.spec.js already proves the grid finds the same PAIRS as
+    // the sweep; this proves the same pairs produce the same settled STATE.
+    test('the same stack under the grid matches the sweep pose', () => {
+        const bodies = run({ steps: 180, broadphase: 'grid', setup: buildStack });
         expectPose(bodies, STACK_GOLDEN);
     });
 
     test('a box slides down a ramp to the pinned pose (sweep)', () => {
-        const bodies = run({ steps: 60, mode: 'sweep', setup: buildRamp });
+        const bodies = run({ steps: 60, broadphase: 'sweep', setup: buildRamp });
         expectPose(bodies, RAMP_GOLDEN);
     });
 });
@@ -155,7 +153,7 @@ describe('Tier 2: chaotic scene, statistical invariants only', () => {
     // The exact pose is deliberately NOT asserted here (it is not reproducible;
     // see Tier 3). Only physical sanity is.
     test('a tumbling pile stays finite, bounded, and unexploded', () => {
-        const bodies = run({ steps: 240, mode: 'sweep', setup: buildTumble({ perturb: 0 }) });
+        const bodies = run({ steps: 240, broadphase: 'sweep', setup: buildTumble({ perturb: 0 }) });
         expect(bodies).toHaveLength(3);
         bodies.forEach((body) => {
             expect(Number.isFinite(body.position.x)).toBe(true);
@@ -175,9 +173,9 @@ describe('Tier 2: chaotic scene, statistical invariants only', () => {
 
 describe('Tier 3: the tumbling scene is chaotic (documents why Tier 2 is statistical)', () => {
     test('the engine is deterministic, but a 1e-9 nudge amplifies to pixels', () => {
-        const baseline = poses(run({ steps: 240, mode: 'sweep', setup: buildTumble({ perturb: 0 }) }));
-        const repeat = poses(run({ steps: 240, mode: 'sweep', setup: buildTumble({ perturb: 0 }) }));
-        const perturbed = poses(run({ steps: 240, mode: 'sweep', setup: buildTumble({ perturb: 1e-9 }) }));
+        const baseline = poses(run({ steps: 240, broadphase: 'sweep', setup: buildTumble({ perturb: 0 }) }));
+        const repeat = poses(run({ steps: 240, broadphase: 'sweep', setup: buildTumble({ perturb: 0 }) }));
+        const perturbed = poses(run({ steps: 240, broadphase: 'sweep', setup: buildTumble({ perturb: 1e-9 }) }));
 
         // Determinism: identical inputs reproduce bit-for-bit. This is the
         // property the whole approach relies on.

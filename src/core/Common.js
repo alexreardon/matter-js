@@ -21,7 +21,7 @@ module.exports = Common;
      * Counter bumped whenever any body's moving-vs-resting classification
      * changes: `Body.setStatic`, `Sleeping.set` and `Detector.setGridDynamic`.
      *
-     * `Engine.update` and the `gridStatic` broadphase both need the list of
+     * `Engine.update` and the grid broadphase both need the list of
      * moving bodies each step, and building it means touching every body in the
      * world. On a dense static page (thousands of intact tiles, a few hundred
      * movers) that walk is memory-bound and became one of the largest single
@@ -48,7 +48,7 @@ module.exports = Common;
      * `Engine.update` hands a world with no child composites to its passes and
      * its detector as `world.bodies` ITSELF (see `Composite._ownBodies`), so
      * the array's identity no longer changes when its membership does, and the
-     * two mover classifications (`Engine.update`, and the `gridStatic`
+     * two mover classifications (`Engine.update`, and the grid
      * broadphase) key on this instead. Every membership change bumps it: a
      * direct edit through `setModified`, which is the only signal such a
      * caller gives, and `Composite`'s own add and remove through
@@ -61,7 +61,7 @@ module.exports = Common;
     Common._bodySetEpoch = 0;
 
     /**
-     * The stamp of the last full classification walk of any `gridStatic`
+     * The stamp of the last full classification walk of any grid
      * detector. One counter for every detector, so a stamp names one walk of
      * one world, which is what lets it serve as a membership generation (see
      * `_journalTouch`).
@@ -85,7 +85,7 @@ module.exports = Common;
      * Records `body` in its world's body journal, if it is a member of a world
      * that keeps one.
      *
-     * The journal is how the `gridStatic` broadphase learns what changed in a
+     * The journal is how the grid broadphase learns what changed in a
      * flat world without walking every body in it. Once a detector has
      * classified a world in full, the world keeps the list of bodies whose
      * membership or moving-vs-resting role may have changed since

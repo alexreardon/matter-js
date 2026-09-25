@@ -109,8 +109,6 @@ const SOLVED_OFF = { enableSolvedVelocityAndBounds: false };
 
 function run({ options = {}, consumer = null, refreeze = true, pauseEvery = 0, atStepEnd = null } = {}) {
     Common._nextId = 0;
-    Detector._mode = 'gridStatic';
-    Detector._cellSize = 32;
 
     let seed = 24681;
     const rand = () => {
@@ -118,7 +116,7 @@ function run({ options = {}, consumer = null, refreeze = true, pauseEvery = 0, a
         return seed / 0x7fffffff;
     };
 
-    const engine = Engine.create(Object.assign({ enableSleeping: false }, options));
+    const engine = Engine.create(Object.assign({ enableSleeping: false, detector: Detector.create({ broadphase: 'grid', cellSize: 32 }) }, options));
     const world = engine.world;
     for (let i = 0; i < 12; i++) {
         Composite.add(world, Bodies.rectangle(40 + i * 80, 700, 80, 40, { isStatic: true }));

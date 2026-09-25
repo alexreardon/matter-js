@@ -63,9 +63,12 @@ function makeRandom(seed) {
 
 // the churny page-like world from test/Shape.spec.js, driven through release,
 // removal, re-add, scaling, sleeping and grid-dynamic tagging
-function runScenario(mode, solved) {
-    Detector._mode = mode;
-    var engine = Engine.create({ enableSleeping: mode === 'sweep', enableSolvedVelocityAndBounds: solved });
+function runScenario(broadphase, solved) {
+    var engine = Engine.create({
+        enableSleeping: broadphase === 'sweep',
+        enableSolvedVelocityAndBounds: solved,
+        detector: Detector.create({ broadphase: broadphase })
+    });
     var random = makeRandom(7);
     var world = engine.world;
     var statics = [];
@@ -237,10 +240,10 @@ function auditHoleyArrays(mode, engine) {
     }
 }
 
-// the third scenario is the consumer's configuration: gridStatic with the
+// the third scenario is the consumer's configuration: the grid with the
 // end-of-update velocity and bounds refresh off, which is what marks bodies
 // `_boundsStale` in the position post-solve
-[['sweep', true], ['gridStatic', true], ['gridStatic', false]].forEach(function(scenario) {
+[['sweep', true], ['grid', true], ['grid', false]].forEach(function(scenario) {
     var mode = scenario[0] + (scenario[1] ? '' : ' (solved state off)');
     var engine = runScenario(scenario[0], scenario[1]);
     var bodies = Composite.allBodies(engine.world);

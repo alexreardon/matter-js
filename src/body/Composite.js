@@ -48,7 +48,7 @@ var Body = require('./Body');
             // whether `Engine.update` is holding `bodies` itself as the
             // update's body list (see Composite._ownBodies)
             _bodiesLent: false,
-            // the body journal a `gridStatic` detector reads instead of
+            // the body journal a grid detector reads instead of
             // walking every body (see Common._journalTouch): the bodies touched
             // since it last read, filled by index up to `_touchedCount`;
             // whether the list is complete; the stamp of the full walk that
@@ -385,7 +385,7 @@ var Body = require('./Body');
             body.positionImpulse.x = 0;
             body.positionImpulse.y = 0;
 
-            // Tell the gridStatic broadphase this body left the world. It
+            // Tell the grid broadphase this body left the world. It
             // notices a departure on its own by stamping bodies as it walks
             // them, but that cannot see a body removed and added back before
             // the next walk, which keeps its place in the static index while
@@ -458,7 +458,7 @@ var Body = require('./Body');
      *
      * Prefer this to editing `composite.bodies` and calling
      * `Composite.setModified`: it records the removals in the body journal,
-     * so a `gridStatic` detector need not walk every body to find them.
+     * so a grid detector need not walk every body to find them.
      * @method removeBodies
      * @param {composite} composite
      * @param {body[]} bodies

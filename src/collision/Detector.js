@@ -15,6 +15,14 @@ var Collision = require('./Collision');
 
     /**
      * Creates a new collision detector.
+     *
+     * The broadphase is chosen per detector, with `broadphase` (`'sweep'`, the
+     * default, or `'grid'`) and, for the grid, `cellSize`. To run an engine on
+     * the grid, give it a detector made for it:
+     *
+     *     Engine.create({ detector: Detector.create({ broadphase: 'grid' }) })
+     *
+     * Any other `broadphase` throws, here and on every `Detector.collisions`.
      * @method create
      * @param {} options
      * @return {detector} A new collision detector
@@ -24,17 +32,81 @@ var Collision = require('./Collision');
             bodies: [],
             collisions: [],
             pairs: null,
+            // which broadphase `Detector.collisions` runs (see there)
+            broadphase: 'sweep',
+            // the grid's cell size in pixels, read by the grid broadphase only.
+            // Tune it to roughly the typical static body's size
+            cellSize: 32,
             // whether `bodies` is a private copy the sweep may sort in place
             // (see Detector.setBodies)
             _bodiesOwned: true,
             // the world whose own body array `bodies` is, set by
-            // `Engine.update` for a flat world: the gridStatic broadphase then
-            // reads that world's body journal instead of walking every body
-            // (see Common._journalTouch). Null for a detector used on its own
-            _world: null
+            // `Engine.update` for a flat world: the grid broadphase then reads
+            // that world's body journal instead of walking every body (see
+            // Common._journalTouch). Null for a detector used on its own
+            _world: null,
+            // the grid broadphase's state, made on its first step (see
+            // Detector._collisionsGrid)
+            _sgrid: null
         };
 
-        return Common.extend(defaults, options);
+        var detector = Common.extend(defaults, options);
+
+        if (!Detector._isBroadphase(detector.broadphase)) {
+            throw Detector._broadphaseError(detector.broadphase);
+        }
+
+        if (!Detector._isCellSize(detector.cellSize)) {
+            throw Detector._cellSizeError(detector.cellSize);
+        }
+
+        return detector;
+    };
+
+    /**
+     * Whether `broadphase` names a broadphase `Detector.collisions` runs.
+     * @private
+     * @method _isBroadphase
+     * @param {} broadphase
+     * @return {boolean}
+     */
+    Detector._isBroadphase = function(broadphase) {
+        return broadphase === 'sweep' || broadphase === 'grid';
+    };
+
+    /**
+     * Whether `cellSize` is a cell size the grid can use: a finite number of
+     * pixels above zero.
+     * @private
+     * @method _isCellSize
+     * @param {} cellSize
+     * @return {boolean}
+     */
+    Detector._isCellSize = function(cellSize) {
+        return typeof cellSize === 'number' && cellSize > 0 && cellSize < Infinity;
+    };
+
+    /**
+     * The error for a detector whose `broadphase` names no broadphase.
+     * @private
+     * @method _broadphaseError
+     * @param {} broadphase
+     * @return {Error}
+     */
+    Detector._broadphaseError = function(broadphase) {
+        return new Error('Matter.Detector: unknown broadphase ' + String(broadphase)
+            + ", expected 'sweep' or 'grid' (e.g. Detector.create({ broadphase: 'grid' }))");
+    };
+
+    /**
+     * The error for a detector whose `cellSize` the grid cannot use.
+     * @private
+     * @method _cellSizeError
+     * @param {} cellSize
+     * @return {Error}
+     */
+    Detector._cellSizeError = function(cellSize) {
+        return new Error('Matter.Detector: cellSize must be a finite number above 0, got ' + String(cellSize));
     };
 
     /**
@@ -69,7 +141,7 @@ var Collision = require('./Collision');
     };
 
     /**
-     * Tags a body as grid-dynamic, meaning the `gridStatic` broadphase treats it
+     * Tags a body as grid-dynamic, meaning the grid broadphase treats it
      * as a mover (re-indexed every step) even while `isStatic` is `true`. This is
      * what a static body that MOVES (an inner-scroll surface tracking the page)
      * needs, since the persistent static index would otherwise hold it at its
@@ -205,36 +277,36 @@ var Collision = require('./Collision');
     };
 
     /**
-     * Default broadphase mode. `'sweep'` is the classic sort-and-sweep (the
-     * baseline). `'grid'` uses a uniform spatial grid that stays robust on the
-     * dense, column-aligned static fields page-destroyer produces. The grid
-     * emits collisions in a different but still deterministic order, so it is a
-     * re-baseline of the simulation, not bit-identical to the sweep.
-     */
-    Detector._mode = 'sweep';
-
-    /**
-     * Uniform grid cell size in pixels (grid mode only). Tunable per workload.
-     */
-    Detector._cellSize = 32;
-
-    /**
-     * Finds all collisions among `detector.bodies` using the configured
-     * broadphase mode (`Detector._mode`).
+     * Finds all collisions among `detector.bodies` using the detector's
+     * broadphase, `detector.broadphase`:
+     *
+     * - `'sweep'` is upstream's sort-and-sweep, and the default.
+     * - `'grid'` indexes static and sleeping bodies once and keeps the index
+     *   as bodies come and go, so each step costs about the MOVING bodies, not
+     *   the world (see `Detector._collisionsGrid`). It emits collisions in a
+     *   different but still deterministic order, so it is a re-baseline of the
+     *   simulation, not bit-identical to the sweep.
+     *
+     * Anything else throws, on every call rather than only at
+     * `Detector.create`: the config is a plain field a caller can assign, and a
+     * detector quietly falling back to the sweep is the failure this exists to
+     * rule out. Two string compares per step are free.
      * @method collisions
      * @param {detector} detector
      * @return {collision[]} collisions
      */
     Detector.collisions = function(detector) {
-        if (Detector._mode === 'gridStatic') {
-            return Detector._collisionsGridStatic(detector);
-        }
+        var broadphase = detector.broadphase;
 
-        if (Detector._mode === 'grid') {
+        if (broadphase === 'grid') {
             return Detector._collisionsGrid(detector);
         }
 
-        return Detector._collisionsSweep(detector);
+        if (broadphase === 'sweep') {
+            return Detector._collisionsSweep(detector);
+        }
+
+        throw Detector._broadphaseError(broadphase);
     };
 
     /**
@@ -286,200 +358,8 @@ var Collision = require('./Collision');
     };
 
     /**
-     * Uniform-grid broadphase. Buckets every body into fixed-size cells, then
-     * generates candidate pairs only from shared cells. Alloc-light: bucket
-     * arrays and the touched-key list are reused across frames; dedup uses a
-     * per-body visited stamp; a body spanning more than `maxCells` cells goes in
-     * an oversized overflow list tested against all others. Deterministic
-     * emission order (outer body-array order, then cell scan order).
-     * @private
-     * @method _collisionsGrid
-     * @param {detector} detector
-     * @return {collision[]} collisions
-     */
-    Detector._collisionsGrid = function(detector) {
-        var bodies = detector.bodies,
-            n = bodies.length,
-            pairs = detector.pairs,
-            canCollide = Detector.canCollide,
-            collisions = detector.collisions,
-            collisionIndex = 0,
-            cellSize = Detector._cellSize || 32,
-            invCell = 1 / cellSize;
-
-        var grid = detector._grid;
-        if (!grid) {
-            grid = detector._grid = {
-                buckets: new Map(),
-                usedKeys: [],
-                oversized: [],
-                stamp: 1
-            };
-        }
-
-        var buckets = grid.buckets,
-            usedKeys = grid.usedKeys,
-            oversized = grid.oversized,
-            usedKeysLength = usedKeys.length,
-            i, cx, cy, u;
-
-        // reset frame: empty only the buckets touched last frame (keep the array
-        // objects in the Map for reuse, so steady state does not allocate)
-        for (u = 0; u < usedKeysLength; u++) {
-            var stale = buckets.get(usedKeys[u]);
-            if (stale !== undefined) {
-                stale.length = 0;
-            }
-        }
-        usedKeys.length = 0;
-        oversized.length = 0;
-
-        // a body spanning more than this many cells is tested against all others
-        var maxCells = 24,
-            // integer cell-key packing; offset keeps negative cells non-negative.
-            // Safe while |cell index| < 2^20 (coords within ~+/-16M px at 16px).
-            keyOffset = 0x100000,
-            keyStride = 0x200000;
-
-        // insert pass
-        for (i = 0; i < n; i++) {
-            var body = bodies[i],
-                bounds = body.bounds,
-                cx0 = Math.floor(bounds.min.x * invCell),
-                cx1 = Math.floor(bounds.max.x * invCell),
-                cy0 = Math.floor(bounds.min.y * invCell),
-                cy1 = Math.floor(bounds.max.y * invCell);
-
-            if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) > maxCells) {
-                body._ov = true;
-                oversized.push(i);
-                continue;
-            }
-            body._ov = false;
-
-            for (cx = cx0; cx <= cx1; cx++) {
-                var keyX = (cx + keyOffset) * keyStride;
-                for (cy = cy0; cy <= cy1; cy++) {
-                    var key = keyX + (cy + keyOffset),
-                        bucket = buckets.get(key);
-
-                    if (bucket === undefined) {
-                        bucket = [];
-                        buckets.set(key, bucket);
-                    }
-                    if (bucket.length === 0) {
-                        usedKeys.push(key);
-                    }
-                    bucket.push(i);
-                }
-            }
-        }
-
-        // candidate generation: each body pairs with higher-index bodies sharing
-        // a cell (the visited stamp dedups bodies found via multiple cells)
-        for (i = 0; i < n; i++) {
-            var bodyA = bodies[i];
-            if (bodyA._ov) {
-                continue;
-            }
-
-            var boundsA = bodyA.bounds,
-                aMinX = boundsA.min.x, aMaxX = boundsA.max.x,
-                aMinY = boundsA.min.y, aMaxY = boundsA.max.y,
-                aStatic = bodyA.isStatic || bodyA.isSleeping,
-                filterA = bodyA.collisionFilter,
-                localStamp = ++grid.stamp,
-                acx0 = Math.floor(aMinX * invCell),
-                acx1 = Math.floor(aMaxX * invCell),
-                acy0 = Math.floor(aMinY * invCell),
-                acy1 = Math.floor(aMaxY * invCell);
-
-            for (cx = acx0; cx <= acx1; cx++) {
-                var akX = (cx + keyOffset) * keyStride;
-                for (cy = acy0; cy <= acy1; cy++) {
-                    var occupants = buckets.get(akX + (cy + keyOffset));
-                    if (occupants === undefined) {
-                        continue;
-                    }
-
-                    for (var oi = 0; oi < occupants.length; oi++) {
-                        var j = occupants[oi];
-                        if (j <= i) {
-                            continue;
-                        }
-
-                        var bodyB = bodies[j];
-                        if (bodyB._stamp === localStamp) {
-                            continue;
-                        }
-                        bodyB._stamp = localStamp;
-
-                        if (aStatic && (bodyB.isStatic || bodyB.isSleeping)) {
-                            continue;
-                        }
-
-                        var boundsB = bodyB.bounds;
-                        if (aMaxX < boundsB.min.x || aMinX > boundsB.max.x
-                            || aMaxY < boundsB.min.y || aMinY > boundsB.max.y) {
-                            continue;
-                        }
-
-                        if (!canCollide(filterA, bodyB.collisionFilter)) {
-                            continue;
-                        }
-
-                        collisionIndex = Detector._testPair(bodyA, bodyB, pairs, collisions, collisionIndex);
-                    }
-                }
-            }
-        }
-
-        // oversized pass: each oversized body tested against all others (deduped
-        // oversized-vs-oversized by index). Few of these, so O(oversized * n)
-        var oversizedLength = oversized.length;
-        for (var oa = 0; oa < oversizedLength; oa++) {
-            var ia = oversized[oa],
-                ovA = bodies[ia],
-                ovBoundsA = ovA.bounds,
-                ovStaticA = ovA.isStatic || ovA.isSleeping,
-                ovFilterA = ovA.collisionFilter;
-
-            for (var jb = 0; jb < n; jb++) {
-                if (jb === ia) {
-                    continue;
-                }
-
-                var ovB = bodies[jb];
-                if (ovB._ov && jb < ia) {
-                    continue;
-                }
-                if (ovStaticA && (ovB.isStatic || ovB.isSleeping)) {
-                    continue;
-                }
-
-                var ovBoundsB = ovB.bounds;
-                if (ovBoundsA.max.x < ovBoundsB.min.x || ovBoundsA.min.x > ovBoundsB.max.x
-                    || ovBoundsA.max.y < ovBoundsB.min.y || ovBoundsA.min.y > ovBoundsB.max.y) {
-                    continue;
-                }
-                if (!canCollide(ovFilterA, ovB.collisionFilter)) {
-                    continue;
-                }
-
-                collisionIndex = Detector._testPair(ovA, ovB, pairs, collisions, collisionIndex);
-            }
-        }
-
-        if (collisions.length !== collisionIndex) {
-            collisions.length = collisionIndex;
-        }
-
-        return collisions;
-    };
-
-    /**
      * Creates an open-addressing hash table mapping packed cell keys to bucket
-     * arrays, replacing `Map` for the gridStatic cell indexes. Linear probing
+     * arrays, replacing `Map` for the grid's cell indexes. Linear probing
      * over two flat parallel arrays: `keys` (Float64Array; the packed cell key
      * `(cx + offset) * stride + (cy + offset)` is always positive within the
      * coordinate contract, so `0` marks an empty slot) and `vals` (the bucket
@@ -537,7 +417,7 @@ var Collision = require('./Collision');
 
     /**
      * Per-axis cap on the mover cell index (see the insert pass in
-     * `_collisionsGridStatic`): `1 << _maxCellShift` cells, so the flat index is
+     * `_collisionsGrid`): `1 << _maxCellShift` cells, so the flat index is
      * never larger than `1 << (2 * _maxCellShift)` slots. A mover spread wider
      * than this wraps into the same slots, which stays correct because chain
      * entries carry their cell key.
@@ -675,7 +555,7 @@ var Collision = require('./Collision');
             buckets = body._sBuckets = [];
         } else {
             // popped rather than `length = 0`, as the candidate list in
-            // `_collisionsGridStatic` is: no StoreIC call, capacity kept
+            // `_collisionsGrid` is: no StoreIC call, capacity kept
             while (buckets.length !== 0) {
                 buckets.pop();
             }
@@ -711,7 +591,7 @@ var Collision = require('./Collision');
         // invalidates every cached list at once
         if (g.built) {
             // filled BY INDEX up to `g.changedCount`, never cleared (see the
-            // invalidation sweep in `_collisionsGridStatic`)
+            // invalidation sweep in `_collisionsGrid`)
             var changed = g.changedCells,
                 changedAt = g.changedCount;
             for (cx = cx0; cx <= cx1; cx++) {
@@ -951,7 +831,7 @@ var Collision = require('./Collision');
 
     /**
      * The largest share of a world's bodies that may be movers for the
-     * gridStatic broadphase (and so the engine) to read the body journal
+     * grid broadphase (and so the engine) to read the body journal
      * rather than walk. Above it the full walks run, as before the journal.
      *
      * The journal removes the same work at any share, and the phase timers
@@ -1001,7 +881,7 @@ var Collision = require('./Collision');
 
     /**
      * Classifies from `world`'s body journal: the answer the full walk in
-     * `_collisionsGridStatic` gives, from the bodies that changed since the
+     * `_collisionsGrid` gives, from the bodies that changed since the
      * last classification rather than from every body in the world.
      *
      * Each journal entry is re-read against the body's state NOW, so the
@@ -1156,7 +1036,7 @@ var Collision = require('./Collision');
     /**
      * Builds `Engine.update`'s mover list (every body in `world` that is
      * neither static nor sleeping, in body order) into `moverBodies` from
-     * what the gridStatic classification already knows, instead of walking
+     * what the grid classification already knows, instead of walking
      * every body, and returns whether it could.
      *
      * The detector's mover list is exact for the world as its last
@@ -1310,7 +1190,7 @@ var Collision = require('./Collision');
     };
 
     /**
-     * The full classification walk of `_collisionsGridStatic`: every body in
+     * The full classification walk of `_collisionsGrid`: every body in
      * `bodies` classified as a mover or a static, the static index told what
      * changed, and the body journal restarted from the walk when it can be.
      * Writes `g.movers`, `g.pendingAdd`, `g.staticCount`, and in
@@ -1473,10 +1353,10 @@ var Collision = require('./Collision');
     };
 
     /**
-     * Static-index uniform-grid broadphase. The win over `_collisionsGrid`: the
-     * static field (intact page) is bucketed ONCE and reused; only dynamic
-     * bodies (movers) are re-bucketed each step, and only movers drive candidate
-     * generation. Static-static pairs are never visited (no resolved collision
+     * The grid broadphase (`detector.broadphase === 'grid'`): a uniform grid
+     * with a static index. The static field (intact page) is bucketed ONCE and
+     * reused; only dynamic bodies (movers) are re-bucketed each step, and only
+     * movers drive candidate generation. Static-static pairs are never visited (no resolved collision
      * can be static-static), so a calm page costs ~O(movers) per step instead of
      * O(all bodies) like the sweep. Re-baseline: emission order differs from the
      * sweep but is deterministic.
@@ -1494,6 +1374,10 @@ var Collision = require('./Collision');
      * fires only on static-membership changes, a stored index could point at the
      * wrong body or past the array end on a later step; a reference cannot.
      *
+     * The consumer greps its built bundle for this function's NAME to prove it
+     * shipped this fork rather than upstream, so renaming it breaks that
+     * build, loudly and on purpose.
+     *
      * Every per-body field this path writes (`_sPrev`, `_gsStamp`,
      * `_gridDynamic`, `_sc*`, `_s*` index membership) is pre-declared in
      * `Body.create`; see the rule there before introducing a new one (a lazily
@@ -1501,23 +1385,23 @@ var Collision = require('./Collision');
      * measured 1.3-4.8x).
      *
      * Because that state lives on the BODY rather than on the detector, a body
-     * belongs to one gridStatic detector at a time. Sharing bodies between two
+     * belongs to one grid detector at a time. Sharing bodies between two
      * engines was already unsupported here (the candidate cache and the
      * broadphase stamps have the same constraint); the static index membership
      * simply makes it explicit.
      * @private
-     * @method _collisionsGridStatic
+     * @method _collisionsGrid
      * @param {detector} detector
      * @return {collision[]} collisions
      */
-    Detector._collisionsGridStatic = function(detector) {
+    Detector._collisionsGrid = function(detector) {
         var bodies = detector.bodies,
             n = bodies.length,
             pairs = detector.pairs,
             canCollide = Detector.canCollide,
             collisions = detector.collisions,
             collisionIndex = 0,
-            cellSize = Detector._cellSize || 32,
+            cellSize = detector.cellSize,
             invCell = 1 / cellSize,
             keyOffset = 0x100000,
             keyStride = 0x200000,
@@ -1592,8 +1476,13 @@ var Collision = require('./Collision');
         // a cell-size change invalidates every bucket key, including the
         // persistent static index built under the old size; force a rebuild
         // (without this, live cell-size tuning queries stale static buckets
-        // and silently misses mover-vs-static collisions)
+        // and silently misses mover-vs-static collisions). A cell size is
+        // checked here, where one is first seen, so a bad one assigned to
+        // `detector.cellSize` throws rather than indexing nothing
         if (g.cellSize !== cellSize) {
+            if (!Detector._isCellSize(cellSize)) {
+                throw Detector._cellSizeError(cellSize);
+            }
             g.cellSize = cellSize;
             g.built = false;
         }
@@ -1956,7 +1845,7 @@ var Collision = require('./Collision');
             // span here is unbounded: a runaway-velocity body can span thousands
             // of cells, and an Infinity bound makes `mcx1`/`mcy1` Infinity, so
             // `for (cx = ...; cx <= Infinity; cx++)` would never terminate (the
-            // hang this guard fixes). Mirror _collisionsGrid: scan the flat
+            // hang this guard fixes). Scan the flat
             // static list for normal statics it overlaps, a bounded O(statics).
             // Normal movers find THIS body via their own oversized pass (it is
             // in dOver); oversized statics/movers are handled by the sOver/dOver
@@ -2248,6 +2137,24 @@ var Collision = require('./Collision');
      * @property pairs
      * @type {pairs|null}
      * @default null
+     */
+
+    /**
+     * The broadphase `Detector.collisions` runs: `'sweep'` (upstream's sort and
+     * sweep) or `'grid'` (a static index, for worlds of mostly static bodies).
+     * Anything else throws. It may be changed between updates.
+     * @property broadphase
+     * @type string
+     * @default 'sweep'
+     */
+
+    /**
+     * The grid broadphase's cell size in pixels: a finite number above `0`,
+     * tuned to roughly the typical static body's size. It may be changed
+     * between updates, which rebuilds the grid's static index once.
+     * @property cellSize
+     * @type number
+     * @default 32
      */
 
 })();

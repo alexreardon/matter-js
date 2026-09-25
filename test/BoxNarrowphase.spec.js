@@ -180,7 +180,7 @@ describe('directed sweep: every search direction, aimed at the ties', () => {
 // and a trapezoid) so the general search also runs through `collides`.
 function buildScene({ rotatedStatics }) {
     const random = makeRandom(97531);
-    const engine = Engine.create({ enableSleeping: false, enableSolvedVelocityAndBounds: false });
+    const engine = Engine.create({ enableSleeping: false, enableSolvedVelocityAndBounds: false, detector: Detector.create({ broadphase: 'grid' }) });
     const world = engine.world;
 
     Composite.add(world, [
@@ -331,7 +331,6 @@ function runShadowDifferential({ rotatedStatics, mutant, steps }) {
     };
 
     try {
-        Detector._mode = 'gridStatic';
         const scene = buildScene({ rotatedStatics });
 
         for (let i = 0; i < steps; i++) {
@@ -354,15 +353,10 @@ describe.each([
     ['axis-aligned statics', false],
     ['rotated statics', true]
 ])('shadow differential in a storm-shaped churn scene (%s)', (label, rotatedStatics) => {
-    const previousMode = Detector._mode;
     let result;
 
     beforeAll(() => {
         result = runShadowDifferential({ rotatedStatics, mutant: MUTANTS.none, steps: 240 });
-    });
-
-    afterAll(() => {
-        Detector._mode = previousMode;
     });
 
     it('tagged every box in the world', () => {
@@ -384,12 +378,6 @@ describe.each([
 });
 
 describe('the differential catches a wrong box search', () => {
-    const previousMode = Detector._mode;
-
-    afterAll(() => {
-        Detector._mode = previousMode;
-    });
-
     it('half extents read crossed over', () => {
         const result = runShadowDifferential({ rotatedStatics: true, mutant: MUTANTS.swapHalves, steps: 120 });
         expect(result.counters.first + result.counters.second).toBeGreaterThan(0);

@@ -104,7 +104,7 @@ var Common = require('./Common');
         var wasSleeping = body.isSleeping;
 
         if (wasSleeping !== isSleeping) {
-            // invalidate the cached mover lists in Engine and the gridStatic
+            // invalidate the cached mover lists in Engine and the grid
             // broadphase (see Common._bodyStaticEpoch), and record the body in
             // its world's body journal (see Common._journalTouch). Recorded
             // before the flag flips, which is fine: the reader reads the flag
