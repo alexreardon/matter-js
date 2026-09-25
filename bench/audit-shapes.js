@@ -11,7 +11,8 @@
 //   2. Out-of-object field spill / map splits: bodies not sharing one map
 //      pay polymorphic access everywhere (`inverseMass` et al).
 //   3. Dictionary-mode objects: a deleted or mass-assigned property drops an
-//      object off fast properties entirely.
+//      object off fast properties entirely. Checked on bodies, pairs,
+//      collisions and, since squeeze-10, every Matter MODULE object.
 //
 // Usage (the natives syntax REQUIRES the flag):
 //   npm run audit-shapes
@@ -160,6 +161,40 @@ function auditFastProperties(mode, engine, bodies) {
     }
 }
 
+// every Matter module object must hold fast properties. A module in dictionary
+// mode turns each hot `Module.fn(...)` load TurboFan cannot constant-fold into a
+// generic LoadIC call, on every call site engine-wide. This is how `Matter.Body`
+// sat for every source load through Node until squeeze-10: a circular require
+// during its file's load (see the tail of src/body/Body.js) routed its property
+// stores through the generic path. It also biases every in-process A/B, which
+// loads both arms from source, towards whichever arm happens to be fast.
+function auditModuleObjects() {
+    var names = Object.keys(Matter);
+    var audited = 0;
+
+    if (!hasFastProperties(Matter)) {
+        fail('the Matter namespace object fell to dictionary-mode properties');
+    }
+
+    for (var i = 0; i < names.length; i++) {
+        var value = Matter[names[i]];
+        if (value === null || typeof value !== 'object') {
+            continue;
+        }
+        audited += 1;
+        if (!hasFastProperties(value)) {
+            fail('Matter.' + names[i] + ' is in dictionary mode (' + Object.keys(value).length
+                + ' properties); every hot load through it is a generic LoadIC');
+        }
+    }
+
+    if (audited < 25) {
+        fail('module audit under-ran: only ' + audited + ' Matter module objects found');
+    }
+
+    console.log('modules: ' + audited + ' Matter module objects audited');
+}
+
 // walk everything reachable from the engine and flag any sizeable plain array
 // with a holey backing store. Threshold skips tiny cold arrays (supports,
 // parts) where holes cannot matter.
@@ -218,6 +253,10 @@ function auditHoleyArrays(mode, engine) {
     console.log(mode + ': ' + bodies.length + ' bodies, '
         + engine.pairs.list.length + ' live pairs audited');
 });
+
+// after the scenarios, so a module knocked into dictionary mode at run time is
+// caught as well as one that loaded that way (the state is sticky)
+auditModuleObjects();
 
 if (failures.length > 0) {
     console.error('\naudit-shapes FAILED:');

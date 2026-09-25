@@ -13,7 +13,8 @@ module.exports = Body;
 
 var Vertices = require('../geometry/Vertices');
 var Vector = require('../geometry/Vector');
-var Sleeping = require('../core/Sleeping');
+// assigned after the IIFE below, see there
+var Sleeping;
 var Common = require('../core/Common');
 var Bounds = require('../geometry/Bounds');
 var Axes = require('../geometry/Axes');
@@ -1738,3 +1739,14 @@ var Axes = require('../geometry/Axes');
      */
 
 })();
+
+// Sleeping requires Body back. Requiring it before the IIFE above makes that a
+// circular require WHILE Body is still empty, and Node's CommonJS loader then
+// gives Body's exports a temporary warning-proxy prototype for the rest of this
+// file's load. Every `Body.x = ...` store above would take the generic
+// [[Set]] path, and V8 drops an object built that way to dictionary mode at
+// around its 20th property, so every `Body.update` / `Body._baseDelta` load in
+// the engine became a generic LoadIC. Bundled builds were never affected; only
+// a source load through Node (every A/B bench) was. `npm run audit-shapes`
+// fails on any Matter module object in dictionary mode.
+Sleeping = require('../core/Sleeping');
