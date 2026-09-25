@@ -162,10 +162,16 @@ var Axes = require('../geometry/Axes');
             // gridStatic static-candidate cache (see Detector._collisionsGridStatic;
             // _scEpoch is up in the classification-walk cluster)
             _scStatic: false,
-            _scCx0: 0,
-            _scCx1: 0,
-            _scCy0: 0,
-            _scCy1: 0,
+            // the cell span the list was built for. The span is read out of a
+            // Float64Array, so these hold doubles, and they are declared as
+            // doubles (NaN): with a small-integer default, the first store
+            // generalizes the field in V8 and DEPRECATES the map of every body
+            // built before it, each of which then keeps the old map until
+            // something next reads it. Never read while `_scList` is null
+            _scCx0: NaN,
+            _scCx1: NaN,
+            _scCy0: NaN,
+            _scCy1: NaN,
             _scList: null,
             // the candidate bounds captured alongside _scList, so the per-step
             // test loop reads contiguous memory instead of dereferencing every
