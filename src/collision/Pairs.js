@@ -38,18 +38,15 @@ var Common = require('../core/Common');
             // means the pair is live and its record is the value, so a probe
             // hit is the record reuse and a miss means a fresh record.
             //
-            // Keys: 0 is empty, -1 is a tombstone left by an ended pair
-            // (`Pairs._recordRemove`); a real pair id is always >= 1. Values
-            // are pre-filled with null so the backing store stays packed.
+            // Keys: 0 is empty; a real pair id is always >= 1. Linear probing
+            // with BACKWARD-SHIFT deletion (`Pairs._recordRemove`), so there
+            // are no tombstones: every non-zero key is a live pair. Values are
+            // pre-filled with null so the backing store stays packed.
             _recordKeys: new Float64Array(Pairs._initialSize),
             _recordValues: new Array(Pairs._initialSize).fill(null),
             _recordMask: Pairs._initialSize - 1,
-            // slots whose key is non-zero (live or tombstone); tombstone reuse
-            // keeps it flat, so it only grows on a write into an empty slot
-            _recordUsed: 0,
-            // live entries only; drives the grow-vs-rehash decision, because a
-            // churning world retires pairs constantly and the tombstones they
-            // leave must not read as fullness
+            // live entries, which with no tombstones is also every occupied
+            // slot; the table doubles when it would pass half load
             _recordLive: 0
         }, options);
     };
@@ -62,14 +59,13 @@ var Common = require('../core/Common');
      * @param {collision} collision
      */
     Pairs._recordInsert = function(pairs, pairId, collision) {
-        if ((pairs._recordUsed + 1) * 2 > pairs._recordMask + 1) {
+        if ((pairs._recordLive + 1) * 2 > pairs._recordMask + 1) {
             Pairs._recordGrow(pairs);
         }
 
         var keys = pairs._recordKeys,
             mask = pairs._recordMask,
             slot = Pair.hash(collision.bodyA.id, collision.bodyB.id) & mask,
-            firstTombstone = -1,
             key;
 
         while ((key = keys[slot]) !== 0) {
@@ -78,17 +74,7 @@ var Common = require('../core/Common');
                 return;
             }
 
-            if (key === -1 && firstTombstone === -1) {
-                firstTombstone = slot;
-            }
-
             slot = (slot + 1) & mask;
-        }
-
-        if (firstTombstone !== -1) {
-            slot = firstTombstone;
-        } else {
-            pairs._recordUsed += 1;
         }
 
         keys[slot] = pairId;
@@ -97,8 +83,12 @@ var Common = require('../core/Common');
     };
 
     /**
-     * Removes an ended pair's record from the record table, leaving a
-     * tombstone so later probe chains stay intact.
+     * Removes an ended pair's record from the record table by backward-shift
+     * deletion: every later entry of the same probe cluster that may legally
+     * sit in the vacated slot moves back into it, and the last slot vacated
+     * that way is emptied. No tombstone is left, so probe chains never walk
+     * over dead slots and the table never needs a same-size purge (which on a
+     * page being destroyed was a ~262 KB reallocation every ~53 steps).
      * @method _recordRemove
      * @param {pairs} pairs
      * @param {number} pairId
@@ -106,14 +96,37 @@ var Common = require('../core/Common');
      */
     Pairs._recordRemove = function(pairs, pairId, pair) {
         var keys = pairs._recordKeys,
+            values = pairs._recordValues,
             mask = pairs._recordMask,
             slot = Pair.hash(pair.bodyA.id, pair.bodyB.id) & mask,
             key;
 
         while ((key = keys[slot]) !== 0) {
             if (key === pairId) {
-                keys[slot] = -1;
-                pairs._recordValues[slot] = null;
+                var gap = slot,
+                    next = (slot + 1) & mask,
+                    nextKey;
+
+                while ((nextKey = keys[next]) !== 0) {
+                    var record = values[next],
+                        home = Pair.hash(record.bodyA.id, record.bodyB.id) & mask;
+
+                    // an entry may move back into the gap only if its home
+                    // slot is not cyclically inside (gap, next], i.e. it sits
+                    // at least as far from its home as the gap is from it.
+                    // Moving one whose home is after the gap would put it
+                    // before its home, where a probe can never reach it
+                    if (((next - home) & mask) >= ((next - gap) & mask)) {
+                        keys[gap] = nextKey;
+                        values[gap] = record;
+                        gap = next;
+                    }
+
+                    next = (next + 1) & mask;
+                }
+
+                keys[gap] = 0;
+                values[gap] = null;
                 pairs._recordLive -= 1;
                 return;
             }
@@ -123,10 +136,9 @@ var Common = require('../core/Common');
     };
 
     /**
-     * Rebuilds the record table, re-inserting live records and dropping
-     * tombstones. Keeps the size when tombstones are what filled it (the
-     * churn regime retires pairs every step) and doubles only when live
-     * entries genuinely need the room.
+     * Doubles the record table and re-inserts every entry. Only a table past
+     * half load of LIVE pairs reaches here, since deletion leaves no
+     * tombstones to purge.
      * @method _recordGrow
      * @param {pairs} pairs
      */
@@ -134,7 +146,7 @@ var Common = require('../core/Common');
         var oldKeys = pairs._recordKeys,
             oldValues = pairs._recordValues,
             oldSize = oldKeys.length,
-            size = (pairs._recordLive + 1) * 4 > oldSize ? oldSize * 2 : oldSize,
+            size = oldSize * 2,
             mask = size - 1,
             keys = new Float64Array(size),
             values = new Array(size).fill(null),
@@ -143,7 +155,7 @@ var Common = require('../core/Common');
         for (var i = 0; i < oldSize; i += 1) {
             var key = oldKeys[i];
 
-            if (key === 0 || key === -1) {
+            if (key === 0) {
                 continue;
             }
 
@@ -162,7 +174,6 @@ var Common = require('../core/Common');
         pairs._recordKeys = keys;
         pairs._recordValues = values;
         pairs._recordMask = mask;
-        pairs._recordUsed = used;
         pairs._recordLive = used;
     };
 
@@ -271,7 +282,6 @@ var Common = require('../core/Common');
     Pairs.clear = function(pairs) {
         pairs._recordKeys.fill(0);
         pairs._recordValues.fill(null);
-        pairs._recordUsed = 0;
         pairs._recordLive = 0;
         pairs.list.length = 0;
         pairs.collisionStart.length = 0;

@@ -93,8 +93,8 @@ var Pair = require('./Pair');
                 recordSlot = Pair.hash(idA, idB) & recordMask,
                 recordKey;
 
-            // tombstones (-1) match neither the pair id nor the empty sentinel,
-            // so the probe walks straight over them
+            // linear probe to the first empty slot; deletion shifts entries
+            // back rather than leaving tombstones, so every key walked is live
             while ((recordKey = recordKeys[recordSlot]) !== 0) {
                 if (recordKey === pairId) {
                     collision = pairs._recordValues[recordSlot];
