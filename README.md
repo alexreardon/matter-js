@@ -230,6 +230,7 @@ Each change was A/B'd on its own, in almost every case against the previous rele
 In both modes:
 
 - Change `body.isStatic` / `body.isSleeping` through `Body.setStatic` / `Sleeping.set` (which is what upstream documents anyway). Direct assignment leaves cached mover lists stale.
+- Likewise, change a STATIC body's `position`, `positionPrev`, `angle`, `anglePrev` or `inverseInertia` through the `Body` methods (`setPosition`, `setVelocity`, `setAngle`, `setMass`, `Body.set` and so on), never by assigning the field. The velocity solver gives a static that is not moving a constant zero row without reading the body, on the strength of a flag those methods keep (`Common._isRestingStatic`); a direct assignment that gives a static a velocity leaves the flag stale, and the solver then treats that static as still.
 - A resting body's `force` / `torque` is only zeroed once it starts moving again. Unchanged when sleeping is enabled.
 - `Matter.version` reports the fork tag (`0.20.0-perf18`) rather than `0.20.0`, so a consumer can assert in CI that it resolved the release it pinned. Version RANGES are unaffected (`^0.20.0` and `~0.20.0` still match, since `Plugin.versionSatisfies` compares major/minor/patch and ignores the suffix); only a plugin pinning the exact string `matter-js@0.20.0` would stop matching.
 - `pair.id` is a number rather than a string.

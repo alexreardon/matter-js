@@ -38,7 +38,52 @@ module.exports = Common;
      * change). Matter has always documented those flags as setter-owned.
      */
     Common._bodyStaticEpoch = 0;
-    
+
+    /**
+     * Whether the velocity solver may read `body` as the REST row: a static
+     * body whose `position - positionPrev` and `angle - anglePrev` are each
+     * exactly `+0` and whose `inverseInertia` is exactly `+0`.
+     *
+     * Such a body contributes a velocity of exactly `+0` at every contact
+     * point and a `+0` inertia term to every contact share, whatever its
+     * position, so `Resolver.preSolveVelocity` writes it a constant zero row
+     * without reading the body (see there). Every `Body` method that writes
+     * one of those fields stores the answer in `body._restStatic`, as does the
+     * position correction in `Resolver`.
+     *
+     * Each difference must be `+0`, not merely equal to zero: `-0` is equal to
+     * zero, and a `-0` velocity can reach a solved value as a `-0` where the
+     * zero row gives `+0`. A non-finite position fails too, since its
+     * difference is `NaN`.
+     *
+     * Contract: the same as `_bodyStaticEpoch` above. Code that assigns
+     * `position`, `positionPrev`, `angle`, `anglePrev` or `inverseInertia` of a
+     * static body directly, instead of through the `Body` methods, leaves the
+     * flag stale.
+     * @private
+     * @method _isRestingStatic
+     * @param {body} body
+     * @return {boolean}
+     */
+    Common._isRestingStatic = function(body) {
+        if (body.isStatic !== true) {
+            return false;
+        }
+
+        var position = body.position,
+            positionPrev = body.positionPrev,
+            inverseInertia = body.inverseInertia,
+            deltaX = position.x - positionPrev.x,
+            deltaY = position.y - positionPrev.y,
+            deltaAngle = body.angle - body.anglePrev;
+
+        // `1 / d` is `Infinity` for `+0` only (`-Infinity` for `-0`)
+        return deltaX === 0 && 1 / deltaX === Infinity
+            && deltaY === 0 && 1 / deltaY === Infinity
+            && deltaAngle === 0 && 1 / deltaAngle === Infinity
+            && inverseInertia === 0 && 1 / inverseInertia === Infinity;
+    };
+
     /**
      * Extends the object in the first argument using the object in the second argument.
      * @method extend

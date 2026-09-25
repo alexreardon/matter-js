@@ -362,6 +362,13 @@ var Bounds = require('../geometry/Bounds');
         body.positionPrev.x += positionImpulseX;
         body.positionPrev.y += positionImpulseY;
 
+        // a static carrying an impulse (frozen while it held one) moves
+        // position and positionPrev together, which keeps the rest row for a
+        // finite impulse; a moving body reads one false flag here
+        if (body._restStatic === true) {
+            body._restStatic = Common._isRestingStatic(body);
+        }
+
         if (positionImpulseX * velocity.x + positionImpulseY * velocity.y < 0) {
             // reset cached impulse if the body has velocity along it
             positionImpulse.x = 0;
@@ -527,6 +534,11 @@ var Bounds = require('../geometry/Bounds');
                 body.positionPrev.x += positionImpulseX;
                 body.positionPrev.y += positionImpulseY;
 
+                // see _postSolveBody
+                if (body._restStatic === true) {
+                    body._restStatic = Common._isRestingStatic(body);
+                }
+
                 if (positionImpulseX * velocity.x + positionImpulseY * velocity.y < 0) {
                     // reset cached impulse if the body has velocity along it
                     positionImpulse.x = 0;
@@ -650,8 +662,35 @@ var Bounds = require('../geometry/Bounds');
             // one is NOT aliased: positions moved during the position solve,
             // and a constraint pass can wake bodies between the phases.
             for (i = 0; i < bodyCount; i++) {
-                var vBody = solverBodies[i],
-                    vBodyPosition = vBody.position,
+                var vBody = solverBodies[i];
+
+                // a resting static (see Common._isRestingStatic), about half
+                // the slots on a dense page, gets the constant zero row instead
+                // of a read of the body. Its real row has a velocity of exactly
+                // +0 and an inverse inertia of exactly +0, and every read of
+                // the row is either gated by bCanMove (0 here) or multiplies an
+                // offset by that +0 angular velocity or inertia. The zero
+                // position makes those offsets absolute rather than relative,
+                // which changes nothing: a finite offset times +0 is a zero the
+                // +0 velocity absorbs, and a non-finite one is NaN in both.
+                // (The two part only where a coordinate is within a factor of
+                // two of the largest double, where the relative offset
+                // overflows.) bInvMass is read only under bCanMove, but is
+                // still written: skipping it could leave a hole in the array
+                if (vBody._restStatic === true) {
+                    bPosX[i] = 0;
+                    bPosY[i] = 0;
+                    bPosPrevX[i] = 0;
+                    bPosPrevY[i] = 0;
+                    bAngle[i] = 0;
+                    bAnglePrev[i] = 0;
+                    bInvMass[i] = 0;
+                    bInvInertia[i] = 0;
+                    bCanMove[i] = 0;
+                    continue;
+                }
+
+                var vBodyPosition = vBody.position,
                     vBodyPositionPrev = vBody.positionPrev;
                 bPosX[i] = vBodyPosition.x;
                 bPosY[i] = vBodyPosition.y;

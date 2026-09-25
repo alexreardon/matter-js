@@ -210,7 +210,14 @@ var Axes = require('../geometry/Axes');
             // Body.setVertices/setParts/scale and the inlined rotate in
             // Body.setPositionAndAngle)
             _sp: null,
-            _spValid: false
+            _spValid: false,
+            // whether the velocity solver may take this body's row as the
+            // constant REST row without reading the body: static, not moving,
+            // and an inverse inertia of exactly +0 (see
+            // Common._isRestingStatic). Written by every method below that
+            // changes one of those, and by the position correction in
+            // Resolver. Declared LAST so every field above keeps its place
+            _restStatic: false
         };
 
         var body = Common.extend(defaults, options);
@@ -375,6 +382,12 @@ var Axes = require('../geometry/Axes');
             default:
                 body[property] = value;
 
+                // a plain assignment can be to a field the rest row stands
+                // for (`positionPrev`, `anglePrev`, `inverseInertia`)
+                if (body._restStatic === true) {
+                    body._restStatic = Common._isRestingStatic(body);
+                }
+
             }
         }
     };
@@ -469,6 +482,11 @@ var Axes = require('../geometry/Axes');
             part.torque = 0;
 
             part.isStatic = isStatic;
+
+            // freezing establishes the rest row (positionPrev and anglePrev
+            // were just set to position and angle, and inverseInertia to 0)
+            // unless the position is not finite; releasing clears it
+            part._restStatic = Common._isRestingStatic(part);
         }
 
         // invalidate the cached mover lists in Engine and the gridStatic
@@ -490,6 +508,8 @@ var Axes = require('../geometry/Axes');
         body.mass = mass;
         body.inverseMass = 1 / body.mass;
         body.density = body.mass / body.area;
+
+        body._restStatic = Common._isRestingStatic(body);
     };
 
     /**
@@ -513,6 +533,8 @@ var Axes = require('../geometry/Axes');
     Body.setInertia = function(body, inertia) {
         body.inertia = inertia;
         body.inverseInertia = 1 / body.inertia;
+
+        body._restStatic = Common._isRestingStatic(body);
     };
 
     /**
@@ -786,6 +808,8 @@ var Axes = require('../geometry/Axes');
 
         // `position` no longer sits at the centre of the vertices
         Body._updateBoxTag(body);
+
+        body._restStatic = Common._isRestingStatic(body);
     };
 
     /**
@@ -817,6 +841,8 @@ var Axes = require('../geometry/Axes');
             Vertices.translate(part.vertices, delta);
             Bounds.update(part.bounds, part.vertices, body.velocity);
         }
+
+        body._restStatic = Common._isRestingStatic(body);
     };
 
     /**
@@ -848,6 +874,8 @@ var Axes = require('../geometry/Axes');
                 Vector.rotateAbout(part.position, delta, body.position, part.position);
             }
         }
+
+        body._restStatic = Common._isRestingStatic(body);
     };
 
     /**
@@ -965,6 +993,8 @@ var Axes = require('../geometry/Axes');
         bounds.max.x = maxX;
         bounds.min.y = minY;
         bounds.max.y = maxY;
+
+        body._restStatic = Common._isRestingStatic(body);
     };
 
     /**
@@ -981,6 +1011,8 @@ var Axes = require('../geometry/Axes');
         body.velocity.x = (body.position.x - body.positionPrev.x) / timeScale;
         body.velocity.y = (body.position.y - body.positionPrev.y) / timeScale;
         body.speed = Vector.magnitude(body.velocity);
+
+        body._restStatic = Common._isRestingStatic(body);
     };
 
     /**
@@ -1032,6 +1064,8 @@ var Axes = require('../geometry/Axes');
         body.anglePrev = body.angle - velocity * timeScale;
         body.angularVelocity = (body.angle - body.anglePrev) / timeScale;
         body.angularSpeed = Math.abs(body.angularVelocity);
+
+        body._restStatic = Common._isRestingStatic(body);
     };
 
     /**
@@ -1153,6 +1187,10 @@ var Axes = require('../geometry/Axes');
 
             // update bounds
             Bounds.update(part.bounds, part.vertices, body.velocity);
+
+            // scaling about any point but the position moves the position
+            // without positionPrev
+            part._restStatic = Common._isRestingStatic(part);
         }
 
         // handle parent body
@@ -1208,6 +1246,13 @@ var Axes = require('../geometry/Axes');
         body.angularVelocity = ((body.angle - body.anglePrev) * frictionAir * correction) + (body.torque / body.inertia) * deltaTimeSquared;
         body.anglePrev = body.angle;
         body.angle += body.angularVelocity;
+
+        // the engine integrates moving bodies only, so this is a direct call
+        // on a static. It keeps the rest row for a finite force and torque,
+        // and the check reads one false flag for every engine-driven update
+        if (body._restStatic === true) {
+            body._restStatic = Common._isRestingStatic(body);
+        }
 
         // transform the body geometry
         var parts = body.parts,
