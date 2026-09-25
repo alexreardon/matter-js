@@ -47,7 +47,27 @@ var Body = require('./Body');
             },
             // whether `Engine.update` is holding `bodies` itself as the
             // update's body list (see Composite._ownBodies)
-            _bodiesLent: false
+            _bodiesLent: false,
+            // the body journal a `gridStatic` detector reads instead of
+            // walking every body (see Common._journalTouch): the bodies touched
+            // since it last read, filled by index up to `_touchedCount`;
+            // whether the list is complete; the stamp of the full walk that
+            // started it, which a member carries in `body._sWalk`; the next
+            // add's `body._sWorldIndex`, which keeps that sort key increasing
+            // in body order; and the body count the recorded changes account
+            // for, which a direct edit that never signalled does not match
+            _touched: [],
+            _touchedCount: 0,
+            _journalLive: false,
+            _memberGen: 0,
+            _nextOrdinal: 0,
+            _journalLength: 0,
+            // Common._foreignWalks when the journal started, and the stamp of
+            // the last full walk of this composite's own array: every body
+            // carrying it in `_sWalk` is owned by this composite, which lets
+            // the next walk skip reading `_sOwner` for it
+            _journalForeignWalks: 0,
+            _ownedGen: 0
         }, options);
     };
 
@@ -67,9 +87,14 @@ var Body = require('./Body');
 
         // the body-set signal the mover classifications key on (see
         // Common._bodySetEpoch). Here and not in add / remove, because a
-        // caller that edits `composite.bodies` directly signals only here
+        // caller that edits `composite.bodies` directly signals only here.
+        // For the same reason this is the change the body journal cannot
+        // describe, so it switches the journal off until the next full walk
+        // (the add and remove below record what they change and signal
+        // through Composite._setModifiedJournaled instead)
         if (isModified) {
             Common._bodySetEpoch++;
+            composite._journalLive = false;
         }
 
         if (isModified && composite.cache) {
@@ -87,6 +112,31 @@ var Body = require('./Body');
                 var childComposite = composite.composites[i];
                 Composite.setModified(childComposite, isModified, updateParents, updateChildren);
             }
+        }
+    };
+
+    /**
+     * Marks the composite modified exactly as `setModified(composite, true,
+     * true, false)` does, for a change this composite's body journal has
+     * already recorded, so the journal stays live. Its parents are marked
+     * through `setModified`, which switches theirs off: a change to a child
+     * reorders a parent's `allBodies`, which no journal describes.
+     * @private
+     * @method _setModifiedJournaled
+     * @param {composite} composite
+     */
+    Composite._setModifiedJournaled = function(composite) {
+        composite.isModified = true;
+        Common._bodySetEpoch++;
+
+        if (composite.cache) {
+            composite.cache.allBodies = null;
+            composite.cache.allConstraints = null;
+            composite.cache.allComposites = null;
+        }
+
+        if (composite.parent) {
+            Composite.setModified(composite.parent, true, true, false);
         }
     };
 
@@ -271,7 +321,36 @@ var Body = require('./Body');
     Composite.addBody = function(composite, body) {
         Composite._ownBodies(composite);
         composite.bodies.push(body);
-        Composite.setModified(composite, true, true, false);
+
+        // a body changing owner: a member of another composite's journal (a
+        // body in two composites) stops being recorded there, and its stamp,
+        // which vouched for its old owner, is dropped (see _ownedGen)
+        var previousOwner = body._sOwner;
+
+        if (previousOwner !== composite) {
+            if (previousOwner !== null && body._sWalk === previousOwner._memberGen) {
+                previousOwner._journalLive = false;
+            }
+            body._sWalk = -1;
+        }
+
+        // record the add in the body journal (see Common._journalTouch). The
+        // body goes on the END of the array, so the next ordinal keeps
+        // `_sWorldIndex` increasing in body order. A body that is already a
+        // member is going in TWICE, which no membership flag can describe
+        if (composite._journalLive === true) {
+            if (body._sOwner === composite && body._sWalk === composite._memberGen) {
+                composite._journalLive = false;
+            } else {
+                body._sWalk = composite._memberGen;
+                body._sWorldIndex = composite._nextOrdinal++;
+                composite._journalLength++;
+                Common._journalPush(composite, body);
+            }
+        }
+
+        body._sOwner = composite;
+        Composite._setModifiedJournaled(composite);
         return composite;
     };
 
@@ -333,11 +412,158 @@ var Body = require('./Body');
      * @return {composite} The original composite with the body removed
      */
     Composite.removeBodyAt = function(composite, position) {
+        var body = composite.bodies[position];
+
         Composite._ownBodies(composite);
         composite.bodies.splice(position, 1);
-        Composite.setModified(composite, true, true, false);
+        Composite._journalRemoved(composite, body);
+        Composite._setModifiedJournaled(composite);
         return composite;
     };
+
+    /**
+     * Records in the body journal that `body` left `composite`, and ends its
+     * membership (see Common._journalTouch). Removing a body the journal does
+     * not hold as a member is a change it cannot describe, so it switches off.
+     * @private
+     * @method _journalRemoved
+     * @param {composite} composite
+     * @param {body} body
+     */
+    Composite._journalRemoved = function(composite, body) {
+        if (composite._journalLive === true) {
+            if (body._sOwner === composite && body._sWalk === composite._memberGen) {
+                composite._journalLength--;
+                Common._journalPush(composite, body);
+            } else {
+                composite._journalLive = false;
+            }
+        }
+
+        if (body._sOwner === composite) {
+            body._sOwner = null;
+            body._sWalk = -1;
+        }
+    };
+
+    /**
+     * Removes every body in `bodies` from the given composite in ONE
+     * order-preserving pass over its body array, with everything
+     * `Composite.removeBody` does to each body it removes. For a caller
+     * removing many bodies at once this is O(bodies in the composite) once,
+     * where a `removeBody` per body is O(bodies) each. A body listed but not
+     * in the composite is left alone; a body in the composite more than once
+     * is removed every time. Does not search child composites, and does not
+     * trigger the `beforeRemove` / `afterRemove` events.
+     *
+     * Prefer this to editing `composite.bodies` and calling
+     * `Composite.setModified`: it records the removals in the body journal,
+     * so a `gridStatic` detector need not walk every body to find them.
+     * @method removeBodies
+     * @param {composite} composite
+     * @param {body[]} bodies
+     * @return {composite} The original composite with the bodies removed
+     */
+    Composite.removeBodies = function(composite, bodies) {
+        var bodiesLength = bodies.length,
+            saved = Composite._removeSaved,
+            i;
+
+        if (bodiesLength === 0) {
+            return composite;
+        }
+
+        // mark the listed bodies in `_sWalk` with values no walk ever
+        // writes, keeping what each held: -2 for a journal member, -3 for
+        // anything else, so the pass below can tell a removal the journal can
+        // describe from one it cannot. A listed body that turns out not to be
+        // here gets its value back afterwards, so a body in another world
+        // keeps its membership there
+        var isLive = composite._journalLive === true,
+            memberGen = composite._memberGen;
+
+        for (i = 0; i < bodiesLength; i++) {
+            var listed = bodies[i],
+                walk = listed._sWalk;
+
+            if (walk <= -2) {
+                // listed twice: already marked
+                saved[i] = 0;
+                continue;
+            }
+
+            saved[i] = walk;
+            listed._sWalk = isLive && listed._sOwner === composite && walk === memberGen ? -2 : -3;
+        }
+
+        Composite._ownBodies(composite);
+
+        var worldBodies = composite.bodies,
+            worldLength = worldBodies.length,
+            removed = 0,
+            write = 0;
+
+        for (i = 0; i < worldLength; i++) {
+            var body = worldBodies[i],
+                mark = body._sWalk;
+
+            if (mark > -2 || mark < -4) {
+                worldBodies[write++] = body;
+                continue;
+            }
+
+            removed++;
+
+            // what Composite.removeBody does to a body it removes
+            body.sleepCounter = 0;
+            body.positionImpulse.x = 0;
+            body.positionImpulse.y = 0;
+            body._sDeparted = true;
+
+            if (mark === -2) {
+                composite._journalLength--;
+                if (composite._journalLive === true) {
+                    Common._journalPush(composite, body);
+                }
+            } else if (mark === -3) {
+                composite._journalLive = false;
+            }
+
+            // -4: removed, and any later copy of it in the array goes too
+            body._sWalk = -4;
+        }
+
+        if (worldBodies.length !== write) {
+            worldBodies.length = write;
+        }
+
+        // a removed body ends its membership here, as in
+        // Composite._journalRemoved; any other listed body (one that was not
+        // here, or one owned by another composite) gets its stamp back, so
+        // its membership there is untouched
+        for (i = 0; i < bodiesLength; i++) {
+            var gone = bodies[i],
+                goneWalk = gone._sWalk;
+
+            if (goneWalk === -4 && gone._sOwner === composite) {
+                gone._sWalk = -1;
+                gone._sOwner = null;
+            } else if (goneWalk <= -2 && goneWalk >= -4) {
+                gone._sWalk = saved[i];
+            }
+
+            saved[i] = 0;
+        }
+
+        if (removed > 0) {
+            Composite._setModifiedJournaled(composite);
+        }
+
+        return composite;
+    };
+
+    // scratch for Composite.removeBodies: the `_sWalk` each listed body held
+    Composite._removeSaved = [];
 
     /**
      * Adds a constraint to the given composite.
@@ -349,7 +575,8 @@ var Body = require('./Body');
      */
     Composite.addConstraint = function(composite, constraint) {
         composite.constraints.push(constraint);
-        Composite.setModified(composite, true, true, false);
+        // no body changed, so the body journal stays live
+        Composite._setModifiedJournaled(composite);
         return composite;
     };
 
@@ -388,7 +615,8 @@ var Body = require('./Body');
      */
     Composite.removeConstraintAt = function(composite, position) {
         composite.constraints.splice(position, 1);
-        Composite.setModified(composite, true, true, false);
+        // no body changed, so the body journal stays live
+        Composite._setModifiedJournaled(composite);
         return composite;
     };
 

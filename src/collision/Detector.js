@@ -26,7 +26,12 @@ var Collision = require('./Collision');
             pairs: null,
             // whether `bodies` is a private copy the sweep may sort in place
             // (see Detector.setBodies)
-            _bodiesOwned: true
+            _bodiesOwned: true,
+            // the world whose own body array `bodies` is, set by
+            // `Engine.update` for a flat world: the gridStatic broadphase then
+            // reads that world's body journal instead of walking every body
+            // (see Common._journalTouch). Null for a detector used on its own
+            _world: null
         };
 
         return Common.extend(defaults, options);
@@ -49,6 +54,8 @@ var Collision = require('./Collision');
         // array is never reordered.
         detector.bodies = bodies;
         detector._bodiesOwned = false;
+        // whose array this is, `Engine.update` says again after this call
+        detector._world = null;
     };
 
     /**
@@ -85,6 +92,7 @@ var Collision = require('./Collision');
 
         body._gridDynamic = flag;
         Common._bodyStaticEpoch++;
+        Common._journalTouch(body);
     };
 
     /**
@@ -942,6 +950,529 @@ var Collision = require('./Collision');
     };
 
     /**
+     * The largest share of a world's bodies that may be movers for the
+     * gridStatic broadphase (and so the engine) to read the body journal
+     * rather than walk. Above it the full walks run, as before the journal.
+     *
+     * The journal removes the same work at any share, and the phase timers
+     * say so (at the storm bench shape, 45 percent movers, the two
+     * classifications cost 21 to 25 us less per update). But there the WHOLE
+     * update measured slower, in most runs and in functions the journal never
+     * touches (`Pairs.update`, the narrowphase, `Body.update`), by a median 4
+     * percent over 32 interleaved runs with the velocity option off, while the
+     * same code with the journal never read measured flat. Where the walks
+     * dominate, at a few movers in a large static world (the traversal shape,
+     * 2.6 percent movers), the update is 24 percent faster. Tests set this to 1
+     * to run the journal at every share.
+     * @private
+     * @property _journalMoverShare
+     * @type number
+     */
+    Detector._journalMoverShare = 0.25;
+
+    /**
+     * Starts `world`'s body journal from the full classification walk that
+     * just stamped every body in it with `walkStamp` (see
+     * Common._journalTouch): that stamp becomes the membership generation, the
+     * list starts empty, and the next add's sort key follows the `n` the walk
+     * wrote.
+     * @private
+     * @method _journalStart
+     */
+    Detector._journalStart = function(g, world, walkStamp, n) {
+        var touched = world._touched,
+            touchedCount = world._touchedCount;
+
+        // drop the references a switched-off journal may still hold
+        for (var i = 0; i < touchedCount; i++) {
+            touched[i] = null;
+        }
+
+        world._touchedCount = 0;
+        world._journalLive = true;
+        world._memberGen = walkStamp;
+        world._nextOrdinal = n;
+        world._journalLength = n;
+        world._journalForeignWalks = Common._foreignWalks;
+        g.journalUsed = false;
+        g.journalWorld = world;
+        g.journalGen = walkStamp;
+    };
+
+    /**
+     * Classifies from `world`'s body journal: the answer the full walk in
+     * `_collisionsGridStatic` gives, from the bodies that changed since the
+     * last classification rather than from every body in the world.
+     *
+     * Each journal entry is re-read against the body's state NOW, so the
+     * order and number of its entries do not matter. A member is classified
+     * exactly as the walk classifies it, with the same writes. A body that is
+     * no longer a member leaves the index, which is exactly what the walk's
+     * departure scan does to an indexed body its walk did not stamp; a
+     * departure the journal missed would still be found by that scan, since
+     * every member carries the walk stamp the scan tests against.
+     *
+     * The mover list keeps BODY order because `_sWorldIndex` stays increasing
+     * along the body array between walks: the walk writes it, each add gives
+     * a body going on the end the next ordinal, and a removal keeps the
+     * relative order of what remains. The static count is what the walk's
+     * count is, every body in the world that is not a mover.
+     * @private
+     * @method _classifyFromJournal
+     * @param {object} g
+     * @param {composite} world
+     * @param {number} n
+     */
+    Detector._classifyFromJournal = function(g, world, n) {
+        var touched = world._touched,
+            touchedCount = world._touchedCount,
+            memberGen = world._memberGen,
+            movers = g.movers,
+            moversLength = movers.length,
+            pendingAdd = g.pendingAdd,
+            arrivals = g.arrivals,
+            indexed = g.indexed,
+            // marks this pass's entries, so a body listed twice is classified
+            // once and the mover list below can drop every one of them. From
+            // the candidate generation's counter, whose every stamp is fresh
+            stamp = ++g.stamp,
+            staticDirty = false,
+            arrivalCount = 0,
+            moverCount = 0,
+            i;
+
+        pendingAdd.length = 0;
+
+        for (i = 0; i < touchedCount; i++) {
+            var body = touched[i];
+
+            touched[i] = null;
+
+            if (body._gsStamp === stamp) {
+                continue;
+            }
+
+            body._gsStamp = stamp;
+
+            if (body._sOwner !== world || body._sWalk !== memberGen) {
+                // no longer a member: what the departure scan does to an
+                // indexed body the walk did not stamp. Only a body in THIS
+                // index, as the scan only reads this index; the mover list
+                // below drops it either way
+                if (body._sIndexed && indexed[body._sIndexedAt] === body) {
+                    Detector._staticIndexRemove(g, body);
+                    staticDirty = true;
+                }
+                continue;
+            }
+
+            // from here, the full walk's classification of one body, write for
+            // write (see there)
+            var isStaticNow = (body.isStatic || body.isSleeping) && body._gridDynamic !== true;
+
+            if (body._sDeparted) {
+                body._sDeparted = false;
+                body._scEpoch = -1;
+                if (body._sIndexed) {
+                    Detector._staticIndexRemove(g, body);
+                    staticDirty = true;
+                }
+            }
+
+            if (body._sPrev !== isStaticNow) {
+                body._sPrev = isStaticNow;
+                body._scEpoch = -1;
+                staticDirty = true;
+            }
+
+            if (isStaticNow) {
+                if (!body._sIndexed) {
+                    pendingAdd.push(body);
+                    staticDirty = true;
+                }
+            } else {
+                arrivals[arrivalCount++] = body;
+                if (body._sIndexed) {
+                    Detector._staticIndexRemove(g, body);
+                    staticDirty = true;
+                }
+            }
+        }
+
+        world._touchedCount = 0;
+
+        if (touchedCount > 0) {
+            // drop every body this pass read from the mover list, keeping the
+            // rest in order, then merge the ones that are movers now back in by
+            // their sort key
+            for (i = 0; i < moversLength; i++) {
+                var kept = movers[i];
+                if (kept._gsStamp !== stamp) {
+                    movers[moverCount++] = kept;
+                }
+            }
+
+            // arrivals are few: insertion sort by the key
+            for (i = 1; i < arrivalCount; i++) {
+                var arriving = arrivals[i],
+                    arrivingKey = arriving._sWorldIndex,
+                    at = i;
+                while (at > 0 && arrivals[at - 1]._sWorldIndex > arrivingKey) {
+                    arrivals[at] = arrivals[at - 1];
+                    at--;
+                }
+                arrivals[at] = arriving;
+            }
+
+            var total = moverCount + arrivalCount,
+                from = moverCount - 1,
+                take = arrivalCount - 1,
+                write = total - 1;
+
+            // grown by push so the list stays packed, then merged from the end
+            while (movers.length < total) {
+                movers.push(null);
+            }
+
+            while (take >= 0) {
+                var arrival = arrivals[take];
+                if (from >= 0 && movers[from]._sWorldIndex > arrival._sWorldIndex) {
+                    movers[write--] = movers[from--];
+                } else {
+                    movers[write--] = arrival;
+                    arrivals[take--] = null;
+                }
+            }
+
+            if (movers.length !== total) {
+                movers.length = total;
+            }
+        }
+
+        g.staticCount = n - movers.length;
+        g.classifyDirty = staticDirty;
+    };
+
+    /**
+     * Builds `Engine.update`'s mover list (every body in `world` that is
+     * neither static nor sleeping, in body order) into `moverBodies` from
+     * what the gridStatic classification already knows, instead of walking
+     * every body, and returns whether it could.
+     *
+     * The detector's mover list is exact for the world as its last
+     * classification saw it, and every change since is in the world's body
+     * journal, not yet read (see _classifyFromJournal). A body not in the
+     * journal keeps its role, so the engine's movers among those are the
+     * detector's movers that are neither static nor sleeping (the detector
+     * also counts a static tagged `_gridDynamic`); each body in the journal is
+     * read as it is now, and merged in by `_sWorldIndex` like the detector's
+     * own. The journal is only read here, never emptied: the detector reads it
+     * later in the same update.
+     *
+     * It can only when the journal describes every change since that
+     * classification, which are the conditions under which the detector reads
+     * it itself.
+     * @private
+     * @method _moversFromJournal
+     * @param {detector} detector
+     * @param {composite} world
+     * @param {body[]} moverBodies
+     * @return {boolean}
+     */
+    Detector._moversFromJournal = function(detector, world, moverBodies) {
+        var g = detector._sgrid;
+
+        if (g === undefined || g === null || !g.built || g.journalWorld !== world
+            || world._journalLive !== true || g.journalGen !== world._memberGen
+            || world._journalLength !== world.bodies.length
+            || world._journalForeignWalks !== Common._foreignWalks) {
+            return false;
+        }
+
+        var touched = world._touched,
+            touchedCount = world._touchedCount,
+            memberGen = world._memberGen,
+            movers = g.movers,
+            moversLength = movers.length,
+            arrivals = g.arrivals,
+            stamp = ++g.stamp,
+            arrivalCount = 0,
+            moverCount = 0,
+            i;
+
+        for (i = 0; i < touchedCount; i++) {
+            var body = touched[i];
+
+            if (body._gsStamp === stamp) {
+                continue;
+            }
+
+            body._gsStamp = stamp;
+
+            if (body._sOwner === world && body._sWalk === memberGen
+                && !(body.isStatic || body.isSleeping)) {
+                arrivals[arrivalCount++] = body;
+            }
+        }
+
+        for (i = 0; i < moversLength; i++) {
+            var kept = movers[i];
+            if (kept._gsStamp !== stamp && !(kept.isStatic || kept.isSleeping)) {
+                moverBodies[moverCount++] = kept;
+            }
+        }
+
+        // arrivals are few: insertion sort by the key
+        for (i = 1; i < arrivalCount; i++) {
+            var arriving = arrivals[i],
+                arrivingKey = arriving._sWorldIndex,
+                at = i;
+            while (at > 0 && arrivals[at - 1]._sWorldIndex > arrivingKey) {
+                arrivals[at] = arrivals[at - 1];
+                at--;
+            }
+            arrivals[at] = arriving;
+        }
+
+        var total = moverCount + arrivalCount,
+            from = moverCount - 1,
+            take = arrivalCount - 1,
+            write = total - 1;
+
+        // grown by push so the list stays packed, then merged from the end
+        while (moverBodies.length < total) {
+            moverBodies.push(null);
+        }
+
+        while (take >= 0) {
+            var arrival = arrivals[take];
+            if (from >= 0 && moverBodies[from]._sWorldIndex > arrival._sWorldIndex) {
+                moverBodies[write--] = moverBodies[from--];
+            } else {
+                moverBodies[write--] = arrival;
+                arrivals[take--] = null;
+            }
+        }
+
+        if (moverBodies.length !== total) {
+            moverBodies.length = total;
+        }
+
+        return true;
+    };
+
+    /**
+     * Stamps every body in `bodies` with `walkStamp` and makes `liveWorld` its
+     * owner, the check a full walk runs before it restarts the world's body
+     * journal, and returns whether the array holds any body twice (which no
+     * journal can describe). A body the world's last walk stamped (`ownedGen`)
+     * is owned by it already (see Composite._ownedGen), so for every body but
+     * the few that came in since this is one comparison and `_sOwner`, which
+     * lies past the cache line the walk touches, is never read. A body taken
+     * from a composite whose journal held it switches that journal off.
+     * @private
+     * @method _claimBodies
+     * @param {body[]} bodies
+     * @param {number} n
+     * @param {composite} liveWorld
+     * @param {number} ownedGen
+     * @param {number} walkStamp
+     * @return {boolean}
+     */
+    Detector._claimBodies = function(bodies, n, liveWorld, ownedGen, walkStamp) {
+        var duplicate = false;
+
+        for (var i = 0; i < n; i++) {
+            var body = bodies[i],
+                lastWalk = body._sWalk;
+
+            if (lastWalk !== ownedGen) {
+                if (lastWalk === walkStamp) {
+                    // seen already in this pass: the array holds it twice
+                    duplicate = true;
+                } else {
+                    // not known to be owned by this world (it came in by a
+                    // direct edit, say)
+                    var owner = body._sOwner;
+                    if (owner !== liveWorld) {
+                        if (owner !== null) {
+                            owner._journalLive = false;
+                        }
+                        body._sOwner = liveWorld;
+                    }
+                }
+            }
+
+            body._sWalk = walkStamp;
+        }
+
+        return duplicate;
+    };
+
+    /**
+     * The full classification walk of `_collisionsGridStatic`: every body in
+     * `bodies` classified as a mover or a static, the static index told what
+     * changed, and the body journal restarted from the walk when it can be.
+     * Writes `g.movers`, `g.pendingAdd`, `g.staticCount`, and in
+     * `g.classifyDirty` whether the static set changed. The fallback to the
+     * body journal's own pass, `_classifyFromJournal`, which writes the same.
+     * @private
+     * @method _classifyWalk
+     * @param {object} g
+     * @param {body[]} bodies
+     * @param {number} n
+     * @param {composite|null} world the world `Engine.update` named, if any
+     * @param {composite|null} liveWorld `world` when `bodies` is its own array
+     */
+    Detector._classifyWalk = function(g, bodies, n, world, liveWorld) {
+        var movers = g.movers,
+            staticDirty = false,
+            staticCount,
+            i;
+
+        // `movers` is filled BY INDEX and trimmed once below, rather than
+        // cleared with `movers.length = 0` and re-pushed. Clearing to zero
+        // drops the backing store, so every rebuild regrows it from empty
+        // and allocates; writing in place reuses it. This is the idiom the
+        // engine's own mover classification already uses (`Engine.update`)
+        var moverCount = 0,
+            duplicate = false;
+        staticCount = 0;
+
+        // this walk is also where the static index learns what changed, so
+        // it stamps every body it sees. A body still in the index whose
+        // stamp is stale on the next pass has LEFT the world, which is the
+        // one kind of change no per-body flag can report. The stamp is
+        // unique across every detector, since it also serves as the body
+        // journal's membership generation (see Common._journalTouch)
+        var walkStamp = g.walkStamp = ++Common._walkStamp,
+            ownedGen = liveWorld !== null ? liveWorld._ownedGen : 0,
+            // whether this walk checks the world for a body journal
+            // to start (no body twice, every body owned by the world): only
+            // where the journal would be read (see Detector._journalMoverShare)
+            verify = liveWorld !== null && movers.length <= n * Detector._journalMoverShare,
+            pendingAdd = g.pendingAdd;
+        pendingAdd.length = 0;
+
+        // A journal switched off before it was ever read is the mark
+        // of a caller that edits the body array directly and signals
+        // `Composite.setModified` on every update, for whom the check
+        // is a pure cost; after each such journal the check waits for
+        // twice as many walks, up to 63
+        if (verify) {
+            if (g.journalWorld === liveWorld) {
+                g.journalFailures = g.journalUsed ? 0 : Math.min(g.journalFailures + 1, 6);
+                g.journalSkip = (1 << g.journalFailures) - 1;
+            }
+            if (g.journalSkip > 0) {
+                g.journalSkip--;
+                verify = false;
+            }
+        }
+
+        // a walk of any array that is not its world's own replaces
+        // stamps some journal may count on, which is recorded once here
+        // rather than looked up per body (see Common._foreignWalks)
+        if (liveWorld === null) {
+            Common._foreignWalks++;
+        }
+
+        // the check is a pass of its own, ahead of the walk, so the walk below
+        // is the same loop as before the journal. Folded into the walk as a
+        // branch, it measured 2 to 3 percent slower on a whole traversal step
+        // even on the updates where the branch was never taken
+        if (verify) {
+            duplicate = Detector._claimBodies(bodies, n, liveWorld, ownedGen, walkStamp);
+        }
+
+        for (i = 0; i < n; i++) {
+            var body = bodies[i],
+                // a body tagged `_gridDynamic` (e.g. an inner-scroll surface
+                // that is static but moves each tick) is treated as a mover so
+                // it is re-bucketed every step and never goes stale in the
+                // static index
+                isStaticNow = (body.isStatic || body.isSleeping) && body._gridDynamic !== true;
+
+            body._sWalk = walkStamp;
+            body._sWorldIndex = i;
+
+            // removed from the world and added back before this walk ran,
+            // so it is still indexed but may now sit at a different place in
+            // the body array. Drop it from the index and let the pass below
+            // re-insert it at its new position, or bucket order would no
+            // longer match the order a full rebuild produces
+            if (body._sDeparted) {
+                body._sDeparted = false;
+                // out of the world it was in no mover index, so the
+                // per-cell invalidation sweep could not reach it
+                body._scEpoch = -1;
+                if (body._sIndexed) {
+                    Detector._staticIndexRemove(g, body);
+                    staticDirty = true;
+                }
+            }
+
+            if (body._sPrev !== isStaticNow) {
+                body._sPrev = isStaticNow;
+                // same reason: while it was static it was not a mover, so
+                // any cell that changed under it went unreported to it
+                body._scEpoch = -1;
+                staticDirty = true;
+            }
+
+            if (isStaticNow) {
+                staticCount++;
+                if (!body._sIndexed) {
+                    pendingAdd.push(body);
+                    staticDirty = true;
+                }
+            } else {
+                movers[moverCount++] = body;
+                if (body._sIndexed) {
+                    // released into a mover: unindex it here, so the apply
+                    // pass below never has to walk the membership list
+                    // looking for it
+                    Detector._staticIndexRemove(g, body);
+                    staticDirty = true;
+                }
+            }
+        }
+
+        // the trim is NOT optional. The ONE read of `movers.length` below
+        // (snapshotted into `moversLength`) is what bounds every consumer
+        // of it, so a slot left over from a longer previous list is read
+        // as a live mover. Held by Detector.spec's shrinking-mover-set
+        // test, which is the only gate that can see it: every other one
+        // either builds a fresh detector per scene or only ever shrinks
+        // the STATIC set
+        if (movers.length !== moverCount) {
+            movers.length = moverCount;
+        }
+
+        g.staticCount = staticCount;
+
+        // every body in the world is now stamped by this walk and owned
+        // by the world. Start the body journal from the walk, when it
+        // walked a flat world's own array and found no body twice;
+        // otherwise the world's journal no longer matches the stamps
+        // this walk wrote
+        if (verify) {
+            liveWorld._ownedGen = walkStamp;
+        }
+
+        if (verify && !duplicate) {
+            Detector._journalStart(g, liveWorld, walkStamp, n);
+        } else {
+            if (world !== null) {
+                world._journalLive = false;
+            }
+            g.journalWorld = null;
+        }
+
+        g.classifyDirty = staticDirty;
+    };
+
+    /**
      * Static-index uniform-grid broadphase. The win over `_collisionsGrid`: the
      * static field (intact page) is bucketed ONCE and reused; only dynamic
      * bodies (movers) are re-bucketed each step, and only movers drive candidate
@@ -1005,6 +1536,15 @@ var Collision = require('./Collision');
                 // world (which no per-body flag can report) is found by
                 // scanning for a stale walk stamp; plus this step's insertions
                 indexed: [], pendingAdd: [], walkStamp: 0,
+                // the world whose body journal this index follows, and the
+                // stamp of the full walk that started it (see
+                // _classifyFromJournal); the journal pass's scratch list of
+                // bodies joining the movers, and whether it changed the statics
+                journalWorld: null, journalGen: -1, arrivals: [], classifyDirty: false,
+                // whether the journal this index started has been read since,
+                // and the back-off for one that keeps being switched off unread
+                // (see the full walk below)
+                journalUsed: false, journalFailures: 0, journalSkip: 0,
                 // sFlat is the flat list of non-oversized statics that only an
                 // OVERSIZED MOVER reads, so it is rebuilt lazily, on the rare
                 // steps one exists, instead of maintained on every change
@@ -1066,10 +1606,17 @@ var Collision = require('./Collision');
         // (thousands of intact tiles) it is memory-bound and one of the largest
         // single costs in the step, while its ANSWER almost never changes: the
         // mover set only moves when the body set changes (add / remove, each of
-        // which bumps Common._bodySetEpoch through `Composite.setModified`) or
-        // when some body's moving-vs-resting role flips (`Body.setStatic`,
-        // `Sleeping.set`, `Detector.setGridDynamic`, each of which bumps the
-        // static epoch). So cache the result and rebuild only on those signals.
+        // which bumps Common._bodySetEpoch) or when some body's
+        // moving-vs-resting role flips (`Body.setStatic`, `Sleeping.set`,
+        // `Detector.setGridDynamic`, each of which bumps the static epoch). So
+        // cache the result and rebuild only on those signals.
+        //
+        // And when it has to be rebuilt, the change is usually a handful of
+        // bodies in a world of thousands, which is where the body journal comes
+        // in (see Common._journalTouch): for a flat world stepped by an engine,
+        // the rebuild classifies just the bodies the journal records
+        // (`_classifyFromJournal`), and the full walk below runs only when the
+        // journal cannot describe the change.
         //
         // The body-set signal is that epoch AND the identity and length of
         // `detector.bodies`, rather than a flag set by `setBodies`. The epoch
@@ -1077,9 +1624,8 @@ var Collision = require('./Collision');
         // `Engine.update` hands over for a flat world, whose identity never
         // changes), including one made between updates and read by a direct
         // call here; the identity and length keep a caller that assigns the
-        // array directly correct. The cached movers list holds INDICES into
-        // it, and a stale index reads the wrong body, or past the end of a
-        // shrunken array.
+        // array directly correct. The cached movers list describes the array,
+        // so a stale one keeps a body that left it or misses one that joined.
         var movers = g.movers,
             staticDirty = !g.built,
             staticCount = g.staticCount,
@@ -1092,95 +1638,37 @@ var Collision = require('./Collision');
             g.classifyLength = n;
             g.classifyEpoch = classifyEpoch;
             g.classifySetEpoch = classifySetEpoch;
-            // `movers` is filled BY INDEX and trimmed once below, rather than
-            // cleared with `movers.length = 0` and re-pushed. Clearing to zero
-            // drops the backing store, so every rebuild regrows it from empty
-            // and allocates; writing in place reuses it. This is the idiom the
-            // engine's own mover classification already uses (`Engine.update`),
-            // and on a page being destroyed this walk rebuilds EVERY step
-            var moverCount = 0;
-            staticCount = 0;
 
-            // this walk is also where the static index learns what changed, so
-            // it stamps every body it sees. A body still in the index whose
-            // stamp is stale on the next pass has LEFT the world, which is the
-            // one kind of change no per-body flag can report
-            var walkStamp = ++g.walkStamp,
-                pendingAdd = g.pendingAdd;
-            pendingAdd.length = 0;
+            // the world whose body array this is, when `Engine.update` handed
+            // it over as the world's own (see Detector.setBodies). Only then can
+            // the world's body journal say what changed in it, and the
+            // classification reads that instead of walking every body
+            // (a detector made as a plain object rather than by
+            // Detector.create has no `_world` at all, and is used on its own)
+            var world = detector._world === undefined ? null : detector._world,
+                liveWorld = world !== null && world.bodies === bodies ? world : null;
 
-            for (i = 0; i < n; i++) {
-                var body = bodies[i],
-                    // a body tagged `_gridDynamic` (e.g. an inner-scroll surface
-                    // that is static but moves each tick) is treated as a mover so
-                    // it is re-bucketed every step and never goes stale in the
-                    // static index
-                    isStaticNow = (body.isStatic || body.isSleeping) && body._gridDynamic !== true;
-
-                body._sWalk = walkStamp;
-                body._sWorldIndex = i;
-
-                // removed from the world and added back before this walk ran,
-                // so it is still indexed but may now sit at a different place in
-                // the body array. Drop it from the index and let the pass below
-                // re-insert it at its new position, or bucket order would no
-                // longer match the order a full rebuild produces
-                if (body._sDeparted) {
-                    body._sDeparted = false;
-                    // out of the world it was in no mover index, so the
-                    // per-cell invalidation sweep could not reach it
-                    body._scEpoch = -1;
-                    if (body._sIndexed) {
-                        Detector._staticIndexRemove(g, body);
-                        staticDirty = true;
-                    }
-                }
-
-                if (body._sPrev !== isStaticNow) {
-                    body._sPrev = isStaticNow;
-                    // same reason: while it was static it was not a mover, so
-                    // any cell that changed under it went unreported to it
-                    body._scEpoch = -1;
+            // the journal is read only while it describes every change since
+            // this index's last full walk: started by that walk, still live, and
+            // accounting for the array's length (a caller that edits the array
+            // without signalling changes that first)
+            if (liveWorld !== null && g.built && liveWorld._journalLive === true
+                && g.journalWorld === liveWorld && g.journalGen === liveWorld._memberGen
+                && liveWorld._journalLength === n && liveWorld._journalForeignWalks === Common._foreignWalks
+                && movers.length <= n * Detector._journalMoverShare) {
+                Detector._classifyFromJournal(g, liveWorld, n);
+                g.journalUsed = true;
+                staticCount = g.staticCount;
+                if (g.classifyDirty) {
                     staticDirty = true;
                 }
-
-                if (isStaticNow) {
-                    staticCount++;
-                    if (!body._sIndexed) {
-                        pendingAdd.push(body);
-                        staticDirty = true;
-                    }
-                } else {
-                    movers[moverCount++] = i;
-                    if (body._sIndexed) {
-                        // released into a mover: unindex it here, so the apply
-                        // pass below never has to walk the membership list
-                        // looking for it
-                        Detector._staticIndexRemove(g, body);
-                        staticDirty = true;
-                    }
+            } else {
+                Detector._classifyWalk(g, bodies, n, world, liveWorld);
+                staticCount = g.staticCount;
+                if (g.classifyDirty) {
+                    staticDirty = true;
                 }
             }
-
-            // the trim is NOT optional. `movers` holds INDICES into `bodies`,
-            // and the ONE read of `movers.length` below (snapshotted into
-            // `moversLength`) is what bounds every consumer of it, so a slot
-            // left over from a longer previous list is read as a live mover and
-            // indexes past the end of a shrunken body array. Held by
-            // Detector.spec's shrinking-mover-set test, which is the only gate
-            // that can see it: every other one either builds a fresh detector
-            // per scene or only ever shrinks the STATIC set.
-            //
-            // A strictly safer shape exists, and is what the other `.length = 0`
-            // sites in this file should use if they are ever converted: keep a
-            // `g.moverCount` beside the existing `g.staticCount` and bound the
-            // consumers on that, so no trim is needed and the stale slot cannot
-            // be reached at all
-            if (movers.length !== moverCount) {
-                movers.length = moverCount;
-            }
-
-            g.staticCount = staticCount;
 
             // A change in static count means a static body was added to or
             // removed from the world (windowing add/remove, etc.). A removal is
@@ -1285,8 +1773,7 @@ var Collision = require('./Collision');
             spanBase;
 
         for (mIns = 0; mIns < moversLength; mIns++) {
-            var di = movers[mIns],
-                dbody = bodies[di],
+            var dbody = movers[mIns],
                 dBounds = dbody.bounds,
                 dMinX = dBounds.min.x,
                 dMaxX = dBounds.max.x,
@@ -1420,7 +1907,7 @@ var Collision = require('./Collision');
                         if (dKeyArr[dce] !== dcKey) {
                             continue;
                         }
-                        bodies[movers[dItem[dce]]]._scEpoch = -1;
+                        movers[dItem[dce]]._scEpoch = -1;
                     }
                 }
             }
@@ -1454,7 +1941,7 @@ var Collision = require('./Collision');
         var sFlatLength = sFlat.length;
         for (var mGen = 0; mGen < moversLength; mGen++) {
             var mBoundsBase = mGen * 4,
-                m = bodies[movers[mGen]],
+                m = movers[mGen],
                 mMinX = mBounds[mBoundsBase], mMaxX = mBounds[mBoundsBase + 1],
                 mMinY = mBounds[mBoundsBase + 2], mMaxY = mBounds[mBoundsBase + 3],
                 mFilter = m.collisionFilter,
@@ -1619,7 +2106,7 @@ var Collision = require('./Collision');
                                 || mMaxY < mBounds[dBoundsBase + 2] || mMinY > mBounds[dBoundsBase + 3]) {
                                 continue;
                             }
-                            var dBody = bodies[movers[dj]];
+                            var dBody = movers[dj];
                             if (mStatic && (dBody.isStatic || dBody.isSleeping)) {
                                 continue;
                             }
@@ -1688,7 +2175,7 @@ var Collision = require('./Collision');
                     || mMaxY < mBounds[doBoundsBase + 2] || mMinY > mBounds[doBoundsBase + 3]) {
                     continue;
                 }
-                var doBody = bodies[movers[doOrdinal]];
+                var doBody = movers[doOrdinal];
                 if (mStatic && (doBody.isStatic || doBody.isSleeping)) {
                     continue;
                 }

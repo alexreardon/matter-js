@@ -105,8 +105,12 @@ var Common = require('./Common');
 
         if (wasSleeping !== isSleeping) {
             // invalidate the cached mover lists in Engine and the gridStatic
-            // broadphase (see Common._bodyStaticEpoch)
+            // broadphase (see Common._bodyStaticEpoch), and record the body in
+            // its world's body journal (see Common._journalTouch). Recorded
+            // before the flag flips, which is fine: the reader reads the flag
+            // when it reads the journal
             Common._bodyStaticEpoch++;
+            Common._journalTouch(body);
 
             // Engine clears force buffers for moving bodies only, so a force
             // applied while this body was asleep must be dropped here rather

@@ -49,14 +49,93 @@ module.exports = Common;
      * its detector as `world.bodies` ITSELF (see `Composite._ownBodies`), so
      * the array's identity no longer changes when its membership does, and the
      * two mover classifications (`Engine.update`, and the `gridStatic`
-     * broadphase, whose cached mover list holds INDICES into the array) key on
-     * this instead. It is bumped here and NOT in add / remove, because a
-     * direct edit reaches `setModified` and nothing else.
+     * broadphase) key on this instead. Every membership change bumps it: a
+     * direct edit through `setModified`, which is the only signal such a
+     * caller gives, and `Composite`'s own add and remove through
+     * `_setModifiedJournaled`, which also keeps the body journal (see
+     * `_journalTouch`) live.
      *
      * It is shared by every composite, so a change to one world also rebuilds
      * the other's lists: a wasted walk, never a wrong one.
      */
     Common._bodySetEpoch = 0;
+
+    /**
+     * The stamp of the last full classification walk of any `gridStatic`
+     * detector. One counter for every detector, so a stamp names one walk of
+     * one world, which is what lets it serve as a membership generation (see
+     * `_journalTouch`).
+     * @private
+     */
+    Common._walkStamp = 0;
+
+    /**
+     * How many full classification walks have run over an array that was not
+     * their detector's own world's array: a detector used on its own, a world
+     * with child composites, an update's array a listener has replaced. Such
+     * a walk restamps bodies some other world's journal may hold as members,
+     * so every journal started before it is read no more (see
+     * Detector._classifyFromJournal); the engine's own walks of a flat world
+     * never count.
+     * @private
+     */
+    Common._foreignWalks = 0;
+
+    /**
+     * Records `body` in its world's body journal, if it is a member of a world
+     * that keeps one.
+     *
+     * The journal is how the `gridStatic` broadphase learns what changed in a
+     * flat world without walking every body in it. Once a detector has
+     * classified a world in full, the world keeps the list of bodies whose
+     * membership or moving-vs-resting role may have changed since
+     * (`composite._touched`, its first `_touchedCount` entries):
+     * `Composite.addBody`, `removeBodyAt` and `removeBodies` record the bodies
+     * they add or remove, and `Body.setStatic`, `Sleeping.set` and
+     * `Detector.setGridDynamic` record a member through this. The detector
+     * then classifies just those bodies (`Detector._classifyFromJournal`).
+     *
+     * A body is a member while `body._sOwner` is the world and `body._sWalk`
+     * is the world's `_memberGen`, the stamp of the full walk that started
+     * the journal. A body in no world, or removed from one, records nothing,
+     * which is what keeps a body flagged before it is added out of the lists.
+     * Anything the journal cannot describe switches it off (`_journalLive`
+     * false) until the next full walk: a direct edit of `composite.bodies`
+     * signalled through `Composite.setModified`, `Composite.clear`, a body
+     * added twice, a list too long to be worth reading.
+     * @method _journalTouch
+     * @private
+     * @param {body} body
+     */
+    Common._journalTouch = function(body) {
+        var owner = body._sOwner;
+
+        if (owner !== null && owner._journalLive === true && body._sWalk === owner._memberGen) {
+            Common._journalPush(owner, body);
+        }
+    };
+
+    /**
+     * Appends `body` to `composite`'s journal, or switches the journal off
+     * once it holds a quarter of the world, where a full walk is the cheaper
+     * answer. The list is filled BY INDEX up to `_touchedCount` and never
+     * shrunk, so the steady state does not allocate.
+     * @method _journalPush
+     * @private
+     * @param {composite} composite
+     * @param {body} body
+     */
+    Common._journalPush = function(composite, body) {
+        var count = composite._touchedCount;
+
+        if (count >= 64 && count >= (composite.bodies.length >> 2)) {
+            composite._journalLive = false;
+            return;
+        }
+
+        composite._touched[count] = body;
+        composite._touchedCount = count + 1;
+    };
 
     /**
      * Whether the velocity solver may read `body` as the REST row: a static

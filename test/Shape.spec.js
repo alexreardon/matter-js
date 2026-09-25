@@ -40,7 +40,7 @@ var Sleeping = Matter.Sleeping;
 // the last key of each factory literal. A lazily assigned field lands AFTER
 // this key; update these only when the factory literal itself gains a field
 // at its end.
-var LAST_BODY_KEY = '_restStatic';
+var LAST_BODY_KEY = '_sOwner';
 var LAST_PAIR_KEY = 'slop';
 var LAST_CONTACT_KEY = 'tangentImpulse';
 var LAST_COLLISION_KEY = 'supportCount';

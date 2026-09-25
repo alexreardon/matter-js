@@ -161,6 +161,11 @@ var Body = require('../body/Body');
             Composite.setModified(world, false, false, true);
         }
 
+        // a flat world's own array: its body journal describes changes to it,
+        // which the gridStatic broadphase reads instead of walking every body
+        // (see Common._journalTouch)
+        detector._world = lendsBodies ? world : null;
+
         // update sleeping if enabled
         if (engine.enableSleeping)
             Sleeping.update(allBodies, delta);
@@ -196,16 +201,21 @@ var Body = require('../body/Body');
             engine._moverEpoch = staticEpoch;
             engine._moverSetEpoch = setEpoch;
 
-            var moverCount = 0;
+            // for a flat world the gridStatic classification and the body
+            // journal usually say what changed, which spares the walk (see
+            // Detector._moversFromJournal)
+            if (!(lendsBodies && Detector._moversFromJournal(detector, world, moverBodies))) {
+                var moverCount = 0;
 
-            for (i = 0; i < allBodiesLength; i++) {
-                var classifyBody = allBodies[i];
-                if (!(classifyBody.isStatic || classifyBody.isSleeping)) {
-                    moverBodies[moverCount++] = classifyBody;
+                for (i = 0; i < allBodiesLength; i++) {
+                    var classifyBody = allBodies[i];
+                    if (!(classifyBody.isStatic || classifyBody.isSleeping)) {
+                        moverBodies[moverCount++] = classifyBody;
+                    }
                 }
-            }
-            if (moverBodies.length !== moverCount) {
-                moverBodies.length = moverCount;
+                if (moverBodies.length !== moverCount) {
+                    moverBodies.length = moverCount;
+                }
             }
         }
 

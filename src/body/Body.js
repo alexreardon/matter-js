@@ -140,7 +140,7 @@ var Axes = require('../geometry/Axes');
             _sPrev: false,
             _sIndexed: false,
             _sDeparted: false,
-            _sWalk: 0,
+            _sWalk: -1,
             _sWorldIndex: 0,
             _scEpoch: 0,
             _stamp: 0,
@@ -183,7 +183,9 @@ var Axes = require('../geometry/Axes');
             // without recomputing anything; an EMPTY array means an oversized
             // static, which occupies no cells. _sIndexed is whether it is in
             // the index at all, _sWalk the stamp of the last classification
-            // walk that saw it (a stale stamp means it has left the world),
+            // walk that saw it (a stale stamp means it has left the world; it
+            // doubles as the body journal's membership generation, and is -1
+            // for a body in no world, see Common._journalTouch),
             // _sWorldIndex its position in that walk, which is the sort key
             // that keeps bucket contents in world order, and _sDeparted a
             // one-shot set by Composite.removeBody so a body removed and
@@ -222,8 +224,17 @@ var Axes = require('../geometry/Axes');
             // and an inverse inertia of exactly +0 (see
             // Common._isRestingStatic). Written by every method below that
             // changes one of those, and by the position correction in
-            // Resolver. Declared LAST so every field above keeps its place
-            _restStatic: false
+            // Resolver. Declared after every field the engine had before the
+            // body journal, so each of those keeps its place
+            _restStatic: false,
+            // the composite whose body journal this body is recorded in (see
+            // Common._journalTouch); a member while `_sWalk` also matches that
+            // composite's `_memberGen`. Read only by the journal's own paths
+            // and, in a full classification walk, only for a body the world's
+            // last walk did not stamp (see Composite._ownedGen), so it needs no
+            // place in the cluster above. Declared LAST so every field above
+            // keeps its place
+            _sOwner: null
         };
 
         var body = Common.extend(defaults, options);
@@ -496,8 +507,10 @@ var Axes = require('../geometry/Axes');
         }
 
         // invalidate the cached mover lists in Engine and the gridStatic
-        // broadphase (see Common._bodyStaticEpoch)
+        // broadphase (see Common._bodyStaticEpoch), and record the body in its
+        // world's body journal (see Common._journalTouch)
         Common._bodyStaticEpoch++;
+        Common._journalTouch(body);
     };
 
     /**
