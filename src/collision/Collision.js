@@ -67,20 +67,29 @@ var Pair = require('./Pair');
      * @return {collision|null} A collision record if detected, otherwise null
      */
     Collision.collides = function(bodyA, bodyB, pairs) {
-        // both sides tagged by Body._updateBoxTag: the closed-form support
-        // search replaces the hill-climb, returning the same vertices
+        // both sides tagged by Body._updateBoxTag: the fused box-box test and
+        // the closed-form support search replace the general polygon ones
         var isBoxPair = bodyA._boxCorners >= 0 && bodyB._boxCorners >= 0;
 
-        Collision._overlapAxes(_overlapAB, bodyA, bodyB.vertices, bodyA.axes);
+        if (isBoxPair) {
+            Collision._overlapBoxes(_overlapAB, _overlapBA, bodyA, bodyB);
 
-        if (_overlapAB.overlap <= 0) {
-            return null;
-        }
+            // `_overlapBA` is not written when `_overlapAB` already separates
+            if (_overlapAB.overlap <= 0 || _overlapBA.overlap <= 0) {
+                return null;
+            }
+        } else {
+            Collision._overlapAxes(_overlapAB, bodyA, bodyB.vertices, bodyA.axes);
 
-        Collision._overlapAxes(_overlapBA, bodyB, bodyA.vertices, bodyB.axes);
+            if (_overlapAB.overlap <= 0) {
+                return null;
+            }
 
-        if (_overlapBA.overlap <= 0) {
-            return null;
+            Collision._overlapAxes(_overlapBA, bodyB, bodyA.vertices, bodyB.axes);
+
+            if (_overlapBA.overlap <= 0) {
+                return null;
+            }
         }
 
         // Reuse collision records for gc efficiency. The live pair's record is
@@ -215,6 +224,102 @@ var Pair = require('./Pair');
         collision.supportCount = supportCount;
 
         return collision;
+    };
+
+    /**
+     * The separating-axis test for two boxes (both tagged by
+     * `Body._updateBoxTag`), fused over their four axes.
+     *
+     * The general test projects every corner of the other body onto each axis.
+     * For a box that projection is closed form: centred on the body's
+     * `position`, with radius `half0 * |axis . axis0| + half1 * |axis . axis1|`.
+     * So the overlap on axis `i` of A is
+     * `halfA_i + (halfB0 * |R[i][0]| + halfB1 * |R[i][1]|) - |delta . axisA_i|`,
+     * where `R[i][j] = axisA_i . axisB_j` is shared by all four tests, and no
+     * vertex is read at all.
+     *
+     * Writes the same `{ overlap, axis }` results two `_overlapAxes` calls
+     * write: the same axis objects, the same tie rule (the lower axis index
+     * wins a tie), and the same early out (`resultBA` is not written when
+     * `resultAB` already separates). The overlap itself differs from the
+     * general reduction in its last bits, because it is computed from
+     * `position` and the half extents rather than from the vertices, so this is
+     * a RE-BASELINE and not a bit-identical rewrite.
+     *
+     * A box never reads or fills the `_selfProjection` memo on this path; the
+     * memo stays for every pair with a side that is not a box.
+     * @method _overlapBoxes
+     * @private
+     * @param {object} resultAB B projected onto the axes of A
+     * @param {object} resultBA A projected onto the axes of B
+     * @param {body} bodyA
+     * @param {body} bodyB
+     */
+    Collision._overlapBoxes = function(resultAB, resultBA, bodyA, bodyB) {
+        var axesA = bodyA.axes,
+            axesB = bodyB.axes,
+            axisA0 = axesA[0],
+            axisA1 = axesA[1],
+            axisB0 = axesB[0],
+            axisB1 = axesB[1],
+            axisA0X = axisA0.x,
+            axisA0Y = axisA0.y,
+            axisA1X = axisA1.x,
+            axisA1Y = axisA1.y,
+            axisB0X = axisB0.x,
+            axisB0Y = axisB0.y,
+            axisB1X = axisB1.x,
+            axisB1Y = axisB1.y,
+            halfA0 = bodyA._boxHalf0,
+            halfA1 = bodyA._boxHalf1,
+            halfB0 = bodyB._boxHalf0,
+            halfB1 = bodyB._boxHalf1,
+            deltaX = bodyB.position.x - bodyA.position.x,
+            deltaY = bodyB.position.y - bodyA.position.y,
+            r00 = Math.abs(axisA0X * axisB0X + axisA0Y * axisB0Y),
+            r01 = Math.abs(axisA0X * axisB1X + axisA0Y * axisB1Y),
+            r10 = Math.abs(axisA1X * axisB0X + axisA1Y * axisB0Y),
+            r11 = Math.abs(axisA1X * axisB1X + axisA1Y * axisB1Y),
+            overlap0 = halfA0 + (halfB0 * r00 + halfB1 * r01) - Math.abs(deltaX * axisA0X + deltaY * axisA0Y),
+            overlap1;
+
+        if (overlap0 <= 0) {
+            resultAB.axis = axisA0;
+            resultAB.overlap = overlap0;
+            return;
+        }
+
+        overlap1 = halfA1 + (halfB0 * r10 + halfB1 * r11) - Math.abs(deltaX * axisA1X + deltaY * axisA1Y);
+
+        if (overlap1 < overlap0) {
+            resultAB.axis = axisA1;
+            resultAB.overlap = overlap1;
+
+            if (overlap1 <= 0) {
+                return;
+            }
+        } else {
+            resultAB.axis = axisA0;
+            resultAB.overlap = overlap0;
+        }
+
+        overlap0 = halfB0 + (halfA0 * r00 + halfA1 * r10) - Math.abs(deltaX * axisB0X + deltaY * axisB0Y);
+
+        if (overlap0 <= 0) {
+            resultBA.axis = axisB0;
+            resultBA.overlap = overlap0;
+            return;
+        }
+
+        overlap1 = halfB1 + (halfA0 * r01 + halfA1 * r11) - Math.abs(deltaX * axisB1X + deltaY * axisB1Y);
+
+        if (overlap1 < overlap0) {
+            resultBA.axis = axisB1;
+            resultBA.overlap = overlap1;
+        } else {
+            resultBA.axis = axisB0;
+            resultBA.overlap = overlap0;
+        }
     };
 
     /**

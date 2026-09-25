@@ -203,11 +203,12 @@ var Axes = require('../geometry/Axes');
             _sCx1: 0,
             _sCy0: 0,
             _sCy1: 0,
-            // Box tag, read by Collision.collides to choose the closed-form
-            // support search (see Body._updateBoxTag). _boxCorners is -1
-            // unless this body is geometrically a rectangle centred on
-            // `position`; then it packs which vertex sits on which side of
-            // each axis. Declared BEFORE the memo so the last key is unchanged.
+            // Box tag, read by Collision.collides to choose the fused box-box
+            // SAT and the closed-form support search (see
+            // Body._updateBoxTag). _boxCorners is -1 unless this body is
+            // geometrically a rectangle centred on `position`; then it packs
+            // which vertex sits on which side of each axis. Declared BEFORE the
+            // memo so the last key is unchanged.
             _boxHalf0: 0,
             _boxHalf1: 0,
             _boxCorners: -1,
@@ -696,8 +697,9 @@ var Axes = require('../geometry/Axes');
     };
 
     /**
-     * Takes the box tag that `Collision.collides` reads to choose the
-     * closed-form support search, `Collision._findSupportsBox`: `_boxCorners`,
+     * Takes the box tag that `Collision.collides` reads to choose the fused
+     * box-box separating-axis test (`Collision._overlapBoxes`) and the
+     * closed-form support search (`Collision._findSupportsBox`): `_boxCorners`,
      * `_boxHalf0` and `_boxHalf1` (see `Body.create`).
      *
      * The tag is decided by ACTUAL geometry, never by the factory that built

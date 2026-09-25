@@ -124,9 +124,14 @@ const STACK_GOLDEN = [
     [300, 460.4116826427915, 0],
 ];
 
+// Re-pinned for the fused box-box SAT, whose overlap differs from the general
+// reduction in its last bits (~1e-14 here). The box ends this scene rocking on
+// one corner, which amplifies that about tenfold per step from step 32, so the
+// pose moved 0.109 px; the previous golden was
+// [332.53018802282975, 383.8983859568409, 0.2969428164780015].
 const RAMP_GOLDEN = [
     [300, 400, 0.3],
-    [332.53018802282975, 383.8983859568409, 0.2969428164780015],
+    [332.42112848514074, 383.806144477094, 0.3068018467253259],
 ];
 
 describe('Tier 1: non-chaotic regression guards (pinned pose, epsilon)', () => {

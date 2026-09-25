@@ -1,9 +1,16 @@
 /* eslint-env es6, jest */
 "use strict";
 
-// Differential tests for the closed-form box support search
-// (`Collision._findSupportsBox`) against the general hill-climb
-// (`Collision._findSupports`) it stands in for.
+// Differential tests for the two box-only halves of the narrowphase against
+// the general code they stand in for: the closed-form support search
+// (`Collision._findSupportsBox`) against the hill-climb
+// (`Collision._findSupports`), and the fused separating-axis test
+// (`Collision._overlapBoxes`) against two `Collision._overlapAxes` calls.
+//
+// The fused SAT is a RE-BASELINE, not a bit-identical rewrite: it computes the
+// overlap from `position` and the half extents rather than from the vertices,
+// so the overlap differs in its last bits. What it must keep is every DECISION
+// made on it: the separating verdict, and the axis object chosen.
 //
 // The box search must return the SAME two vertex objects in the SAME order on
 // every call, because `Pair.update` matches contacts by vertex identity and the
@@ -17,11 +24,13 @@
 //    is where a closed form and a float comparison can disagree;
 // 2. a shadow differential inside two small storm-shaped churn scenes, one on
 //    the game's axis-aligned statics and one on rotated statics, where the
-//    world steps on the GENERAL result and the box result is checked beside it.
-//    The general result is taken from the arguments `collides` must pass (the
-//    lower id first with direction 1, then the reverse with -1), never from the
-//    call's own, so a call site passing the wrong bodies or direction fails too;
-// 3. two mutants that must be caught, so the differential can say no;
+//    world steps on the FUSED overlap and the GENERAL support result, and the
+//    general overlap and the box support result are checked beside them. The
+//    general support result is taken from the arguments `collides` must pass
+//    (the lower id first with direction 1, then the reverse with -1), never
+//    from the call's own, so a call site passing the wrong bodies or direction
+//    fails too;
+// 3. mutants that must be caught, so the differential can say no;
 // 4. near-boxes (a corner moved 0.01 px, a slight shear) the tag must refuse.
 const Matter = require('../src/module/main.js');
 const { Engine, Composite, Bodies, Body, Collision, Detector } = Matter;
@@ -178,6 +187,62 @@ describe('directed sweep: every search direction, aimed at the ties', () => {
     });
 });
 
+describe('directed sweep: the fused SAT over box pairs at every relative pose', () => {
+    it('chooses the general axis and verdict, to within 1e-9 of its overlap', () => {
+        const random = makeRandom(4242);
+        const sat = { calls: 0, axisMismatch: 0, verdictMismatch: 0, maxDelta: 0 };
+        let overlapping = 0;
+        let separated = 0;
+
+        for (let i = 0; i < 4000; i++) {
+            // page-scale coordinates, sizes from a 1px sliver to a panel
+            const originX = random() * 2e5;
+            const originY = random() * 2e5;
+            const bodyA = Bodies.rectangle(originX, originY, 1 + random() * 120, 1 + random() * 60, { angle: (random() - 0.5) * 7 });
+            const reach = 10 + random() * 150;
+            const bodyB = Bodies.rectangle(
+                originX + (random() - 0.5) * reach, originY + (random() - 0.5) * reach,
+                1 + random() * 80, 1 + random() * 40,
+                // a quarter of the pairs axis-aligned, where exact ties live
+                { angle: i % 4 === 0 ? 0 : (random() - 0.5) * 7 }
+            );
+            if (i % 4 === 0) {
+                Body.setAngle(bodyA, 0);
+            }
+
+            const generalAB = { overlap: 0, axis: null };
+            const generalBA = { overlap: 0, axis: null };
+            const fusedAB = { overlap: 0, axis: null };
+            const fusedBA = { overlap: 0, axis: null };
+            Collision._overlapAxes(generalAB, bodyA, bodyB.vertices, bodyA.axes);
+
+            if (generalAB.overlap > 0) {
+                Collision._overlapAxes(generalBA, bodyB, bodyA.vertices, bodyB.axes);
+            }
+
+            Collision._overlapBoxes(fusedAB, fusedBA, bodyA, bodyB);
+            sat.calls++;
+            compareOverlap(sat, generalAB, fusedAB);
+
+            if (generalAB.overlap > 0 && fusedAB.overlap > 0) {
+                compareOverlap(sat, generalBA, fusedBA);
+            }
+
+            if (generalAB.overlap > 0 && generalBA.overlap > 0) {
+                overlapping++;
+            } else {
+                separated++;
+            }
+        }
+
+        expect(overlapping).toBeGreaterThan(500);
+        expect(separated).toBeGreaterThan(500);
+        expect(sat.axisMismatch).toBe(0);
+        expect(sat.verdictMismatch).toBe(0);
+        expect(sat.maxDelta).toBeLessThan(1e-9);
+    });
+});
+
 // A small storm-shaped churn scene in the game's configuration: a grid of
 // static tiles released a few per step with a push, debris evicted after a
 // fixed life and replaced by a new static, plus a few NON-box movers (circles
@@ -267,8 +332,35 @@ const MUTANTS = {
     swapHalves: 'swapHalves',
     // settles two level corners by vertex index alone, as a closed form that
     // ignored the general search's own float comparison would
-    tieByIndex: 'tieByIndex'
+    tieByIndex: 'tieByIndex',
+    // the same crossing, in the fused SAT: each box projects as if turned a
+    // quarter, so an overlap along its long side reads as along its short one
+    swapHalvesSat: 'swapHalvesSat'
 };
+
+function swapHalvesOf(body) {
+    const half0 = body._boxHalf0;
+    body._boxHalf0 = body._boxHalf1;
+    body._boxHalf1 = half0;
+}
+
+// one general { overlap, axis } against its fused twin: the chosen axis
+// object, the separating verdict, and how far the overlap moved
+function compareOverlap(sat, general, fused) {
+    if (general.axis !== fused.axis) {
+        sat.axisMismatch++;
+    }
+
+    if ((general.overlap > 0) !== (fused.overlap > 0)) {
+        sat.verdictMismatch++;
+    }
+
+    const delta = Math.abs(general.overlap - fused.overlap);
+
+    if (delta > sat.maxDelta) {
+        sat.maxDelta = delta;
+    }
+}
 
 function runShadowDifferential({ rotatedStatics, mutant, steps }) {
     const realBoxSearch = Collision._findSupportsBox;
@@ -276,6 +368,41 @@ function runShadowDifferential({ rotatedStatics, mutant, steps }) {
     const realCollides = Collision.collides;
     const general = Collision._findSupports;
     const counters = { boxCalls: 0, generalCalls: 0, first: 0, second: 0 };
+    const sat = { calls: 0, axisMismatch: 0, verdictMismatch: 0, maxDelta: 0 };
+    const realOverlapBoxes = Collision._overlapBoxes;
+
+    // the world steps on the FUSED result, as shipped; the general reduction
+    // runs beside it on the same state
+    Collision._overlapBoxes = function(resultAB, resultBA, bodyA, bodyB) {
+        const generalAB = { overlap: 0, axis: null };
+        const generalBA = { overlap: 0, axis: null };
+        Collision._overlapAxes(generalAB, bodyA, bodyB.vertices, bodyA.axes);
+
+        if (generalAB.overlap > 0) {
+            Collision._overlapAxes(generalBA, bodyB, bodyA.vertices, bodyB.axes);
+        }
+
+        const swapHalves = mutant === MUTANTS.swapHalvesSat;
+
+        if (swapHalves) {
+            swapHalvesOf(bodyA);
+            swapHalvesOf(bodyB);
+        }
+
+        realOverlapBoxes(resultAB, resultBA, bodyA, bodyB);
+
+        if (swapHalves) {
+            swapHalvesOf(bodyA);
+            swapHalvesOf(bodyB);
+        }
+
+        sat.calls++;
+        compareOverlap(sat, generalAB, resultAB);
+
+        if (generalAB.overlap > 0 && resultAB.overlap > 0) {
+            compareOverlap(sat, generalBA, resultBA);
+        }
+    };
     let insideBoxSearch = false;
     // which support search of the current `collides` call this is (0 or 1)
     let supportCall = 0;
@@ -363,9 +490,10 @@ function runShadowDifferential({ rotatedStatics, mutant, steps }) {
         const bodies = Composite.allBodies(scene.engine.world);
         const untaggedBoxes = bodies.filter((body) => body._boxCorners < 0 && scene.nonBoxes.indexOf(body) === -1).length;
 
-        return { counters, paths: paths.counts, untaggedBoxes, bodies: bodies.length };
+        return { counters, sat, paths: paths.counts, untaggedBoxes, bodies: bodies.length };
     } finally {
         paths.restore();
+        Collision._overlapBoxes = realOverlapBoxes;
         Collision._findSupportsBox = realBoxSearch;
         Collision._supportsFromLevelPair = realLevelPair;
         Collision.collides = realCollides;
@@ -399,6 +527,14 @@ describe.each([
         expect(result.counters.first).toBe(0);
         expect(result.counters.second).toBe(0);
     });
+
+    it('the fused SAT chose the general axis and verdict on every call, to within 1e-9 of its overlap', () => {
+        expect(result.sat.calls).toBeGreaterThan(10000);
+        expect(result.sat.axisMismatch).toBe(0);
+        expect(result.sat.verdictMismatch).toBe(0);
+        expect(result.sat.maxDelta).toBeGreaterThan(0);
+        expect(result.sat.maxDelta).toBeLessThan(1e-9);
+    });
 });
 
 describe('the differential catches a wrong box search', () => {
@@ -410,6 +546,11 @@ describe('the differential catches a wrong box search', () => {
     it('level corners settled by index alone', () => {
         const result = runShadowDifferential({ rotatedStatics: false, mutant: MUTANTS.tieByIndex, steps: 120 });
         expect(result.counters.first + result.counters.second).toBeGreaterThan(0);
+    });
+
+    it('half extents read crossed over by the fused SAT', () => {
+        const result = runShadowDifferential({ rotatedStatics: true, mutant: MUTANTS.swapHalvesSat, steps: 120 });
+        expect(result.sat.axisMismatch + result.sat.verdictMismatch).toBeGreaterThan(0);
     });
 });
 
