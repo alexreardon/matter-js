@@ -179,12 +179,22 @@ var Common = require('../core/Common');
 
     /**
      * Updates pairs given a list of collisions.
+     *
+     * `pairs.collisionStart` is always filled. `pairs.collisionActive` and
+     * `pairs.collisionEnd` are filled unless `collectActive` / `collectEnd` is
+     * `false`, in which case the list is left empty (the engine passes `false`
+     * for an event with no listener; see `Engine.update`).
      * @method update
      * @param {object} pairs
      * @param {collision[]} collisions
      * @param {number} timestamp
+     * @param {boolean} [collectActive=true] Whether to fill `pairs.collisionActive`
+     * @param {boolean} [collectEnd=true] Whether to fill `pairs.collisionEnd`
      */
-    Pairs.update = function(pairs, collisions, timestamp) {
+    Pairs.update = function(pairs, collisions, timestamp, collectActive, collectEnd) {
+        collectActive = collectActive !== false;
+        collectEnd = collectEnd !== false;
+
         var pairUpdate = Pair.update,
             pairCreate = Pair.create,
             pairSetActive = Pair.setActive,
@@ -208,7 +218,7 @@ var Common = require('../core/Common');
 
             if (pair) {
                 // pair already exists (but may or may not be active)
-                if (pair.isActive) {
+                if (collectActive && pair.isActive) {
                     // pair exists and is active
                     collisionActive[collisionActiveIndex++] = pair;
                 }
@@ -245,7 +255,9 @@ var Common = require('../core/Common');
                     pairsList[pairsListIndex++] = pair;
                 } else {
                     // remove inactive pairs if either body awake
-                    collisionEnd[collisionEndIndex++] = pair;
+                    if (collectEnd) {
+                        collisionEnd[collisionEndIndex++] = pair;
+                    }
                     Pairs._recordRemove(pairs, pair.id, pair);
                     // the record can outlive the pair in solver scratch, so
                     // drop the back reference or the next `Pairs.update` would

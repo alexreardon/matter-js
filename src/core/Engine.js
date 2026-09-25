@@ -85,6 +85,10 @@ var Body = require('../body/Body');
      * Moves the simulation forward in time by `delta` milliseconds.
      * Triggers `beforeUpdate`, `beforeSolve` and `afterUpdate` events.
      * Triggers `collisionStart`, `collisionActive` and `collisionEnd` events.
+     *
+     * `engine.pairs.collisionStart` is filled on every update. `engine.pairs.collisionActive`
+     * and `engine.pairs.collisionEnd` are filled only while their event has a listener
+     * when the update reaches collision detection, and are otherwise left empty.
      * @method update
      * @param {engine} engine
      * @param {number} [delta=16.666]
@@ -216,8 +220,12 @@ var Body = require('../body/Body');
         // find all collisions
         var collisions = Detector.collisions(detector);
 
-        // update collision pairs
-        Pairs.update(pairs, collisions, timestamp);
+        // update collision pairs. The active and ended lists are filled only
+        // for a listener of their event: the active list takes one entry per
+        // touching pair per update, and nothing in the engine reads either
+        Pairs.update(pairs, collisions, timestamp,
+            Engine._hasListener(engine, 'collisionActive'),
+            Engine._hasListener(engine, 'collisionEnd'));
 
         // wake up bodies involved in collisions
         if (engine.enableSleeping)

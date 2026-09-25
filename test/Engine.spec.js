@@ -243,3 +243,88 @@ describe('Engine per-update events', () => {
         expect(() => Events.trigger({ events: [] }, 'push', {})).not.toThrow();
     });
 });
+
+describe('Engine collision lists', () => {
+    const Events = require('../src/core/Events');
+    const Pairs = require('../src/collision/Pairs');
+
+    // a pile settling on a floor, with a body taken out now and then so pairs
+    // also end; returns per-update fingerprints and the list lengths it saw
+    function runPile(listen) {
+        // ids feed the pair ids and the fingerprint, so both runs start alike
+        require('../src/core/Common')._nextId = 0;
+        const engine = Engine.create();
+        const boxes = [];
+        Composite.add(engine.world, Bodies.rectangle(200, 400, 600, 40, { isStatic: true }));
+        for (let i = 0; i < 24; i++) {
+            const box = Bodies.rectangle(40 + (i % 8) * 45, 100 + Math.floor(i / 8) * 45, 40, 40);
+            boxes.push(box);
+            Composite.add(engine.world, box);
+        }
+        const heard = { active: 0, end: 0 };
+        if (listen) {
+            Events.on(engine, 'collisionActive', (event) => {
+                heard.active += event.pairs.length;
+            });
+            Events.on(engine, 'collisionEnd', (event) => {
+                heard.end += event.pairs.length;
+            });
+        }
+        const lengths = { start: 0, active: 0, end: 0 };
+        const prints = [];
+        for (let step = 0; step < 180; step++) {
+            if (step % 30 === 29) {
+                Composite.remove(engine.world, boxes.pop());
+            }
+            Engine.update(engine, DELTA);
+            lengths.start += engine.pairs.collisionStart.length;
+            lengths.active += engine.pairs.collisionActive.length;
+            lengths.end += engine.pairs.collisionEnd.length;
+            prints.push(Composite.allBodies(engine.world)
+                .map((body) => [body.id, body.position.x, body.position.y, body.angle].join(','))
+                .concat(engine.pairs.list.map((pair) => pair.id))
+                .join('|'));
+        }
+        return { prints, lengths, heard };
+    }
+
+    test('with no listener, collisionStart is filled and collisionActive and collisionEnd stay empty', () => {
+        const { lengths } = runPile(false);
+
+        expect(lengths.start).toBeGreaterThan(0);
+        expect(lengths.active).toBe(0);
+        expect(lengths.end).toBe(0);
+    });
+
+    test('a listener receives the filled list, and listening changes nothing else', () => {
+        const quiet = runPile(false);
+        const listened = runPile(true);
+
+        expect(listened.lengths.active).toBeGreaterThan(0);
+        expect(listened.lengths.end).toBeGreaterThan(0);
+        expect(listened.heard.active).toBe(listened.lengths.active);
+        expect(listened.heard.end).toBe(listened.lengths.end);
+        expect(listened.lengths.start).toBe(quiet.lengths.start);
+        expect(listened.prints).toEqual(quiet.prints);
+    });
+
+    test('Pairs.update called without the collect flags fills all three lists', () => {
+        const Detector = require('../src/collision/Detector');
+        const engine = Engine.create();
+        Composite.add(engine.world, [
+            Bodies.rectangle(0, 0, 40, 40),
+            Bodies.rectangle(0, 25, 400, 20, { isStatic: true })
+        ]);
+        Detector.setBodies(engine.detector, Composite.allBodies(engine.world));
+        const pairs = engine.pairs;
+
+        Pairs.update(pairs, Detector.collisions(engine.detector), 1);
+        expect(pairs.collisionStart.length).toBe(1);
+
+        Pairs.update(pairs, Detector.collisions(engine.detector), 2);
+        expect(pairs.collisionActive.length).toBe(1);
+
+        Pairs.update(pairs, [], 3);
+        expect(pairs.collisionEnd.length).toBe(1);
+    });
+});
