@@ -274,15 +274,34 @@ describe('dead writes: the end-of-update velocity pass', () => {
         expect(firstDivergence(kept.hashes, skipped.hashes)).toBe(-1);
     });
 
-    test('with the option off a paused update recomputes velocity before it solves', () => {
+    test('with the option off a paused update recomputes the velocity properties before it solves', () => {
+        // all but `velocity` itself, which still pads the bounds the update
+        // before deferred (see the bounds group below)
         const poisonBeforePause = ({ movers, beforePause }) => {
             if (beforePause) {
-                movers.forEach(poisonVelocity);
+                movers.forEach((body) => {
+                    body.angularVelocity = NaN;
+                    body.speed = NaN;
+                    body.angularSpeed = NaN;
+                });
             }
         };
         const skipped = run({ options: SOLVED_OFF, pauseEvery: 7 });
         const poisoned = run({ options: SOLVED_OFF, pauseEvery: 7, atStepEnd: poisonBeforePause });
         expect(firstDivergence(skipped.hashes, poisoned.hashes)).toBe(-1);
+    });
+
+    test('NEGATIVE: with the option off, velocity poisoned before a paused update diverges (deferred bounds are padded by it)', () => {
+        const poisoned = run({
+            options: SOLVED_OFF,
+            pauseEvery: 7,
+            atStepEnd: ({ movers, beforePause }) => {
+                if (beforePause) {
+                    movers.forEach(poisonVelocity);
+                }
+            }
+        });
+        expect(firstDivergence(run({ options: SOLVED_OFF, pauseEvery: 7 }).hashes, poisoned.hashes)).not.toBe(-1);
     });
 
     test('NEGATIVE: with the option on, velocity poisoned before a paused update diverges (the solve reads it)', () => {
@@ -314,5 +333,104 @@ describe('dead writes: the end-of-update velocity pass', () => {
         expect(fingerprint(engine, 'derived')).toBe(engineRead);
         mover.velocity.x += 1e-9;
         expect(fingerprint(engine, 'engine')).not.toBe(engineRead);
+    });
+});
+
+describe('dead writes: moving-body bounds after the position correction', () => {
+    const Bounds = require('../src/geometry/Bounds');
+
+    const refreshBounds = (body) => {
+        body.parts.forEach((part) => {
+            Bounds.update(part.bounds, part.vertices, body.velocity);
+        });
+    };
+
+    test('with the option off, re-adding the deferred write at the end of every update changes nothing', () => {
+        const skipped = run({ options: SOLVED_OFF, consumer: 'derived' });
+        const readded = run({
+            options: SOLVED_OFF,
+            consumer: 'derived',
+            atStepEnd: ({ movers }) => movers.forEach(refreshBounds)
+        });
+        expect(firstDivergence(skipped.hashes, readded.hashes)).toBe(-1);
+    });
+
+    test('with the option off, the scene defers bounds and re-freezes bodies whose bounds were deferred', () => {
+        let deferredAtFreeze = 0;
+        const setStatic = Body.setStatic;
+        Body.setStatic = function(body, isStatic) {
+            if (isStatic && body._boundsStale) {
+                deferredAtFreeze++;
+            }
+            return setStatic.apply(this, arguments);
+        };
+        try {
+            run({ options: SOLVED_OFF });
+        } finally {
+            Body.setStatic = setStatic;
+        }
+        expect(deferredAtFreeze).toBeGreaterThan(50);
+    });
+
+    test('with the option on, no body is ever marked', () => {
+        const { engine } = run();
+        expect(Composite.allBodies(engine.world).some((body) => body._boundsStale)).toBe(false);
+    });
+
+    test('NEGATIVE: with the option off and the catch-up refresh disabled, a re-freeze hands the static index a stale box', () => {
+        const updateStaleBounds = Body._updateStaleBounds;
+        Body._updateStaleBounds = function() {};
+        let broken;
+        try {
+            broken = run({ options: SOLVED_OFF, consumer: 'derived' });
+        } finally {
+            Body._updateStaleBounds = updateStaleBounds;
+        }
+        expect(firstDivergence(run({ consumer: 'engine' }).hashes, broken.hashes)).not.toBe(-1);
+    });
+
+    test('NEGATIVE: with the option off and the catch-up refresh disabled, a paused update detects against a stale box', () => {
+        const updateStaleBounds = Body._updateStaleBounds;
+        const setStatic = Body.setStatic;
+        // disable the refresh only where a paused update calls it, by leaving
+        // the re-freeze path its own copy
+        Body._updateStaleBounds = function() {};
+        Body.setStatic = function(body, isStatic) {
+            if (isStatic) {
+                updateStaleBounds(body);
+            }
+            return setStatic.apply(this, arguments);
+        };
+        let broken;
+        try {
+            broken = run({ options: SOLVED_OFF, pauseEvery: 7, consumer: 'derived' });
+        } finally {
+            Body._updateStaleBounds = updateStaleBounds;
+            Body.setStatic = setStatic;
+        }
+        expect(firstDivergence(run({ pauseEvery: 7, consumer: 'engine' }).hashes, broken.hashes)).not.toBe(-1);
+    });
+
+    test('NEGATIVE: moving-body bounds poisoned before the detector reads them diverge', () => {
+        const Events = require('../src/core/Events');
+        let hooked = false;
+        const poisoned = run({
+            atStepEnd: ({ engine }) => {
+                if (hooked) {
+                    return;
+                }
+                hooked = true;
+                // after integration, before detection
+                Events.on(engine, 'beforeSolve', () => {
+                    Composite.allBodies(engine.world).forEach((body) => {
+                        if (!body.isStatic) {
+                            body.bounds.min.x = body.bounds.min.y = -1e9;
+                            body.bounds.max.x = body.bounds.max.y = 1e9;
+                        }
+                    });
+                });
+            }
+        });
+        expect(firstDivergence(run().hashes, poisoned.hashes)).not.toBe(-1);
     });
 });

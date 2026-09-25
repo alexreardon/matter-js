@@ -134,11 +134,15 @@ var Axes = require('../geometry/Axes');
             _stamp: 0,
             _gsStamp: 0,
             _ov: false,
-            // no writer or reader since squeeze-10 (the gridStatic oversize
-            // flag moved to the detector's flat `mOver` array in 67ec902, and
-            // its per-step write was dead from then). Still declared so the
-            // in-object layout of every field after it does not shift
-            _ovD: false,
+            // set when an engine running with `enableSolvedVelocityAndBounds`
+            // false skipped this body's bounds refresh after a position
+            // correction: its bounds MAY lag its vertices until integration
+            // or `Body._updateStaleBounds` recomputes them. Never cleared by
+            // integration (that would be a store per mover per update), which
+            // is safe because the recompute is idempotent on fresh bounds.
+            // (This slot held the dead gridStatic `_ovD` flag, so reusing it
+            // leaves the in-object layout of every field after it unchanged.)
+            _boundsStale: false,
             _solverStamp: 0,
             // slot index into the resolver's flat solver arrays (valid only
             // while _solverStamp matches the current solver epoch)
@@ -352,12 +356,43 @@ var Axes = require('../geometry/Axes');
     };
 
     /**
+     * Recomputes the bounds of every part of `body` from its current vertices
+     * and velocity, if an engine running with `enableSolvedVelocityAndBounds`
+     * false left them possibly stale (see `body._boundsStale`). Called before a
+     * body stops being integrated, so the detector never reads a stale box.
+     * @method _updateStaleBounds
+     * @private
+     * @param {body} body
+     */
+    Body._updateStaleBounds = function(body) {
+        if (!body._boundsStale) {
+            return;
+        }
+
+        var parts = body.parts,
+            velocity = body.velocity;
+
+        for (var i = 0; i < parts.length; i++) {
+            Bounds.update(parts[i].bounds, parts[i].vertices, velocity);
+        }
+
+        body._boundsStale = false;
+    };
+
+    /**
      * Sets the body as static, including isStatic flag and setting mass and inertia to Infinity.
      * @method setStatic
      * @param {body} body
      * @param {bool} isStatic
      */
     Body.setStatic = function(body, isStatic) {
+        // a static body is never integrated again, so bring bounds an engine
+        // deferred up to date first, while velocity still holds what they
+        // would have been padded by
+        if (isStatic) {
+            Body._updateStaleBounds(body);
+        }
+
         for (var i = 0; i < body.parts.length; i++) {
             var part = body.parts[i];
 

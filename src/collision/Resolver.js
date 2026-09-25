@@ -324,9 +324,10 @@ var Bounds = require('../geometry/Bounds');
      * @private
      * @method _postSolveBody
      * @param {body} body
+     * @param {boolean} [deferBounds=false] Leave a moving body's bounds to its next integration
      * @return {boolean} `true` when the body still carries a non-zero impulse
      */
-    Resolver._postSolveBody = function(body) {
+    Resolver._postSolveBody = function(body, deferBounds) {
         var positionImpulse = body.positionImpulse,
             positionImpulseX = positionImpulse.x,
             positionImpulseY = positionImpulse.y,
@@ -336,13 +337,25 @@ var Bounds = require('../geometry/Bounds');
             return false;
         }
 
+        // a moving body's bounds are recomputed by its next integration before
+        // the detector reads them, so an engine that opted out defers them and
+        // marks the body (see Body._updateStaleBounds); a static or sleeping
+        // body is not integrated, so its bounds are always kept current here
+        var skipBounds = deferBounds === true && !(body.isStatic || body.isSleeping);
+
         // update body geometry
         for (var j = 0; j < body.parts.length; j++) {
             var part = body.parts[j];
             Vertices.translate(part.vertices, positionImpulse);
-            Bounds.update(part.bounds, part.vertices, velocity);
+            if (!skipBounds) {
+                Bounds.update(part.bounds, part.vertices, velocity);
+            }
             part.position.x += positionImpulseX;
             part.position.y += positionImpulseY;
+        }
+
+        if (skipBounds) {
+            body._boundsStale = true;
         }
 
         // move the body without changing velocity
@@ -382,11 +395,19 @@ var Bounds = require('../geometry/Bounds');
      * instead of scanning every body in the world. A body whose pair ended but
      * whose warmed impulse is still decaying stays in a persistent carry list
      * until the impulse clears, preserving the classic path's decay behaviour.
+     *
+     * With `deferBounds` a moving body's bounds are not recomputed after its
+     * position correction: its next integration recomputes them before the
+     * detector reads them, and the body is marked so that anything which stops
+     * it being integrated first brings them up to date (see
+     * `Body._updateStaleBounds`). `Engine.update` passes it when
+     * `enableSolvedVelocityAndBounds` is `false`.
      * @method postSolvePosition
      * @param {body[]} bodies
      * @param {pairs} [container] The engine's pairs structure for scratch state
+     * @param {boolean} [deferBounds=false] Leave moving bodies' bounds to their next integration
      */
-    Resolver.postSolvePosition = function(bodies, container) {
+    Resolver.postSolvePosition = function(bodies, container, deferBounds) {
         var positionWarming = Resolver._positionWarming,
             verticesTranslate = Vertices.translate,
             boundsUpdate = Bounds.update,
@@ -446,7 +467,7 @@ var Bounds = require('../geometry/Bounds');
                 // the zero-impulse early-return of _postSolveBody, inlined to
                 // skip the call (a removed body's impulse is zeroed in place)
                 var carryImpulse = carryBody.positionImpulse;
-                if ((carryImpulse.x !== 0 || carryImpulse.y !== 0) && postSolveBody(carryBody)) {
+                if ((carryImpulse.x !== 0 || carryImpulse.y !== 0) && postSolveBody(carryBody, deferBounds)) {
                     // in-place compaction: carryCount <= i always holds here
                     carry[carryCount++] = carryBody;
                 }
@@ -459,7 +480,7 @@ var Bounds = require('../geometry/Bounds');
             for (i = 0; i < solverBodiesLength; i++) {
                 var solverBody = solverBodies[i],
                     solverImpulse = solverBody.positionImpulse;
-                if ((solverImpulse.x !== 0 || solverImpulse.y !== 0) && postSolveBody(solverBody)) {
+                if ((solverImpulse.x !== 0 || solverImpulse.y !== 0) && postSolveBody(solverBody, deferBounds)) {
                     carry[carryCount++] = solverBody;
                 }
             }
@@ -484,13 +505,22 @@ var Bounds = require('../geometry/Bounds');
             body.totalContacts = 0;
 
             if (positionImpulseX !== 0 || positionImpulseY !== 0) {
+                // see _postSolveBody for the deferral
+                var skipBounds = deferBounds === true && !(body.isStatic || body.isSleeping);
+
                 // update body geometry
                 for (var j = 0; j < body.parts.length; j++) {
                     var part = body.parts[j];
                     verticesTranslate(part.vertices, positionImpulse);
-                    boundsUpdate(part.bounds, part.vertices, velocity);
+                    if (!skipBounds) {
+                        boundsUpdate(part.bounds, part.vertices, velocity);
+                    }
                     part.position.x += positionImpulseX;
                     part.position.y += positionImpulseY;
+                }
+
+                if (skipBounds) {
+                    body._boundsStale = true;
                 }
 
                 // move the body without changing velocity

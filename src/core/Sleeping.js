@@ -117,6 +117,11 @@ var Common = require('./Common');
         }
 
         if (isSleeping) {
+            // a sleeping body is not integrated, so bring bounds an engine
+            // deferred up to date first, while velocity still holds what they
+            // would have been padded by (see Body.setStatic)
+            Body._updateStaleBounds(body);
+
             body.isSleeping = true;
             body.sleepCounter = body.sleepThreshold;
 

@@ -64,8 +64,8 @@ function makeRandom(seed) {
 * static flips, sleeping flips, velocity writes, scaling, a compound body and
 * a sensor, in the given broadphase mode.
 */
-function runScenario(mode) {
-    var engine = Engine.create({ enableSleeping: mode === 'sweep' });
+function runScenario(mode, solved) {
+    var engine = Engine.create({ enableSleeping: mode === 'sweep', enableSolvedVelocityAndBounds: solved });
     Detector._mode = mode;
 
     var random = makeRandom(7);
@@ -130,8 +130,10 @@ function runScenario(mode) {
     return engine;
 }
 
-describe.each(['sweep', 'gridStatic'])('object shapes stay factory-shaped (%s)', function(mode) {
-    var engine = runScenario(mode);
+// the third row is the consumer's configuration, which marks bodies
+// `_boundsStale` in the position post-solve
+describe.each([['sweep', true], ['gridStatic', true], ['gridStatic', false]])('object shapes stay factory-shaped (%s, solved state kept: %s)', function(mode, solved) {
+    var engine = runScenario(mode, solved);
     var bodies = Composite.allBodies(engine.world);
     var pairsList = engine.pairs.list;
 
