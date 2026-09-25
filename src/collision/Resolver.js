@@ -645,8 +645,8 @@ var Bounds = require('../geometry/Bounds');
                     slotB = aIdxB[i],
                     vNormalX = aNx[i],
                     vNormalY = aNy[i],
-                    // exactly how Collision.collides builds the tangent, so
-                    // deriving it here matches reading collision.tangent
+                    // the tangent is the normal turned a quarter (an exact
+                    // negation and swap), which is how it is derived everywhere
                     vTangentX = -vNormalY,
                     vTangentY = vNormalX;
 
@@ -751,7 +751,9 @@ var Bounds = require('../geometry/Bounds');
                 bodyA = collision.parentA,
                 bodyB = collision.parentB,
                 normal = collision.normal,
-                tangent = collision.tangent;
+                // the normal turned a quarter: an exact negation and swap
+                tangentX = -normal.y,
+                tangentY = normal.x;
 
             // resolve each contact
             for (j = 0; j < contactCount; j++) {
@@ -762,8 +764,8 @@ var Bounds = require('../geometry/Bounds');
 
                 if (normalImpulse !== 0 || tangentImpulse !== 0) {
                     // total impulse from contact
-                    var impulseX = normal.x * normalImpulse + tangent.x * tangentImpulse,
-                        impulseY = normal.y * normalImpulse + tangent.y * tangentImpulse;
+                    var impulseX = normal.x * normalImpulse + tangentX * tangentImpulse,
+                        impulseY = normal.y * normalImpulse + tangentY * tangentImpulse;
 
                     // apply impulse from contact
                     if (!(bodyA.isStatic || bodyA.isSleeping)) {
@@ -1042,8 +1044,9 @@ var Bounds = require('../geometry/Bounds');
                 bodyB = collision.parentB,
                 normalX = collision.normal.x,
                 normalY = collision.normal.y,
-                tangentX = collision.tangent.x,
-                tangentY = collision.tangent.y,
+                // the normal turned a quarter: an exact negation and swap
+                tangentX = -normalY,
+                tangentY = normalX,
                 inverseMassTotal = pair.inverseMass,
                 friction = pair.friction * pair.frictionStatic * frictionNormalMultiplier,
                 contacts = pair.contacts,

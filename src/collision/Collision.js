@@ -45,7 +45,6 @@ var Pair = require('./Pair');
             parentB: bodyB.parent,
             depth: 0,
             normal: { x: 0, y: 0 },
-            tangent: { x: 0, y: 0 },
             supports: [null, null],
             supportCount: 0
         };
@@ -126,7 +125,6 @@ var Pair = require('./Pair');
         }
 
         var normal = collision.normal,
-            tangent = collision.tangent,
             supports = collision.supports,
             depth = minOverlap.overlap,
             minAxis = minOverlap.axis,
@@ -143,9 +141,6 @@ var Pair = require('./Pair');
 
         normal.x = normalX;
         normal.y = normalY;
-        
-        tangent.x = -normalY;
-        tangent.y = normalX;
 
         collision.depth = depth;
 
@@ -599,15 +594,6 @@ var Pair = require('./Pair');
      * @type vector
      * @default { x: 0, y: 0 }
      */
-
-    /**
-     * A normalised `Vector` that is the tangent direction to the collision normal.
-     *
-     * @property tangent
-     * @type vector
-     * @default { x: 0, y: 0 }
-     */
-
 
     /**
      * An array of body vertices that represent the support points in the collision.

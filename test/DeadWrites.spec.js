@@ -22,6 +22,8 @@ const Bodies = require('../src/factory/Bodies');
 const Body = require('../src/body/Body');
 const Composite = require('../src/body/Composite');
 const Detector = require('../src/collision/Detector');
+const Collision = require('../src/collision/Collision');
+const Resolver = require('../src/collision/Resolver');
 
 const STEPS = 240;
 
@@ -159,6 +161,33 @@ describe('dead writes: pair records', () => {
             })
         });
         expect(firstDivergence(run().hashes, poisoned.hashes)).toBe(-1);
+    });
+
+    test('a collision record carries no tangent', () => {
+        const bodyA = Bodies.rectangle(0, 0, 10, 10);
+        const bodyB = Bodies.rectangle(5, 0, 10, 10);
+        const collision = Collision.collides(bodyA, bodyB);
+
+        expect('tangent' in Collision.create(bodyA, bodyB)).toBe(false);
+        expect(collision).not.toBe(null);
+        expect('tangent' in collision).toBe(false);
+    });
+
+    test('the container-less resolver path derives the tangent it needs', () => {
+        const { engine } = run();
+        const pairsList = engine.pairs.list;
+        const bodies = Composite.allBodies(engine.world);
+        const warmed = pairsList.filter((pair) => pair.isActive && (pair.contacts[0].tangentImpulse !== 0
+            || pair.contacts[1].tangentImpulse !== 0));
+
+        expect(warmed.length).toBeGreaterThan(0);
+        expect(() => {
+            Resolver.preSolveVelocity(pairsList);
+            Resolver.solveVelocity(pairsList, 1000 / 60);
+        }).not.toThrow();
+        bodies.forEach((body) => {
+            expect(Number.isFinite(body.positionPrev.x) && Number.isFinite(body.anglePrev)).toBe(true);
+        });
     });
 
     test('NEGATIVE: a warm-start impulse zeroed at the end of an update diverges', () => {

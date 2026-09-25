@@ -87,7 +87,7 @@ function solveVelocityOld(pairs, delta) {
         var collision = pair.collision,
             bodyA = collision.parentA, bodyB = collision.parentB,
             normalX = collision.normal.x, normalY = collision.normal.y,
-            tangentX = collision.tangent.x, tangentY = collision.tangent.y,
+            tangentX = -normalY, tangentY = normalX,
             inverseMassTotal = pair.inverseMass,
             friction = pair.friction * pair.frictionStatic * frictionNormalMultiplier,
             contacts = pair.contacts, contactCount = pair.contactCount,

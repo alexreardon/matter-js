@@ -234,6 +234,7 @@ In both modes:
 - `Matter.version` reports the fork tag (`0.20.0-perf18`) rather than `0.20.0`, so a consumer can assert in CI that it resolved the release it pinned. Version RANGES are unaffected (`^0.20.0` and `~0.20.0` still match, since `Plugin.versionSatisfies` compares major/minor/patch and ignores the suffix); only a plugin pinning the exact string `matter-js@0.20.0` would stop matching.
 - `pair.id` is a number rather than a string.
 - `collision.penetration` no longer exists. Derive it as `normal` scaled by `depth`, which is how the built-in debug renderer now draws it.
+- `collision.tangent` no longer exists. Derive it from the normal as `{ x: -normal.y, y: normal.x }`, which is exactly the value it held.
 - A body removed from a composite has its `positionImpulse` cleared, so it stops being simulated (this matches what upstream effectively did).
 - A world with no constraints skips the constraint passes entirely. If the LAST constraint is removed while a body's warmed `constraintImpulse` is still non-zero, that residual is frozen rather than applied over a few more decaying steps, until a constraint exists again.
 - The position solver derives each body's contact share once per step. Mutating `body.totalContacts` or `Resolver._positionDampen` BETWEEN two `Resolver.solvePosition` calls of the same step is no longer picked up; `Engine.update` does neither.
