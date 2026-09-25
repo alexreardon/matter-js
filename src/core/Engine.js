@@ -72,6 +72,7 @@ var Body = require('../body/Body');
         engine._moverSource = null;
         engine._moverSourceLength = -1;
         engine._moverEpoch = -1;
+        engine._moverSetEpoch = -1;
 
         // for temporary back compatibility only
         engine.grid = { buckets: [] };
@@ -132,9 +133,24 @@ var Body = require('../body/Body');
             Events.trigger(engine, 'beforeUpdate', { timestamp: eventTimestamp, delta: delta });
         }
 
-        // get all bodies and all constraints in the world
-        var allBodies = Composite.allBodies(world),
+        // get all bodies and all constraints in the world. A world with no
+        // child composites is its own body list, so it is used as it is
+        // rather than through `Composite.allBodies`, which builds a fresh copy
+        // after every membership change (every update, on a page being
+        // destroyed). The world is marked as lending it until the last read
+        // below, so a listener that adds or removes a body meanwhile changes a
+        // copy and this update keeps the membership it started with (see
+        // Composite._ownBodies). The detector keeps the array between updates;
+        // a change then is made in place and signalled by
+        // `Composite.setModified`, which is why the classifications key on
+        // Common._bodySetEpoch as well as on the array
+        var lendsBodies = world.composites.length === 0,
+            allBodies = lendsBodies ? world.bodies : Composite.allBodies(world),
             allConstraints = Composite.allConstraints(world);
+
+        if (lendsBodies) {
+            world._bodiesLent = true;
+        }
 
         // if the world has changed
         if (world.isModified) {
@@ -162,19 +178,23 @@ var Body = require('../body/Body');
         // The walk itself touches every body in the world, so on a dense static
         // page it is memory-bound and one of the largest single costs in the
         // step, while its answer almost never changes. Rebuild it only when it
-        // can have changed: a different `allBodies` array (Composite nulls its
-        // cache and rebuilds the array on any add / remove) or a bumped static
+        // can have changed: a bumped body-set epoch (any membership change, see
+        // Common._bodySetEpoch), a different `allBodies` array or length (a
+        // caller that swaps the array without signalling), or a bumped static
         // epoch (`Body.setStatic` / `Sleeping.set`; see Common._bodyStaticEpoch).
         var moverBodies = engine._moverBodies || (engine._moverBodies = []),
             staticEpoch = Common._bodyStaticEpoch,
+            setEpoch = Common._bodySetEpoch,
             allBodiesLength = allBodies.length;
 
         if (engine._moverSource !== allBodies
             || engine._moverSourceLength !== allBodiesLength
-            || engine._moverEpoch !== staticEpoch) {
+            || engine._moverEpoch !== staticEpoch
+            || engine._moverSetEpoch !== setEpoch) {
             engine._moverSource = allBodies;
             engine._moverSourceLength = allBodiesLength;
             engine._moverEpoch = staticEpoch;
+            engine._moverSetEpoch = setEpoch;
 
             var moverCount = 0;
 
@@ -325,6 +345,11 @@ var Body = require('../body/Body');
         // one place the buffer is observable while a body rests, and leaving a
         // value there would hold that body awake.
         Engine._bodiesClearForces(engine.enableSleeping ? allBodies : moverBodies);
+
+        // the last read of `allBodies`: from here a change is made in place
+        if (lendsBodies) {
+            world._bodiesLent = false;
+        }
 
         if (Engine._hasListener(engine, 'afterUpdate')) {
             Events.trigger(engine, 'afterUpdate', { timestamp: eventTimestamp, delta: delta });

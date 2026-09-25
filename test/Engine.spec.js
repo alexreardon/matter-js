@@ -328,3 +328,264 @@ describe('Engine collision lists', () => {
         expect(pairs.collisionEnd.length).toBe(1);
     });
 });
+
+// A world with no child composites is updated over `world.bodies` ITSELF
+// rather than the copy `Composite.allBodies` builds after every change, and
+// the detector keeps that array between updates. So the array's identity no
+// longer says whether the membership changed; `Composite.setModified` does,
+// through Common._bodySetEpoch, and a change made by a listener DURING an
+// update goes to a copy so the update keeps the membership it started with.
+describe('Engine body list', () => {
+    const Common = require('../src/core/Common');
+    const Constraint = require('../src/constraint/Constraint');
+    const Detector = require('../src/collision/Detector');
+    const Events = require('../src/core/Events');
+
+    const scratch64 = new Float64Array(1);
+    const scratch32 = new Uint32Array(scratch64.buffer);
+
+    // FNV-1a over the exact bits
+    function mix(hash, value) {
+        scratch64[0] = value;
+        hash = Math.imul(hash ^ scratch32[0], 16777619);
+        return Math.imul(hash ^ scratch32[1], 16777619);
+    }
+
+    function bodyHash(hash, body) {
+        hash = mix(hash, body.id);
+        hash = mix(hash, body.position.x);
+        hash = mix(hash, body.position.y);
+        hash = mix(hash, body.positionPrev.x);
+        hash = mix(hash, body.positionPrev.y);
+        hash = mix(hash, body.angle);
+        hash = mix(hash, body.anglePrev);
+        hash = mix(hash, body.force.x);
+        hash = mix(hash, body.force.y);
+        hash = mix(hash, body.isSleeping ? 1 : 0);
+        return hash;
+    }
+
+    // a static floor with one mover falling onto it, in gridStatic. The two
+    // bodies that later arrive by direct edit are built BEFORE the priming
+    // updates, because building a body bumps the static epoch, which would
+    // rebuild the mover lists on its own and hide a missing body-set signal
+    function makeScene() {
+        Common._nextId = 0;
+        Detector._mode = 'gridStatic';
+        Detector._cellSize = 32;
+        const engine = Engine.create();
+        const world = engine.world;
+        const floor = [];
+        for (let i = 0; i < 10; i++) {
+            floor.push(Bodies.rectangle(20 + i * 40, 400, 40, 40, { isStatic: true }));
+        }
+        Composite.add(world, floor);
+        const falling = Bodies.rectangle(100, 200, 20, 20);
+        Composite.add(world, falling);
+        // each rests on the floor, so the detector must pair it on arrival
+        const arrival = Bodies.rectangle(260, 372, 20, 20);
+        const landing = Bodies.rectangle(340, 372, 20, 20);
+        for (let i = 0; i < 5; i++) {
+            Engine.update(engine, DELTA);
+        }
+        return { engine, world, floor, falling, arrival, landing };
+    }
+
+    // puts `arrival` in `leaving`'s slot of world.bodies, so the array keeps
+    // its identity AND its length
+    function swapInPlace(world, leaving, arrival) {
+        world.bodies[world.bodies.indexOf(leaving)] = arrival;
+    }
+
+    function isPaired(collisions, body) {
+        return collisions.some((collision) => collision.bodyA === body || collision.bodyB === body);
+    }
+
+    test('a flat world is updated over its own array, and Composite.allBodies still returns a copy', () => {
+        const { engine, world } = makeScene();
+
+        expect(engine.detector.bodies).toBe(world.bodies);
+        expect(Composite.allBodies(world)).not.toBe(world.bodies);
+        expect(Composite.allBodies(world).every((body, index) => body === world.bodies[index])).toBe(true);
+        expect(world._bodiesLent).toBe(false);
+    });
+
+    test('a direct edit of world.bodies plus Composite.setModified reaches the engine, at the same length', () => {
+        const { engine, world, falling, arrival } = makeScene();
+        const fallingAt = falling.position.y;
+        const arrayBefore = world.bodies;
+        const lengthBefore = world.bodies.length;
+
+        swapInPlace(world, falling, arrival);
+        Composite.setModified(world, true, true, false);
+        Engine.update(engine, DELTA);
+
+        expect(world.bodies).toBe(arrayBefore);
+        expect(world.bodies.length).toBe(lengthBefore);
+        // the arrival is integrated and paired, the departed body neither
+        expect(engine._moverBodies).toContain(arrival);
+        expect(engine._moverBodies).not.toContain(falling);
+        expect(falling.position.y).toBe(fallingAt);
+        const active = engine.pairs.list.filter((pair) => pair.isActive).map((pair) => pair.collision);
+        expect(isPaired(active, arrival)).toBe(true);
+        expect(isPaired(active, falling)).toBe(false);
+    });
+
+    test('NEGATIVE: the same edit without Composite.setModified is not seen by the engine', () => {
+        const { engine, world, falling, arrival } = makeScene();
+        const fallingAt = falling.position.y;
+
+        swapInPlace(world, falling, arrival);
+        Engine.update(engine, DELTA);
+
+        // the cached mover list still holds the departed body, and still
+        // integrates it, and not the arrival
+        expect(engine._moverBodies).toContain(falling);
+        expect(engine._moverBodies).not.toContain(arrival);
+        expect(falling.position.y).not.toBe(fallingAt);
+    });
+
+    test('a direct edit that turns a static slot into a mover reaches a direct Detector.collisions call', () => {
+        const { engine, world, floor, landing } = makeScene();
+
+        swapInPlace(world, floor[9], landing);
+        Composite.setModified(world, true, true, false);
+
+        expect(isPaired(Detector.collisions(engine.detector), landing)).toBe(true);
+    });
+
+    test('NEGATIVE: the same edit without Composite.setModified is not seen by the detector', () => {
+        const { engine, world, floor, landing } = makeScene();
+
+        swapInPlace(world, floor[9], landing);
+
+        // the cached classification still reads that slot as a static
+        expect(isPaired(Detector.collisions(engine.detector), landing)).toBe(false);
+    });
+
+    // A pile under a constraint, with sleeping on (so the force pass reads
+    // the whole body list), and listeners that add and remove bodies in
+    // `beforeSolve` and `collisionStart`, plus direct edits between updates.
+    // `nested` adds an empty child composite, which sends the engine down the
+    // `Composite.allBodies` copy path: the behaviour the flat path must match.
+    // The child is created in both runs, so both consume the same ids
+    function runListeners({ nested, owned = true }) {
+        Common._nextId = 0;
+        Detector._mode = 'gridStatic';
+        Detector._cellSize = 32;
+
+        const ownBodies = Composite._ownBodies;
+        if (!owned) {
+            Composite._ownBodies = () => {};
+        }
+
+        try {
+            let seed = 97531;
+            const rand = () => {
+                seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+                return seed / 0x7fffffff;
+            };
+
+            const engine = Engine.create({ enableSleeping: true });
+            const world = engine.world;
+            const child = Composite.create();
+            const everyBody = [];
+            const add = (body) => {
+                everyBody.push(body);
+                Composite.add(world, body);
+                return body;
+            };
+
+            for (let i = 0; i < 16; i++) {
+                add(Bodies.rectangle(20 + i * 40, 500, 40, 40, { isStatic: true }));
+            }
+            const hanging = add(Bodies.rectangle(300, 200, 30, 30));
+            Composite.add(world, Constraint.create({ pointA: { x: 300, y: 120 }, bodyB: hanging, stiffness: 0.05 }));
+            if (nested) {
+                Composite.add(world, child);
+            }
+
+            let copies = 0;
+            let lentSeen = 0;
+
+            Events.on(engine, 'beforeSolve', () => {
+                if (world._bodiesLent) {
+                    lentSeen++;
+                }
+                const before = world.bodies;
+                // lands overlapping the floor, so detecting it THIS update
+                // would pair it a step early
+                const arrival = add(Bodies.rectangle(40 + rand() * 560, 470, 16, 16));
+                Body.applyForce(arrival, arrival.position, { x: 0, y: -0.002 });
+                if (world.bodies !== before) {
+                    copies++;
+                }
+            });
+
+            Events.on(engine, 'collisionStart', (event) => {
+                const pair = event.pairs[0];
+                const mover = pair && [pair.bodyA, pair.bodyB].find((body) => !body.isStatic && body !== hanging);
+                if (mover && world.bodies.includes(mover)) {
+                    Composite.remove(world, mover);
+                }
+            });
+
+            const hashes = [];
+            for (let step = 0; step < 200; step++) {
+                // rain, and now and then a direct edit plus the signal
+                const drop = add(Bodies.rectangle(40 + rand() * 560, 100 + rand() * 100, 12 + rand() * 12, 12 + rand() * 12));
+                Body.setVelocity(drop, { x: (rand() - 0.5) * 3, y: rand() * 3 });
+                if (step % 7 === 6 && world.bodies.length > 20) {
+                    const index = 16 + Math.floor(rand() * (world.bodies.length - 16));
+                    const taken = world.bodies[index];
+                    if (taken !== hanging) {
+                        const replacement = Bodies.rectangle(40 + rand() * 560, 150, 14, 14);
+                        everyBody.push(replacement);
+                        world.bodies[index] = replacement;
+                        taken.positionImpulse.x = 0;
+                        taken.positionImpulse.y = 0;
+                        taken._sDeparted = true;
+                        Composite.setModified(world, true, true, false);
+                    }
+                }
+
+                Engine.update(engine, DELTA);
+
+                let hash = 2166136261;
+                everyBody.forEach((body) => {
+                    hash = bodyHash(hash, body);
+                });
+                engine.pairs.list.forEach((pair) => {
+                    hash = mix(hash, pair.id);
+                    hash = mix(hash, pair.contacts[0].normalImpulse);
+                    hash = mix(hash, pair.contacts[1].normalImpulse);
+                });
+                hashes.push(hash);
+            }
+
+            return { hashes, copies, lentSeen, engine, world };
+        } finally {
+            Composite._ownBodies = ownBodies;
+        }
+    }
+
+    test('listeners that change the world during an update see the membership the copy path sees', () => {
+        const flat = runListeners({ nested: false });
+        const nested = runListeners({ nested: true });
+
+        expect(flat.hashes).toEqual(nested.hashes);
+        // the flat run lent its array and copied it on every beforeSolve add
+        expect(flat.lentSeen).toBe(200);
+        expect(flat.copies).toBe(200);
+        expect(nested.lentSeen).toBe(0);
+        expect(flat.world._bodiesLent).toBe(false);
+    });
+
+    test('NEGATIVE: with the copy-on-change disabled, a listener\'s add changes the update under it', () => {
+        const nested = runListeners({ nested: true });
+        const unowned = runListeners({ nested: false, owned: false });
+
+        expect(unowned.copies).toBe(0);
+        expect(unowned.hashes).not.toEqual(nested.hashes);
+    });
+});

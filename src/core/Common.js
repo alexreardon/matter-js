@@ -40,6 +40,25 @@ module.exports = Common;
     Common._bodyStaticEpoch = 0;
 
     /**
+     * Counter bumped by `Composite.setModified` whenever it marks a composite
+     * modified, which every membership change makes: `Composite.add` /
+     * `remove` / `clear`, and a caller that edits `composite.bodies` directly
+     * and then calls it (the only signal such a caller gives).
+     *
+     * `Engine.update` hands a world with no child composites to its passes and
+     * its detector as `world.bodies` ITSELF (see `Composite._ownBodies`), so
+     * the array's identity no longer changes when its membership does, and the
+     * two mover classifications (`Engine.update`, and the `gridStatic`
+     * broadphase, whose cached mover list holds INDICES into the array) key on
+     * this instead. It is bumped here and NOT in add / remove, because a
+     * direct edit reaches `setModified` and nothing else.
+     *
+     * It is shared by every composite, so a change to one world also rebuilds
+     * the other's lists: a wasted walk, never a wrong one.
+     */
+    Common._bodySetEpoch = 0;
+
+    /**
      * Whether the velocity solver may read `body` as the REST row: a static
      * body whose `position - positionPrev` and `angle - anglePrev` are each
      * exactly `+0` and whose `inverseInertia` is exactly `+0`.

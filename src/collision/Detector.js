@@ -41,11 +41,12 @@ var Collision = require('./Collision');
     Detector.setBodies = function(detector, bodies) {
         // only the sweep reorders detector.bodies (it sorts in place), so only
         // it needs a private copy. The grid modes reference the caller's array
-        // directly: Composite.allBodies builds a fresh array on any add or
-        // remove, so array identity still changes exactly when membership can
-        // have, which is what the classification caches key off. The copy for
-        // the sweep is taken lazily in _collisionsSweep, so a detector flipped
-        // to sweep after this call stays correct.
+        // directly, which for `Engine.update` on a flat world is `world.bodies`
+        // itself: its identity does NOT change when its membership does, so the
+        // classification cache keys on Common._bodySetEpoch as well. The copy
+        // for the sweep is taken lazily in _collisionsSweep, so a detector
+        // flipped to sweep after this call stays correct, and the caller's
+        // array is never reordered.
         detector.bodies = bodies;
         detector._bodiesOwned = false;
     };
@@ -720,8 +721,8 @@ var Collision = require('./Collision');
 
             for (cy = cy0; cy <= cy1; cy++) {
                 // store the body reference, not its index into detector.bodies:
-                // Matter re-slices that array on world.isModified, which
-                // reorders and shrinks it, so a stored index can dangle
+                // any add or remove reorders and shrinks that array, so a
+                // stored index can dangle
                 var bucket = Detector._cellGetOrCreate(
                     g.sTable, keyX + (cy + keyOffset), Detector._cellHash(cxOffset, cy + keyOffset)
                 );
@@ -957,8 +958,8 @@ var Collision = require('./Collision');
      *
      * The static buckets (and the oversized-static list) hold body REFERENCES,
      * not indices into `detector.bodies`. The index outlives a step, but Matter
-     * re-slices `detector.bodies` from `Composite.allBodies` on `world.isModified`
-     * (any add/remove), which reorders and shrinks that array. Since the rebuild
+     * changes `detector.bodies` on any add or remove (a flat world's own array,
+     * edited in place), which reorders and shrinks it. Since the rebuild
      * fires only on static-membership changes, a stored index could point at the
      * wrong body or past the array end on a later step; a reference cannot.
      *
@@ -1013,6 +1014,7 @@ var Collision = require('./Collision');
                 // only recomputed when the body set or any body's
                 // moving-vs-resting role actually changed
                 classifyBodies: null, classifyLength: -1, classifyEpoch: -1,
+                classifySetEpoch: -1,
                 staticCount: 0,
                 // mover cell index, rebuilt every step: per-cell chain heads
                 // over a flat entry list (`dNext` / `dItem` / `dKey`) addressed
@@ -1063,26 +1065,33 @@ var Collision = require('./Collision');
         // This walk touches every body in the world, and on a dense static page
         // (thousands of intact tiles) it is memory-bound and one of the largest
         // single costs in the step, while its ANSWER almost never changes: the
-        // mover set only moves when the body set changes (add / remove, which
-        // hands the detector a NEW array via `Detector.setBodies`) or when some
-        // body's moving-vs-resting role flips (`Body.setStatic`,
+        // mover set only moves when the body set changes (add / remove, each of
+        // which bumps Common._bodySetEpoch through `Composite.setModified`) or
+        // when some body's moving-vs-resting role flips (`Body.setStatic`,
         // `Sleeping.set`, `Detector.setGridDynamic`, each of which bumps the
-        // epoch). So cache the result and rebuild only on those signals.
+        // static epoch). So cache the result and rebuild only on those signals.
         //
-        // The body-set signal is the identity and length of `detector.bodies`
-        // rather than a flag set by `setBodies`, so a caller that assigns the
-        // array directly (rather than through the setter) is still correct:
-        // the cached movers list holds INDICES into it, and a stale index can
-        // read past the end of a shrunken array.
+        // The body-set signal is that epoch AND the identity and length of
+        // `detector.bodies`, rather than a flag set by `setBodies`. The epoch
+        // is what sees a change to `world.bodies` in place (the array
+        // `Engine.update` hands over for a flat world, whose identity never
+        // changes), including one made between updates and read by a direct
+        // call here; the identity and length keep a caller that assigns the
+        // array directly correct. The cached movers list holds INDICES into
+        // it, and a stale index reads the wrong body, or past the end of a
+        // shrunken array.
         var movers = g.movers,
             staticDirty = !g.built,
             staticCount = g.staticCount,
-            classifyEpoch = Common._bodyStaticEpoch;
+            classifyEpoch = Common._bodyStaticEpoch,
+            classifySetEpoch = Common._bodySetEpoch;
 
-        if (g.classifyBodies !== bodies || g.classifyLength !== n || g.classifyEpoch !== classifyEpoch) {
+        if (g.classifyBodies !== bodies || g.classifyLength !== n || g.classifyEpoch !== classifyEpoch
+            || g.classifySetEpoch !== classifySetEpoch) {
             g.classifyBodies = bodies;
             g.classifyLength = n;
             g.classifyEpoch = classifyEpoch;
+            g.classifySetEpoch = classifySetEpoch;
             // `movers` is filled BY INDEX and trimmed once below, rather than
             // cleared with `movers.length = 0` and re-pushed. Clearing to zero
             // drops the backing store, so every rebuild regrows it from empty

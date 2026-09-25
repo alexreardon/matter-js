@@ -44,7 +44,10 @@ var Body = require('./Body');
                 allBodies: null,
                 allConstraints: null,
                 allComposites: null
-            }
+            },
+            // whether `Engine.update` is holding `bodies` itself as the
+            // update's body list (see Composite._ownBodies)
+            _bodiesLent: false
         }, options);
     };
 
@@ -61,6 +64,13 @@ var Body = require('./Body');
      */
     Composite.setModified = function(composite, isModified, updateParents, updateChildren) {
         composite.isModified = isModified;
+
+        // the body-set signal the mover classifications key on (see
+        // Common._bodySetEpoch). Here and not in add / remove, because a
+        // caller that edits `composite.bodies` directly signals only here
+        if (isModified) {
+            Common._bodySetEpoch++;
+        }
 
         if (isModified && composite.cache) {
             composite.cache.allBodies = null;
@@ -227,6 +237,30 @@ var Body = require('./Body');
     };
 
     /**
+     * Gives the composite a private `bodies` array before it is changed in
+     * place, if `Engine.update` is holding the current one.
+     *
+     * For a world with no child composites, `Engine.update` uses
+     * `world.bodies` ITSELF as the update's body list, rather than the copy
+     * `Composite.allBodies` builds after every change, and the detector keeps
+     * it between updates. A listener that adds or removes a body during the
+     * update would otherwise change that list under the update, where the
+     * copy never changed: so the change goes to a fresh array and the update
+     * finishes with the membership it started with, as it always did. Outside
+     * an update the array is changed in place, and the change is signalled by
+     * `Composite.setModified` (see Common._bodySetEpoch).
+     * @private
+     * @method _ownBodies
+     * @param {composite} composite
+     */
+    Composite._ownBodies = function(composite) {
+        if (composite._bodiesLent === true) {
+            composite.bodies = composite.bodies.slice(0);
+            composite._bodiesLent = false;
+        }
+    };
+
+    /**
      * Adds a body to the given composite.
      * @private
      * @method addBody
@@ -235,6 +269,7 @@ var Body = require('./Body');
      * @return {composite} The original composite with the body added
      */
     Composite.addBody = function(composite, body) {
+        Composite._ownBodies(composite);
         composite.bodies.push(body);
         Composite.setModified(composite, true, true, false);
         return composite;
@@ -298,6 +333,7 @@ var Body = require('./Body');
      * @return {composite} The original composite with the body removed
      */
     Composite.removeBodyAt = function(composite, position) {
+        Composite._ownBodies(composite);
         composite.bodies.splice(position, 1);
         Composite.setModified(composite, true, true, false);
         return composite;
@@ -371,6 +407,8 @@ var Body = require('./Body');
             }
         }
         
+        Composite._ownBodies(composite);
+
         // same reason as Composite.removeBody: a body leaving the world must not
         // stay in the resolver's warmed-impulse carry list
         for (var b = 0; b < composite.bodies.length; b++) {
