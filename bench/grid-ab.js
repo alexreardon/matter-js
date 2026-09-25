@@ -10,6 +10,7 @@
 
 const Matter = require('../src/module/main.js');
 const { Engine, Composite, Bodies, Body, Detector, Pairs } = Matter;
+const { createEngine, createDetector } = require('./lib/broadphase');
 
 const W = 1280;
 let seed = 98765;
@@ -92,57 +93,40 @@ function timeImpl(det) {
 
 function runScene(scene, movers, bullets) {
     reseed(98765);
-    const engine = Engine.create({ enableSleeping: false });
+    // evolve to steady state under the sweep
+    const engine = createEngine({ Matter, broadphase: 'sweep', options: { enableSleeping: false } });
     walls(engine.world, sceneHeight(scene));
-    const staticCount = buildStatics(engine.world, scene);
+    buildStatics(engine.world, scene);
     addMovers(engine.world, movers, bullets);
 
-    // evolve to steady state under the sweep
-    Detector._mode = 'sweep';
     const delta = 1000 / 60;
     for (let i = 0; i < 220; i++) Engine.update(engine, delta);
 
     const bodies = Composite.allBodies(engine.world);
 
-    // sweep timing
-    Detector._mode = 'sweep';
-    const sweepDet = { bodies: bodies.slice(0), pairs: Pairs.create(), collisions: [] };
-    const sweepUs = timeImpl(sweepDet);
+    // a fresh detector per timing, over its own copy of the frozen bodies
+    const detectorFor = (broadphase, cellSize) => {
+        const det = createDetector({ Matter, broadphase, cellSize });
+        det.bodies = bodies.slice(0);
+        det.pairs = Pairs.create();
+        return det;
+    };
 
+    const sweepUs = timeImpl(detectorFor('sweep', 32));
+
+    // the grid (static index) per cell size
     const cells = [16, 24, 32, 48, 64];
+    const gridResults = cells.map((cell) => ({ cell, us: timeImpl(detectorFor('grid', cell)) }));
 
-    // grid v1 (per-frame rebuild) timing per cell size
-    Detector._mode = 'grid';
-    const gridResults = cells.map((cell) => {
-        Detector._cellSize = cell;
-        const det = { bodies: bodies.slice(0), pairs: Pairs.create(), collisions: [] };
-        return { cell, us: timeImpl(det) };
-    });
-
-    // grid v2 (static index) timing per cell size
-    Detector._mode = 'gridStatic';
-    const gridStaticResults = cells.map((cell) => {
-        Detector._cellSize = cell;
-        const det = { bodies: bodies.slice(0), pairs: Pairs.create(), collisions: [] };
-        return { cell, us: timeImpl(det) };
-    });
-    Detector._mode = 'sweep';
-
-    const best1 = gridResults.reduce((a, b) => (b.us < a.us ? b : a));
-    const best2 = gridStaticResults.reduce((a, b) => (b.us < a.us ? b : a));
+    const best = gridResults.reduce((a, b) => (b.us < a.us ? b : a));
     console.log(`\n== ${scene}${bullets ? '+bullets' : ''} movers=${movers} | bodies=${bodies.length} ==`);
     console.log(`  sweep:               ${sweepUs.toFixed(2)} us/call`);
-    for (let i = 0; i < cells.length; i++) {
-        const g1 = gridResults[i], g2 = gridStaticResults[i];
-        const m1 = g1 === best1 ? ' <' : '  ';
-        const m2 = g2 === best2 ? ' <' : '  ';
-        console.log(
-            `  cell=${String(g1.cell).padStart(2)}  v1 ${g1.us.toFixed(1).padStart(7)} (${(sweepUs / g1.us).toFixed(2)}x)${m1}` +
-            `   v2 ${g2.us.toFixed(1).padStart(6)} (${(sweepUs / g2.us).toFixed(2)}x)${m2}`
-        );
+    for (const result of gridResults) {
+        const mark = result === best ? ' <' : '  ';
+        console.log(`  cell=${String(result.cell).padStart(2)}  grid ${result.us.toFixed(1).padStart(6)} (${(sweepUs / result.us).toFixed(2)}x)${mark}`);
     }
-    console.log(`  => v1 best ${(sweepUs / best1.us).toFixed(2)}x @cell${best1.cell} | v2 best ${(sweepUs / best2.us).toFixed(2)}x @cell${best2.cell}`);
-    return { scene, bodies: bodies.length, sweepUs, best1, best2 };
+    console.log(`  => grid best ${(sweepUs / best.us).toFixed(2)}x @cell${best.cell}`);
+    return { scene, bodies: bodies.length, sweepUs, best };
 }
 
 const only = process.env.SCENE;
@@ -160,7 +144,6 @@ console.log('\n===== SUMMARY (broadphase us/call; >1x = faster than sweep) =====
 for (const r of summary) {
     console.log(
         `  ${r.scene.padEnd(8)} bodies=${String(r.bodies).padStart(5)}  sweep ${r.sweepUs.toFixed(1).padStart(7)}` +
-        `  | v1 ${r.best1.us.toFixed(1).padStart(7)} (${(r.sweepUs / r.best1.us).toFixed(2)}x)` +
-        `  | v2 ${r.best2.us.toFixed(1).padStart(6)} (${(r.sweepUs / r.best2.us).toFixed(2)}x @cell${r.best2.cell})`
+        `  | grid ${r.best.us.toFixed(1).padStart(6)} (${(r.sweepUs / r.best.us).toFixed(2)}x @cell${r.best.cell})`
     );
 }

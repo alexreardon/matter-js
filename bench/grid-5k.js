@@ -1,5 +1,5 @@
 /* eslint-env node */
-// Focused 5000-body A/B: sweep vs the shipped static-index grid (gridStatic),
+// Focused 5000-body A/B: sweep vs the shipped static-index grid broadphase,
 // at the game's default cell size. Two clean measurements:
 //   1. whole-step Engine.update on the CALM field (no movers -> both modes see
 //      identical positions -> directly comparable, no re-baseline divergence).
@@ -9,6 +9,7 @@
 
 const Matter = require('../src/module/main.js');
 const { Engine, Composite, Bodies, Body, Detector, Pairs } = Matter;
+const { createEngine, createDetector } = require('./lib/broadphase');
 const hr = () => Number(process.hrtime.bigint());
 const CELL = process.env.CELL != null ? Number(process.env.CELL) : 32;
 
@@ -18,9 +19,9 @@ const W = 1280;
 
 // exactly 5000 static tiles (100 x 50), viewport-sized so windowing would keep
 // them all, plus 4 walls so movers stay in the field
-function buildScene({ movers, bullets }) {
+function buildScene({ movers, bullets, broadphase }) {
     seed = 13579;
-    const engine = Engine.create({ enableSleeping: false });
+    const engine = createEngine({ Matter, broadphase, cellSize: CELL, options: { enableSleeping: false } });
     const world = engine.world;
     let staticCount = 0;
     for (let r = 0; r < 50; r++) {
@@ -53,10 +54,8 @@ function buildScene({ movers, bullets }) {
 const median = (a) => { const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; };
 
 // 1) whole-step Engine.update on the calm field
-function wholeStepCalm(mode) {
-    Detector._mode = mode;
-    Detector._cellSize = CELL;
-    const { engine } = buildScene({ movers: 0, bullets: false });
+function wholeStepCalm(broadphase) {
+    const { engine } = buildScene({ movers: 0, bullets: false, broadphase });
     const delta = 1000 / 60;
     for (let i = 0; i < 200; i++) Engine.update(engine, delta);
     const samples = [];
@@ -70,16 +69,15 @@ function wholeStepCalm(mode) {
 
 // 2) broadphase-only on identical frozen positions
 function broadphaseAB({ movers, bullets, label }) {
-    const { engine } = buildScene({ movers, bullets });
-    Detector._mode = 'sweep';
-    Detector._cellSize = CELL;
+    const { engine } = buildScene({ movers, bullets, broadphase: 'sweep' });
     const delta = 1000 / 60;
     for (let i = 0; i < 220; i++) Engine.update(engine, delta);
     const frozen = Composite.allBodies(engine.world).slice(0);
 
-    const time = (mode) => {
-        Detector._mode = mode;
-        const det = { bodies: frozen.slice(0), pairs: Pairs.create(), collisions: [] };
+    const time = (broadphase) => {
+        const det = createDetector({ Matter, broadphase, cellSize: CELL });
+        det.bodies = frozen.slice(0);
+        det.pairs = Pairs.create();
         for (let i = 0; i < 30; i++) Detector.collisions(det);
         const samples = [];
         for (let r = 0; r < 60; r++) {
@@ -90,16 +88,15 @@ function broadphaseAB({ movers, bullets, label }) {
         return median(samples);
     };
     const sweep = time('sweep');
-    const grid = time('gridStatic');
-    Detector._mode = 'sweep';
+    const grid = time('grid');
     console.log(`  ${label.padEnd(16)} sweep ${sweep.toFixed(1).padStart(7)}us  grid ${grid.toFixed(1).padStart(6)}us  => ${(sweep / grid).toFixed(2)}x`);
 }
 
-const built = buildScene({ movers: 0, bullets: false });
+const built = buildScene({ movers: 0, bullets: false, broadphase: 'sweep' });
 console.log(`5000-body A/B (static ${built.staticCount} + 4 walls, cell=${CELL})\n`);
 
 const sweepStep = wholeStepCalm('sweep');
-const gridStep = wholeStepCalm('gridStatic');
+const gridStep = wholeStepCalm('grid');
 console.log('whole-step Engine.update (calm, identical positions):');
 console.log(`  sweep ${sweepStep.toFixed(1)}us/update   grid ${gridStep.toFixed(1)}us/update   => ${(sweepStep / gridStep).toFixed(2)}x\n`);
 

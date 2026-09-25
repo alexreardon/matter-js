@@ -173,7 +173,6 @@ function makeMovingStaticCase() {
 }
 
 const impls = [
-    ['grid', Detector._collisionsGrid],
     ['gridStatic', Detector._collisionsGridStatic]
 ];
 let allOk = true;

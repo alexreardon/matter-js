@@ -13,6 +13,7 @@
 //
 // Usage:
 //   node bench/profile-churn.js [buildPath]
+//   MODE=grid|sweep broadphase                  (default grid)
 //   PHASES=1        per-phase timers
 //   RELEASE=<n>     statics released per frame  (default 12)
 //   STATICS=<n>     static tile count           (default 5000)
@@ -25,14 +26,15 @@ const Matter = require(buildPath);
 const { Engine, Composite, Bodies, Body, Detector, Pairs, Resolver, Collision } = Matter;
 const { addTiledBound, assertBoundsBucketed } = require('./lib/bounds');
 const { readEngineOptions } = require('./lib/state');
+const { readBroadphase, createEngine, countGridCalls } = require('./lib/broadphase');
 
-const MODE = process.env.MODE || 'gridStatic';
+const MODE = readBroadphase('MODE', 'grid');
 const STATICS = Number(process.env.STATICS || 5000);
 const RELEASE_PER_FRAME = Number(process.env.RELEASE || 12);
 const UPDATES = Number(process.env.UPDATES || 900);
 const DEBRIS_LIFE = Number(process.env.DEBRIS_LIFE || 40);
 
-Detector._mode = MODE;
+const gridCalls = countGridCalls({ Matter });
 
 const hr = () => Number(process.hrtime.bigint());
 
@@ -70,7 +72,11 @@ const rand = () => {
     return seed / 0x7fffffff;
 };
 
-const engine = Engine.create(Object.assign({ enableSleeping: false }, readEngineOptions('ENGINE_OPTIONS')));
+const engine = createEngine({
+    Matter,
+    broadphase: MODE,
+    options: Object.assign({ enableSleeping: false }, readEngineOptions('ENGINE_OPTIONS'))
+});
 const world = engine.world;
 
 // floor + walls so debris piles instead of escaping, TILED so none of them is
@@ -190,7 +196,10 @@ for (let i = 0; i < bodies.length; i++) {
     }
 }
 
-console.log('build:', buildPath, '| mode:', MODE, '| scene: churn | release/frame:', RELEASE_PER_FRAME);
+console.log('build:', buildPath, '| mode:', MODE, '(' + gridCalls.calls + ' grid calls) | scene: churn | release/frame:', RELEASE_PER_FRAME);
+if ((MODE === 'grid') !== (gridCalls.calls > 0)) {
+    throw new Error('asked for the ' + MODE + ' broadphase and made ' + gridCalls.calls + ' grid calls');
+}
 console.log('bodies:', bodies.length, '(movers', movers + ')', '| released:', releasedIndex, '| updates:', UPDATES);
 console.log('total update time: ' + (totalEngine / 1e6).toFixed(1) + ' ms  (' +
     (totalEngine / UPDATES / 1e3).toFixed(2) + ' us/update)');

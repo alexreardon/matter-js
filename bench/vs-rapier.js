@@ -55,6 +55,7 @@
 const path = require('path');
 const fs = require('fs');
 const { execFileSync, spawnSync } = require('child_process');
+const { createEngine } = require('./lib/broadphase');
 
 const FORK_ROOT = path.join(__dirname, '..');
 const FORK_MAIN = path.join(FORK_ROOT, 'src', 'module', 'main.js');
@@ -257,9 +258,9 @@ function churnSpec(options, maxFrames) {
 // engine actually put to sleep, since their thresholds differ.
 const ALLOW_SLEEP = !!process.env.ALLOW_SLEEP;
 
-function buildMatterScene(Matter, spec) {
+function buildMatterScene(Matter, spec, broadphase) {
     const { Engine, Composite, Bodies, Body, Sleeping } = Matter;
-    const engine = Engine.create({ enableSleeping: ALLOW_SLEEP });
+    const engine = createEngine({ Matter, broadphase, options: { enableSleeping: ALLOW_SLEEP } });
     const world = engine.world;
 
     for (const s of spec.statics) {
@@ -647,8 +648,8 @@ const scenarios = [
 // Arms
 
 const ARMS = [
-    { key: 'upstream', label: 'upstream 0.20.0', kind: 'matter', tree: 'baseline', mode: 'sweep' },
-    { key: 'fork-grid', label: 'fork (gridStatic)', kind: 'matter', tree: 'fork', mode: 'gridStatic' },
+    { key: 'upstream', label: 'upstream 0.20.0', kind: 'matter', tree: 'baseline', broadphase: 'sweep' },
+    { key: 'fork-grid', label: 'fork (grid)', kind: 'matter', tree: 'fork', broadphase: 'grid' },
     { key: 'rapier-step', label: 'rapier (step only)', kind: 'rapier', readback: false },
     { key: 'rapier-bridge', label: 'rapier (step + readback)', kind: 'rapier', readback: true }
 ];
@@ -667,10 +668,7 @@ function loadIsolated(mainPath) {
 function makeArm(arm, spec, RAPIER) {
     if (arm.kind === 'matter') {
         const Matter = loadIsolated(arm.tree === 'fork' ? FORK_MAIN : BASELINE_MAIN);
-        if ('_mode' in Matter.Detector) {
-            Matter.Detector._mode = arm.mode;
-        }
-        return buildMatterScene(Matter, spec);
+        return buildMatterScene(Matter, spec, arm.broadphase);
     }
     return buildRapierScene(RAPIER, spec, { readback: arm.readback });
 }
@@ -853,7 +851,7 @@ function formatAgainst(value, baseline, unit) {
 
 function buildTable(rows) {
     const lines = [];
-    lines.push('| Scenario | Bodies | Upstream ' + figure(BASELINE_REF) + ' | Fork (gridStatic) | Rapier (step only) | Rapier (step + readback) |');
+    lines.push('| Scenario | Bodies | Upstream ' + figure(BASELINE_REF) + ' | Fork (grid) | Rapier (step only) | Rapier (step + readback) |');
     lines.push('| --- | --- | --- | --- | --- | --- |');
     let group = null;
     for (const row of rows) {
@@ -895,7 +893,7 @@ function buildBridgeTable(rows) {
 
 function buildAllocTable(rows) {
     const lines = [];
-    lines.push('| Scenario | Upstream ' + figure(BASELINE_REF) + ' | Fork (gridStatic) | Rapier (step only) | Rapier (step + readback) |');
+    lines.push('| Scenario | Upstream ' + figure(BASELINE_REF) + ' | Fork (grid) | Rapier (step only) | Rapier (step + readback) |');
     lines.push('| --- | --- | --- | --- | --- |');
     for (const row of rows) {
         const cells = ['upstream', 'fork-grid', 'rapier-step', 'rapier-bridge'].map(key => {

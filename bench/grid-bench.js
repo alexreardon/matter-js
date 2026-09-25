@@ -5,7 +5,7 @@
 // the dense worst case.
 //
 //   SCENE=sparse|medium|dense   page shape (default dense)
-//   MODE=sweep|grid             broadphase (default sweep); sets Detector._mode
+//   MODE=sweep|grid             broadphase (default sweep), through bench/lib/broadphase.js
 //   MOVERS=n                    number of dynamic bodies (default 6)
 //   BULLETS=1                   movers are fast bouncing bodies (wide swept AABB)
 //   CELL=32                     grid cell size px (grid mode only)
@@ -17,18 +17,15 @@
 
 const Matter = require('../src/module/main.js');
 const { Engine, Composite, Bodies, Body, Detector } = Matter;
+const { readBroadphase, createEngine } = require('./lib/broadphase');
 
 const SCENE = process.env.SCENE || 'dense';
-const MODE = process.env.MODE || 'sweep';
+const MODE = readBroadphase('MODE', 'sweep');
 const MOVERS = process.env.MOVERS != null ? Number(process.env.MOVERS) : 6;
 const BULLETS = process.env.BULLETS === '1';
 const CELL = process.env.CELL != null ? Number(process.env.CELL) : 32;
 const UPDATES = process.env.UPDATES != null ? Number(process.env.UPDATES) : 1200;
 const WARMUP = process.env.WARMUP != null ? Number(process.env.WARMUP) : 200;
-
-// the grid path reads these; the unmodified sweep ignores them
-Detector._mode = MODE;
-Detector._cellSize = CELL;
 
 const hr = () => Number(process.hrtime.bigint());
 
@@ -94,7 +91,7 @@ function buildDense(world) {
 }
 
 function buildScene() {
-    const engine = Engine.create({ enableSleeping: false });
+    const engine = createEngine({ Matter, broadphase: MODE, cellSize: CELL, options: { enableSleeping: false } });
     const world = engine.world;
     const sceneHeight = SCENE === 'sparse' ? 1600 : SCENE === 'medium' ? 1560 : 1160;
     addWalls(world, sceneHeight);

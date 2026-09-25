@@ -1,12 +1,12 @@
 /* eslint-env node */
 // Game-regime profiler: the page-destroyer workload (dense STATIC page + dynamic
-// debris) run under the SAME broadphase the game ships (gridStatic), with
+// debris) run under the SAME broadphase the game ships (the grid), with
 // per-phase timers that cover the whole Engine.update pipeline including the
 // O(n) all-body passes that the grid win exposed as the next cost centre.
 //
 // Usage:
 //   node bench/profile-game.js [buildPath]            (default ../src/module/main.js)
-//   MODE=sweep|gridStatic   broadphase mode           (default gridStatic)
+//   MODE=sweep|grid         broadphase                (default grid)
 //   STATICS=<n>             approximate static count  (default 5000, grid layout)
 //   MOVERS=<n>              dynamic debris count      (default 300)
 //   PHASES=1                per-phase timers
@@ -23,15 +23,16 @@ const Matter = require(buildPath);
 const { Engine, Composite, Bodies, Body, Detector, Pairs, Resolver, Collision } = Matter;
 const { addTiledBound, assertBoundsBucketed } = require('./lib/bounds');
 const { readEngineOptions } = require('./lib/state');
+const { readBroadphase, createEngine, countGridCalls } = require('./lib/broadphase');
 
-const MODE = process.env.MODE || 'gridStatic';
+const MODE = readBroadphase('MODE', 'grid');
 const STATICS = Number(process.env.STATICS || 5000);
 const MOVERS = Number(process.env.MOVERS || 300);
 const SCENE = process.env.SCENE || 'settle';
 const UPDATES = Number(process.env.UPDATES || 1500);
 const BULLETS = Number(process.env.BULLETS || 8);
 
-Detector._mode = MODE;
+const gridCalls = countGridCalls({ Matter });
 
 const hr = () => Number(process.hrtime.bigint());
 
@@ -74,7 +75,11 @@ const rand = () => {
 };
 
 function buildScene() {
-    const engine = Engine.create(Object.assign({ enableSleeping: false }, readEngineOptions('ENGINE_OPTIONS')));
+    const engine = createEngine({
+        Matter,
+        broadphase: MODE,
+        options: Object.assign({ enableSleeping: false }, readEngineOptions('ENGINE_OPTIONS'))
+    });
     const world = engine.world;
 
     // floor + walls so debris piles instead of escaping, TILED so none of them
@@ -172,7 +177,10 @@ for (let i = 0; i < UPDATES; i++) {
 const tTotal = hr() - tStart;
 
 const total = Composite.allBodies(engine.world).length;
-console.log('build:', buildPath, '| mode:', MODE, '| scene:', SCENE);
+console.log('build:', buildPath, '| mode:', MODE, '(' + gridCalls.calls + ' grid calls) | scene:', SCENE);
+if ((MODE === 'grid') !== (gridCalls.calls > 0)) {
+    throw new Error('asked for the ' + MODE + ' broadphase and made ' + gridCalls.calls + ' grid calls');
+}
 console.log('bodies:', total, '(static', built.staticCount, '+ dynamic', built.dynamicCount + ')',
     '| updates:', UPDATES);
 console.log('total update time: ' + (tTotal / 1e6).toFixed(1) + ' ms  (' +

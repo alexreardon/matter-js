@@ -16,7 +16,7 @@
 //   1. upstream        stock 0.20.0, its only broadphase (sweep)
 //   2. fork (sweep)    the fork with the SAME broadphase as stock, so the
 //                      difference is the micro-optimisations alone
-//   3. fork (shipped)  the fork as page-rage consumes it (gridStatic)
+//   3. fork (shipped)  the fork as page-rage consumes it (the grid broadphase)
 //
 // Each scenario runs in its own child process so heap growth and JIT state from
 // one cannot bias the next. The baseline tree is provisioned automatically as a
@@ -33,6 +33,7 @@
 const path = require('path');
 const fs = require('fs');
 const { execFileSync, spawnSync } = require('child_process');
+const { createEngine, afterRestingMove } = require('./lib/broadphase');
 
 const FORK_ROOT = path.join(__dirname, '..');
 const FORK_MAIN = path.join(FORK_ROOT, 'src', 'module', 'main.js');
@@ -58,7 +59,7 @@ function makeRandom(seed) {
 //
 // EXCEPT for the bounds. `profile-game.js`, `profile-churn.js`, `ab-inline.js`
 // and `ab-churn.js` all build the floor and the two walls as TILES, because a
-// single body of this size exceeds the gridStatic oversize predicate and lands
+// single body of this size exceeds the grid's oversize predicate and lands
 // on `g.sOver`, which every mover rescans in full every step, at a cost the
 // shipped game never pays (see bench/lib/bounds.js). This file DELIBERATELY
 // keeps the three oversized bodies: every published README cell was measured on
@@ -67,7 +68,7 @@ function makeRandom(seed) {
 function buildPage(Matter, options) {
     const { Engine, Composite, Bodies, Body } = Matter;
     const random = makeRandom(24681);
-    const engine = Engine.create({ enableSleeping: false });
+    const engine = createEngine({ Matter, broadphase: options.broadphase, options: { enableSleeping: false } });
     const world = engine.world;
 
     // floor and walls so debris piles instead of escaping. Oversized on purpose;
@@ -139,7 +140,7 @@ function buildPage(Matter, options) {
 function buildChurn(Matter, options) {
     const { Engine, Composite, Bodies, Body } = Matter;
     const random = makeRandom(24681);
-    const engine = Engine.create({ enableSleeping: false });
+    const engine = createEngine({ Matter, broadphase: options.broadphase, options: { enableSleeping: false } });
     const world = engine.world;
 
     Composite.add(world, Bodies.rectangle(1000, 2600, 2200, 60, { isStatic: true }));
@@ -235,9 +236,9 @@ const scenarios = [
         note: '336 boxes dropped into a walled bowl and left to pile',
         warmup: 500,
         blockUpdates: 20,
-        build(Matter) {
+        build(Matter, broadphase) {
             const { Engine, Composite, Composites, Bodies } = Matter;
-            const engine = Engine.create({ enableSleeping: false });
+            const engine = createEngine({ Matter, broadphase, options: { enableSleeping: false } });
             addBowl(Matter, engine.world, { width: 900, height: 640 });
             Composite.add(engine.world, Composites.stack(80, 40, 24, 14, 6, 6, function(x, y) {
                 return Bodies.rectangle(x, y, 26, 26, { friction: 0.4, restitution: 0.2 });
@@ -257,10 +258,10 @@ const scenarios = [
         note: '300 circles, polygons and boxes settled together (narrowphase variety)',
         warmup: 500,
         blockUpdates: 20,
-        build(Matter) {
+        build(Matter, broadphase) {
             const { Engine, Composite, Bodies, Body } = Matter;
             const random = makeRandom(13579);
-            const engine = Engine.create({ enableSleeping: false });
+            const engine = createEngine({ Matter, broadphase, options: { enableSleeping: false } });
             addBowl(Matter, engine.world, { width: 900, height: 640 });
             for (let i = 0; i < 300; i++) {
                 const x = 40 + random() * 820;
@@ -294,10 +295,10 @@ const scenarios = [
         note: '8 pinned 24-link chains plus 120 falling boxes (the fork only skips constraint passes when a world has none)',
         warmup: 400,
         blockUpdates: 20,
-        build(Matter) {
+        build(Matter, broadphase) {
             const { Engine, Composite, Bodies, Body, Constraint } = Matter;
             const random = makeRandom(31337);
-            const engine = Engine.create({ enableSleeping: false });
+            const engine = createEngine({ Matter, broadphase, options: { enableSleeping: false } });
             addBowl(Matter, engine.world, { width: 900, height: 640 });
             for (let chain = 0; chain < 8; chain++) {
                 const anchorX = 60 + chain * 100;
@@ -342,9 +343,9 @@ const scenarios = [
         note: '400 boxes settled with `enableSleeping: true`, so most are asleep (the fork keeps the whole-world force pass here)',
         warmup: 700,
         blockUpdates: 20,
-        build(Matter) {
+        build(Matter, broadphase) {
             const { Engine, Composite, Composites, Bodies } = Matter;
-            const engine = Engine.create({ enableSleeping: true });
+            const engine = createEngine({ Matter, broadphase, options: { enableSleeping: true } });
             addBowl(Matter, engine.world, { width: 900, height: 640 });
             Composite.add(engine.world, Composites.stack(80, 40, 25, 16, 6, 6, function(x, y) {
                 return Bodies.rectangle(x, y, 26, 26, { friction: 0.4, restitution: 0.1 });
@@ -364,17 +365,14 @@ const scenarios = [
         note: '16 statics translated every frame under 300 falling boxes (a static that moves must be re-indexed every step)',
         warmup: 400,
         blockUpdates: 20,
-        build(Matter) {
-            const { Engine, Composite, Bodies, Body, Detector } = Matter;
+        build(Matter, broadphase) {
+            const { Engine, Composite, Bodies, Body } = Matter;
             const random = makeRandom(97531);
-            const engine = Engine.create({ enableSleeping: false });
+            const engine = createEngine({ Matter, broadphase, options: { enableSleeping: false } });
             addBowl(Matter, engine.world, { width: 900, height: 640 });
             const platforms = [];
             for (let i = 0; i < 16; i++) {
                 const platform = Bodies.rectangle(120 + (i % 4) * 220, 120 + Math.floor(i / 4) * 130, 160, 20, { isStatic: true });
-                if (typeof Detector.setGridDynamic === 'function') {
-                    Detector.setGridDynamic(platform, true);
-                }
                 Composite.add(engine.world, platform);
                 platforms.push({ body: platform, phase: random() * Math.PI * 2, originX: platform.position.x });
             }
@@ -396,6 +394,9 @@ const scenarios = [
                             x: platform.originX + Math.sin(tick * 0.02 + platform.phase) * 70,
                             y: platform.body.position.y
                         });
+                        // the grid holds a moved static as a mover: this fork
+                        // promotes one by itself, an older release is told
+                        afterRestingMove({ Matter, body: platform.body });
                     }
                     Engine.update(engine, 1000 / 60);
                 }
@@ -409,8 +410,8 @@ const scenarios = [
         note: '5000 static tiles, 300 settled debris (the traversal regime)',
         warmup: 600,
         blockUpdates: 10,
-        build(Matter) {
-            return buildPage(Matter, { statics: 5000, movers: 300, raining: false });
+        build(Matter, broadphase) {
+            return buildPage(Matter, { broadphase, statics: 5000, movers: 300, raining: false });
         }
     },
     {
@@ -420,8 +421,8 @@ const scenarios = [
         note: '5000 static tiles, 300 debris falling and piling',
         warmup: 240,
         blockUpdates: 10,
-        build(Matter) {
-            return buildPage(Matter, { statics: 5000, movers: 300, raining: true });
+        build(Matter, broadphase) {
+            return buildPage(Matter, { broadphase, statics: 5000, movers: 300, raining: true });
         }
     },
     {
@@ -431,8 +432,8 @@ const scenarios = [
         note: 'calm page plus 8 fast sensor bullets streaking through the field',
         warmup: 600,
         blockUpdates: 10,
-        build(Matter) {
-            return buildPage(Matter, { statics: 5000, movers: 300, raining: false, bullets: 8 });
+        build(Matter, broadphase) {
+            return buildPage(Matter, { broadphase, statics: 5000, movers: 300, raining: false, bullets: 8 });
         }
     },
     {
@@ -442,8 +443,8 @@ const scenarios = [
         note: '5000 static tiles with 800 debris bodies in flight',
         warmup: 300,
         blockUpdates: 10,
-        build(Matter) {
-            return buildPage(Matter, { statics: 5000, movers: 800, raining: true });
+        build(Matter, broadphase) {
+            return buildPage(Matter, { broadphase, statics: 5000, movers: 800, raining: true });
         }
     },
     {
@@ -453,8 +454,8 @@ const scenarios = [
         note: '12 tiles released, evicted and replaced every frame, so every cached body set is invalidated every step',
         warmup: 240,
         blockUpdates: 10,
-        build(Matter) {
-            return buildChurn(Matter, { statics: 5000, releasePerFrame: 12 });
+        build(Matter, broadphase) {
+            return buildChurn(Matter, { broadphase, statics: 5000, releasePerFrame: 12 });
         }
     },
     {
@@ -464,8 +465,8 @@ const scenarios = [
         note: 'the calm page at a smaller page size',
         warmup: 600,
         blockUpdates: 10,
-        build(Matter) {
-            return buildPage(Matter, { statics: 2000, movers: 300, raining: false });
+        build(Matter, broadphase) {
+            return buildPage(Matter, { broadphase, statics: 2000, movers: 300, raining: false });
         }
     },
     {
@@ -475,8 +476,8 @@ const scenarios = [
         note: 'the calm page at a larger page size',
         warmup: 600,
         blockUpdates: 10,
-        build(Matter) {
-            return buildPage(Matter, { statics: 8000, movers: 300, raining: false });
+        build(Matter, broadphase) {
+            return buildPage(Matter, { broadphase, statics: 8000, movers: 300, raining: false });
         }
     }
 ];
@@ -484,13 +485,14 @@ const scenarios = [
 // Arms
 
 const ARMS = [
-    { key: 'upstream', label: 'upstream 0.20.0', tree: 'baseline', mode: 'sweep' },
-    { key: 'fork-sweep', label: 'fork (sweep)', tree: 'fork', mode: 'sweep' },
-    { key: 'fork-grid', label: 'fork (gridStatic)', tree: 'fork', mode: 'gridStatic' }
+    { key: 'upstream', label: 'upstream 0.20.0', tree: 'baseline', broadphase: 'sweep' },
+    { key: 'fork-sweep', label: 'fork (sweep)', tree: 'fork', broadphase: 'sweep' },
+    { key: 'fork-grid', label: 'fork (grid)', tree: 'fork', broadphase: 'grid' }
 ];
 
 // Two of the arms are the same tree in different configurations, so they must
-// not share a module instance: `Detector._mode` lives on the module, and a
+// not share a module instance: an older release configures the broadphase on
+// the Detector MODULE (`Detector._mode`, see bench/lib/broadphase.js), and a
 // cached `require` would hand both arms the same one (whichever configured
 // itself last would silently win for both). Purging the tree's cache subtree
 // first gives every arm its own module graph.
@@ -507,11 +509,7 @@ function loadIsolated(mainPath) {
 
 function makeArm(arm, scenario) {
     const Matter = loadIsolated(arm.tree === 'fork' ? FORK_MAIN : BASELINE_MAIN);
-    // stock has no `_mode`: it is sweep-only, which is exactly what this arm wants
-    if ('_mode' in Matter.Detector) {
-        Matter.Detector._mode = arm.mode;
-    }
-    const built = scenario.build(Matter);
+    const built = scenario.build(Matter, arm.broadphase);
     return { Matter, engine: built.engine, step: built.step };
 }
 
@@ -722,7 +720,7 @@ const GROUP_LINKS = { 'Page Rage': 'https://page-rage.com' };
 
 function buildTable(rows) {
     const lines = [];
-    lines.push('| Scenario | Bodies | Upstream ' + figure(BASELINE_REF) + ' | Fork | Fork (new gridStatic algorithm) |');
+    lines.push('| Scenario | Bodies | Upstream ' + figure(BASELINE_REF) + ' | Fork | Fork (grid broadphase) |');
     lines.push('| --- | --- | --- | --- | --- |');
     let group = null;
     for (const row of rows) {
@@ -761,7 +759,7 @@ function formatAllocRow(row) {
 
 function buildAllocTable(rows) {
     const lines = [];
-    lines.push('| Scenario | Upstream ' + figure(BASELINE_REF) + ' | Fork | Fork (new gridStatic algorithm) |');
+    lines.push('| Scenario | Upstream ' + figure(BASELINE_REF) + ' | Fork | Fork (grid broadphase) |');
     lines.push('| --- | --- | --- | --- |');
     for (const row of rows) {
         const cells = formatAllocRow(row);

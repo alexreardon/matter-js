@@ -1,18 +1,19 @@
 /* eslint-env node */
 // Burst regime: a dense static field where bodies RELEASE (static -> dynamic)
 // over time, like a destruction burst, with eviction of off-field debris (as
-// the game does). This exercises v2's static-index REBUILD cost on
+// the game does). This exercises the grid's static-index maintenance cost on
 // membership-change frames, which the steady-state A/B never triggers.
 //
-//   MODE=sweep|gridStatic   (default gridStatic)   CELL=48
+//   MODE=sweep|grid   (default grid)   CELL=48
 // Run each mode in its own process for a clean A/B.
 "use strict";
 
 const Matter = require('../src/module/main.js');
-const { Engine, Composite, Bodies, Body, Detector } = Matter;
+const { Engine, Composite, Bodies, Body } = Matter;
+const { readBroadphase, createEngine } = require('./lib/broadphase');
 const hr = () => Number(process.hrtime.bigint());
 
-const MODE = process.env.MODE || 'gridStatic';
+const MODE = readBroadphase('MODE', 'grid');
 const CELL = process.env.CELL != null ? Number(process.env.CELL) : 48;
 const BURST_FRAMES = 40;
 const PER_FRAME_RELEASE = 30;
@@ -20,7 +21,7 @@ const TOTAL_FRAMES = 150;
 const EVICT_BELOW_Y = 1400;
 
 function build() {
-    const engine = Engine.create({ enableSleeping: false });
+    const engine = createEngine({ Matter, broadphase: MODE, cellSize: CELL, options: { enableSleeping: false } });
     const world = engine.world;
     const tiles = [];
     for (let r = 0; r < 70; r++) {
@@ -56,8 +57,6 @@ function shuffledIndices(length) {
 
 const { engine, tiles } = build();
 const world = engine.world;
-Detector._mode = MODE;
-Detector._cellSize = CELL;
 const order = shuffledIndices(tiles.length);
 const delta = 1000 / 60;
 for (let i = 0; i < 60; i++) Engine.update(engine, delta);

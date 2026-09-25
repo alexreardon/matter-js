@@ -13,12 +13,17 @@
 //   RELEASE=<n>   statics released per step (default 8)
 //   STATICS=<n>   static tile count         (default 5000)
 //   CHECK=<n>     compare every n steps     (default 25)
+//   MODE=grid|sweep  broadphase of BOTH arms (default grid), set through
+//                 bench/lib/broadphase.js, so an arm on an older build that
+//                 configures it another way still runs it. Each arm's grid
+//                 calls are counted and reported, and a mismatch fails the run
 //   BASE_OPTIONS / WORK_OPTIONS  engine options per arm, as JSON (see bench/lib/state.js)
 "use strict";
 
 const path = require('path');
 const { addTiledBound, assertBoundsBucketed } = require('./lib/bounds');
 const { readEngineOptions, keepsSolvedState, compareBodies, SOLVED_FIELDS_NOTE } = require('./lib/state');
+const { readBroadphase, createEngine, countGridCalls } = require('./lib/broadphase');
 
 const BASE_OPTIONS = readEngineOptions('BASE_OPTIONS');
 const WORK_OPTIONS = readEngineOptions('WORK_OPTIONS');
@@ -39,6 +44,7 @@ const DEBRIS_LIFE = Number(process.env.DEBRIS_LIFE || 40);
 const CHECK_EVERY = Number(process.env.CHECK || 25);
 const WINDOW_PER_STEP = Number(process.env.WINDOW || 4);
 const BLOCK = Number(process.env.BLOCK_UPDATES || 8);
+const MODE = readBroadphase('MODE', 'grid');
 
 const hr = () => Number(process.hrtime.bigint());
 const cols = Math.round(Math.sqrt(STATICS * (2000 / 2300)));
@@ -47,10 +53,10 @@ const rows = Math.ceil(STATICS / cols);
 function makeArm(buildPath, engineOptions) {
     // eslint-disable-next-line global-require
     const Matter = require(buildPath);
-    const { Engine, Composite, Bodies, Body, Detector } = Matter;
-    Detector._mode = process.env.MODE || 'gridStatic';
+    const { Composite, Bodies, Body } = Matter;
+    const gridCalls = countGridCalls({ Matter });
 
-    const engine = Engine.create(Object.assign({ enableSleeping: false }, engineOptions));
+    const engine = createEngine({ Matter, broadphase: MODE, options: Object.assign({ enableSleeping: false }, engineOptions) });
     const world = engine.world;
 
     // floor + walls so debris piles instead of escaping, TILED so none of them
@@ -78,7 +84,7 @@ function makeArm(buildPath, engineOptions) {
         }
     }
 
-    return { Matter, engine, world, bounds, tiles, live: [], parked: [], released: 0, frame: 0 };
+    return { Matter, engine, world, bounds, tiles, gridCalls, live: [], parked: [], released: 0, frame: 0 };
 }
 
 // one shared deterministic stream, consumed identically by both arms
@@ -249,3 +255,10 @@ const workBest = meanOfBest(workBlocks, takeBest);
 console.log(`churn: ${STATICS} statics, ${RELEASE_PER_STEP} released/step, ${steps} steps`);
 console.log(`  best-${takeBest}: base ${baseBest.toFixed(1)}us  work ${workBest.toFixed(1)}us  delta ${(100 * (workBest - baseBest) / baseBest).toFixed(2)}%`);
 console.log(`  equivalence: ${divergence === null ? 'IDENTICAL' : 'DIVERGED -> ' + divergence}${COMPARE_SOLVED ? '' : ' (not compared: ' + SOLVED_FIELDS_NOTE + ')'}`);
+console.log(`  broadphase: ${MODE}, grid calls base ${base.gridCalls.calls} work ${work.gridCalls.calls}`);
+for (const arm of [base, work]) {
+    if ((MODE === 'grid') !== (arm.gridCalls.calls > 0)) {
+        console.error(`an arm asked for the ${MODE} broadphase made ${arm.gridCalls.calls} grid calls`);
+        process.exit(1);
+    }
+}

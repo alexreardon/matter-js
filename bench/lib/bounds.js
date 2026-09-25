@@ -2,7 +2,7 @@
 // Shared scene bounds for the page-regime benches.
 //
 // A floor and two walls keep debris piling instead of escaping the field. Built
-// as SINGLE bodies they are a measurement bug: the gridStatic oversize predicate
+// as SINGLE bodies they are a measurement bug: the grid broadphase's oversize predicate
 // refuses to bucket a static spanning more than `maxCells` (24) cells of the
 // broadphase grid, so each one lands on `g.sOver`, an unindexed list EVERY mover
 // rescans in full every step. Three bounds cost 900 such tests per calm step and
@@ -17,6 +17,8 @@
 //
 // Build the same geometry out of tiles instead.
 "use strict";
+
+const { broadphaseOf } = require('./broadphase');
 
 const BOUND_CELL_SIZE = 32;
 const BOUND_MAX_CELLS = 24;
@@ -62,9 +64,9 @@ function addTiledBound({ Matter, world, centreX, centreY, width, height }) {
 // This is the real check, and it is deliberately not a check on the constants
 // above. The piece size is baked against `BOUND_CELL_SIZE` and `BOUND_MAX_CELLS`
 // so a scene stays byte-stable across engine changes, and a bake drifts
-// SILENTLY, which is the exact bug the tiling replaces. `Detector._cellSize` can
-// at least be read back; the engine's `maxCells` is a local literal inside
-// `_collisionsGridStatic` and cannot be. So assert the OUTCOME instead: no piece
+// SILENTLY, which is the exact bug the tiling replaces. A detector's `cellSize`
+// can at least be read back; the engine's `maxCells` is a local literal inside
+// the grid broadphase and cannot be. So assert the OUTCOME instead: no piece
 // of a tiled bound reached the oversized list, whatever either constant is now.
 //
 // It asks about the BOUNDS ONLY, and not about `sOver` being empty, because the
@@ -75,10 +77,10 @@ function addTiledBound({ Matter, world, centreX, centreY, width, height }) {
 // bound is correctly bucketed. That is a caveat for reading a population sweep
 // at its small end, not a failure of the bounds.
 //
-// Only meaningful in `gridStatic` mode, which is the mode these benches profile;
+// Only meaningful on the grid broadphase, which is what these benches profile;
 // the sweep arm builds no index and is skipped rather than failed.
 function assertBoundsBucketed({ Matter, engine, bounds, label }) {
-    if (Matter.Detector._mode !== 'gridStatic') {
+    if (broadphaseOf({ Matter, engine }) !== 'grid') {
         return;
     }
 

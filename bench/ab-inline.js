@@ -15,11 +15,14 @@
 //
 // Usage:
 //   node bench/ab-inline.js <baselineSrcMain> [scene] [blocks] [workSrcMain]
-//   MODE / STATICS / MOVERS / BULLETS as bench/profile-game.js
+//   MODE / STATICS / MOVERS / BULLETS as bench/profile-game.js (MODE is set
+//   through bench/lib/broadphase.js, so both arms run it whatever API their
+//   build has, and each arm's grid calls are counted and reported)
 //   BASE_OPTIONS / WORK_OPTIONS  engine options per arm, as JSON (see bench/lib/state.js)
 "use strict";
 
 const path = require('path');
+const { readBroadphase, createEngine, countGridCalls } = require('./lib/broadphase');
 
 const baselinePath = process.argv[2];
 const scene = process.argv[3] || 'calm';
@@ -31,7 +34,7 @@ if (!baselinePath) {
     process.exit(1);
 }
 
-const MODE = process.env.MODE || 'gridStatic';
+const MODE = readBroadphase('MODE', 'grid');
 const STATICS = Number(process.env.STATICS || 5000);
 const MOVERS = Number(process.env.MOVERS || 300);
 const BULLETS = Number(process.env.BULLETS || 8);
@@ -46,8 +49,7 @@ const BASE_OPTIONS = readEngineOptions('BASE_OPTIONS');
 const WORK_OPTIONS = readEngineOptions('WORK_OPTIONS');
 
 function buildScene(Matter, engineOptions) {
-    const { Engine, Composite, Bodies, Body, Detector } = Matter;
-    Detector._mode = MODE;
+    const { Composite, Bodies, Body } = Matter;
 
     let seed = 24681;
     const rand = () => {
@@ -55,7 +57,7 @@ function buildScene(Matter, engineOptions) {
         return seed / 0x7fffffff;
     };
 
-    const engine = Engine.create(Object.assign({ enableSleeping: false }, engineOptions));
+    const engine = createEngine({ Matter, broadphase: MODE, options: Object.assign({ enableSleeping: false }, engineOptions) });
     const world = engine.world;
 
     // floor + walls so debris piles instead of escaping, TILED so none of them
@@ -111,7 +113,9 @@ function buildScene(Matter, engineOptions) {
 function makeArm(buildPath, engineOptions) {
     // eslint-disable-next-line global-require
     const Matter = require(buildPath);
+    const gridCalls = countGridCalls({ Matter });
     const arm = buildScene(Matter, engineOptions);
+    arm.gridCalls = gridCalls;
     arm.step = function() {
         Matter.Engine.update(arm.engine, 1000 / 60);
         for (let i = 0; i < arm.bullets.length; i++) {
@@ -187,3 +191,10 @@ console.log(`  best      : base ${min(baseBlocks).toFixed(1)}us  work ${min(work
 console.log(`  best-${String(takeBest).padEnd(3)}: base ${baseBest.toFixed(1)}us  work ${workBest.toFixed(1)}us  delta ${(100 * (workBest - baseBest) / baseBest).toFixed(2)}%`);
 console.log(`  median    : base ${median(baseBlocks).toFixed(1)}us  work ${median(workBlocks).toFixed(1)}us  delta ${(100 * (median(workBlocks) - median(baseBlocks)) / median(baseBlocks)).toFixed(2)}%`);
 console.log(`  determinism: ${divergent === 0 ? 'IDENTICAL' : 'DIVERGED on ' + divergent + '/' + baseBodies.length + ' bodies, max ' + maxDelta.toExponential(3) + ', first: ' + first}${compareSolved ? '' : ' (not compared: ' + SOLVED_FIELDS_NOTE + ')'}`);
+console.log(`  broadphase: ${MODE}, grid calls base ${base.gridCalls.calls} work ${work.gridCalls.calls}`);
+for (const arm of [base, work]) {
+    if ((MODE === 'grid') !== (arm.gridCalls.calls > 0)) {
+        console.error(`an arm asked for the ${MODE} broadphase made ${arm.gridCalls.calls} grid calls`);
+        process.exit(1);
+    }
+}
