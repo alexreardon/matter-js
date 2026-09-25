@@ -62,7 +62,7 @@ function makeRandom(seed) {
 }
 
 // the churny page-like world from test/Shape.spec.js, driven through release,
-// removal, re-add, scaling, sleeping and grid-dynamic tagging
+// removal, re-add, scaling, sleeping and a moved static
 function runScenario(broadphase, solved) {
     var engine = Engine.create({
         enableSleeping: broadphase === 'sweep',
@@ -96,9 +96,9 @@ function runScenario(broadphase, solved) {
             Body.setVelocity(released, { x: random() * 4 - 2, y: -2 });
         }
 
+        // a static moved after the grid indexed it, which the setter promotes
         if (step === 60) {
             var moved = statics[3];
-            Detector.setGridDynamic(moved, true);
             Body.setPosition(moved, { x: moved.position.x + 5, y: moved.position.y });
         }
 
@@ -251,6 +251,11 @@ function auditHoleyArrays(mode, engine) {
     if (bodies.length < 150 || engine.pairs.list.length < 20) {
         fail(mode + ': scenario under-ran (bodies ' + bodies.length
             + ', pairs ' + engine.pairs.list.length + ')');
+    }
+
+    // the moved static's promotion is a write this audit must see
+    if (bodies.some(function(body) { return body._sMoved; }) !== (scenario[0] === 'grid')) {
+        fail(mode + ': the moved static was ' + (scenario[0] === 'grid' ? 'not ' : '') + 'promoted');
     }
 
     auditBodyMaps(mode, bodies);

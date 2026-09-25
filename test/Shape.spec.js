@@ -110,9 +110,10 @@ function runScenario(broadphase, solved) {
             Body.setAngularVelocity(released, random() * 0.2 - 0.1);
         }
 
+        // a static moved after the grid indexed it: the setter promotes it to
+        // a mover (Body._promoteIfIndexed), so that write is audited here
         if (step === 60) {
             var moved = statics[3];
-            Detector.setGridDynamic(moved, true);
             Body.setPosition(moved, { x: moved.position.x + 5, y: moved.position.y });
         }
 
@@ -141,9 +142,10 @@ describe.each([['sweep', true], ['grid', true], ['grid', false]])('object shapes
     var bodies = Composite.allBodies(engine.world);
     var pairsList = engine.pairs.list;
 
-    it('exercised the regime (bodies, live pairs)', function() {
+    it('exercised the regime (bodies, live pairs, and on the grid a promoted static)', function() {
         expect(bodies.length).toBeGreaterThan(150);
         expect(pairsList.length).toBeGreaterThan(20);
+        expect(bodies.some(function(body) { return body._sMoved; })).toBe(broadphase === 'grid');
     });
 
     it('no body gained a field after Body.create', function() {

@@ -110,7 +110,7 @@ function runPair({ steps, sleeping, setup, perStep, listen, moverShare }) {
             expect(armState(journal)).toEqual(armState(walk));
         }
 
-        return { journalReads };
+        return { journalReads, arms };
     } finally {
         Detector._journalMoverShare = previousShare;
         Detector._classifyFromJournal = readJournal;
@@ -184,7 +184,7 @@ describe('the grid body journal', () => {
     });
 
     it('matches the full walk through batch removals, same-step round trips and moving statics', () => {
-        const { journalReads } = runPair({
+        const { journalReads, arms } = runPair({
             steps: 160,
             setup: setupPage,
             perStep(step, [journal, walk], random) {
@@ -198,7 +198,7 @@ describe('the grid body journal', () => {
                 // windowing: a batch of statics out, a batch of parked ones in
                 const out = [];
                 for (let k = 0; k < 6; k++) {
-                    const index = pick(journal, random, (body) => body.isStatic && inWorld(journal, body) && !body._gridDynamic);
+                    const index = pick(journal, random, (body) => body.isStatic && inWorld(journal, body) && !body._sMoved);
                     if (index !== -1 && out.indexOf(index) === -1) {
                         out.push(index);
                     }
@@ -221,9 +221,10 @@ describe('the grid body journal', () => {
                         Composite.remove(arm.world, arm.bodies[roundTrip]);
                         Composite.add(arm.world, arm.bodies[roundTrip]);
                     }
+                    // a moved static: the setter promotes it to a mover once
+                    // the grid has indexed it (Body._promoteIfIndexed)
                     if (moving !== -1 && step % 6 === 0) {
                         const body = arm.bodies[moving];
-                        Detector.setGridDynamic(body, step % 12 === 0);
                         Body.setPosition(body, { x: body.position.x + shift, y: body.position.y });
                     }
                 }
@@ -231,6 +232,9 @@ describe('the grid body journal', () => {
         });
 
         expect(journalReads).toBeGreaterThan(150);
+        // the moves promoted statics in both arms alike
+        expect(arms[0].bodies.filter((body) => body._sMoved).length).toBeGreaterThan(3);
+        expect(arms[1].bodies.map((body) => body._sMoved)).toEqual(arms[0].bodies.map((body) => body._sMoved));
     });
 
     it('matches the full walk when listeners change the world during an update', () => {

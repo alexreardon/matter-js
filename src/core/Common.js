@@ -19,7 +19,9 @@ module.exports = Common;
 
     /**
      * Counter bumped whenever any body's moving-vs-resting classification
-     * changes: `Body.setStatic`, `Sleeping.set` and `Detector.setGridDynamic`.
+     * changes: `Body.setStatic`, `Sleeping.set`, and a `Body` setter moving a
+     * resting body the grid has indexed, which promotes it to a mover (see
+     * `Body._promoteIfIndexed`).
      *
      * `Engine.update` and the grid broadphase both need the list of
      * moving bodies each step, and building it means touching every body in the
@@ -91,9 +93,10 @@ module.exports = Common;
      * membership or moving-vs-resting role may have changed since
      * (`composite._touched`, its first `_touchedCount` entries):
      * `Composite.addBody`, `removeBodyAt` and `removeBodies` record the bodies
-     * they add or remove, and `Body.setStatic`, `Sleeping.set` and
-     * `Detector.setGridDynamic` record a member through this. The detector
-     * then classifies just those bodies (`Detector._classifyFromJournal`).
+     * they add or remove, and `Body.setStatic`, `Sleeping.set` and the
+     * promotion of a moved indexed resting body (`Body._promoteIfIndexed`)
+     * record a member through this. The detector then classifies just those
+     * bodies (`Detector._classifyFromJournal`).
      *
      * A body is a member while `body._sOwner` is the world and `body._sWalk`
      * is the world's `_memberGen`, the stamp of the full walk that started

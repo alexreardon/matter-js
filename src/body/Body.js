@@ -117,9 +117,8 @@ var Axes = require('../geometry/Axes');
             sleepCounter: 0,
             deltaTime: 1000 / 60,
             _original: null,
-            // per-step scratch stamps and flags used by the broadphase
-            // (the grid), the resolver body collection, and the
-            // page-destroyer moving-static tag. Pre-declared so every body
+            // per-step scratch stamps and flags used by the grid broadphase
+            // and the resolver body collection. Pre-declared so every body
             // shares one hidden class: adding any of these lazily at first use
             // splits body object shapes and degrades every hot property access
             // site engine-wide (measured 1.3-4.8x slower whole-step when
@@ -136,7 +135,10 @@ var Axes = require('../geometry/Axes');
             // than with the public fields for the same reason.
             isStatic: false,
             isSleeping: false,
-            _gridDynamic: false,
+            // set, for good, when a pose setter moves this body while it rests
+            // in a grid static index: the grid then runs it as a mover (see
+            // Body._promoteIfIndexed)
+            _sMoved: false,
             _sPrev: false,
             _sIndexed: false,
             _sDeparted: false,
@@ -432,6 +434,36 @@ var Axes = require('../geometry/Axes');
     };
 
     /**
+     * Promotes `body` to a mover of the grid broadphase when it is a resting
+     * body (static or asleep) that a grid detector already holds in its static
+     * index. Every setter that moves or reshapes a body calls this after the
+     * move (`setPosition`, `setAngle`, `setPositionAndAngle`, `scale`,
+     * `setVertices`, and through them `translate`, `rotate`, `setParts`
+     * and `Body.set`): the index captured the body's bounds when it bucketed
+     * it, and would otherwise go on answering for the old pose.
+     *
+     * A promoted body stays a mover for the rest of its life (`_sMoved`),
+     * and the promotion is recorded exactly as any change of role is: the
+     * static epoch moves, and the body goes in its world's body journal (see
+     * Common._bodyStaticEpoch and Common._journalTouch). A resting body moved
+     * before any grid step has indexed it needs none of this, and is simply
+     * indexed at its new pose. On the sweep nothing is ever indexed, so this is
+     * one field read.
+     * @method _promoteIfIndexed
+     * @private
+     * @param {body} body
+     */
+    Body._promoteIfIndexed = function(body) {
+        if (body._sIndexed !== true || body._sMoved === true || !(body.isStatic || body.isSleeping)) {
+            return;
+        }
+
+        body._sMoved = true;
+        Common._bodyStaticEpoch++;
+        Common._journalTouch(body);
+    };
+
+    /**
      * Sets the body as static, including isStatic flag and setting mass and inertia to Infinity.
      * @method setStatic
      * @param {body} body
@@ -719,6 +751,8 @@ var Axes = require('../geometry/Axes');
 
         // both the vertices and the axes have been replaced
         Body._updateBoxTag(body);
+
+        Body._promoteIfIndexed(body);
     };
 
     /**
@@ -860,6 +894,7 @@ var Axes = require('../geometry/Axes');
         }
 
         body._restStatic = Common._isRestingStatic(body);
+        Body._promoteIfIndexed(body);
     };
 
     /**
@@ -893,6 +928,7 @@ var Axes = require('../geometry/Axes');
         }
 
         body._restStatic = Common._isRestingStatic(body);
+        Body._promoteIfIndexed(body);
     };
 
     /**
@@ -1012,6 +1048,7 @@ var Axes = require('../geometry/Axes');
         bounds.max.y = maxY;
 
         body._restStatic = Common._isRestingStatic(body);
+        Body._promoteIfIndexed(body);
     };
 
     /**
@@ -1229,6 +1266,8 @@ var Axes = require('../geometry/Axes');
                 body.circleRadius = null;
             }
         }
+
+        Body._promoteIfIndexed(body);
     };
 
     /**

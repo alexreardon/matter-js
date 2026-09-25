@@ -491,3 +491,260 @@ describe('Detector configuration', function() {
         expect(solo[1]).not.toEqual(solo[3]);
     });
 });
+
+// A resting body (static or asleep) that a Body setter moves after the grid
+// indexed it is promoted to a mover by that setter (Body._promoteIfIndexed):
+// nothing tags it. Every setter that moves or reshapes a body is run through
+// the same scene: a shelf of statics that starts moving 30 steps in, under a
+// pile of debris, above a static page. On every step the grid must confirm
+// exactly the sweep's pairs, and the debris must ride the shelf.
+describe('a resting body moved after the grid indexed it', function() {
+    var SHELF_Y = 300;
+
+    // each moves one shelf piece by a step's worth; `index` is its place in
+    // the shelf, so a rotation about a shared pivot turns the shelf as one
+    var SETTERS = [
+        ['Body.setPosition', function(body) {
+            Body.setPosition(body, { x: body.position.x, y: body.position.y - 1 });
+        }],
+        ['Body.setPosition, inferring velocity', function(body) {
+            Body.setPosition(body, { x: body.position.x, y: body.position.y - 1 }, true);
+        }],
+        ['Body.translate', function(body) {
+            Body.translate(body, { x: 0, y: -1 });
+        }],
+        ['Body.set position', function(body) {
+            Body.set(body, 'position', { x: body.position.x, y: body.position.y - 1 });
+        }],
+        ['Body.setPositionAndAngle', function(body, step) {
+            Body.setPositionAndAngle(body, body.position.x, body.position.y - 1, 0.002 * step);
+        }],
+        ['Body.setAngle', function(body) {
+            Body.setAngle(body, body.angle + 0.004);
+        }],
+        ['Body.rotate', function(body) {
+            Body.rotate(body, 0.004);
+        }],
+        ['Body.rotate about a point', function(body) {
+            Body.rotate(body, -0.0015, { x: 60, y: SHELF_Y });
+        }],
+        ['Body.scale', function(body) {
+            // grows upward into the debris (about the position, so the
+            // position does not move without positionPrev, which would read
+            // as a velocity and fling the debris)
+            Body.scale(body, 1, 1.01);
+        }],
+        ['Body.setVertices', function(body, step) {
+            var halfHeight = 7 + 0.1 * step;
+            Body.setVertices(body, [
+                { x: -19, y: -halfHeight }, { x: 19, y: -halfHeight },
+                { x: 19, y: halfHeight }, { x: -19, y: halfHeight }
+            ]);
+        }]
+    ];
+
+    function runShelf(move, options) {
+        var sleeping = Boolean(options && options.sleeping);
+        var moveBeforeFirstStep = Boolean(options && options.moveBeforeFirstStep);
+        var engine = createGridEngine();
+        var world = engine.world;
+        var random = createRandom(0x5e1f);
+        var shelf = [];
+        var debris = [];
+        var contactSteps = 0;
+        var movingSteps = 0;
+        var row;
+        var col;
+
+        engine.gravity.y = 1;
+
+        // the page below and around the shelf
+        for (row = 0; row < 10; row++) {
+            for (col = 0; col < 16; col++) {
+                Composite.add(world, Bodies.rectangle(30 + col * 50, 360 + row * 22, 44, 16, { isStatic: true }));
+            }
+        }
+
+        for (col = 0; col < 10; col++) {
+            var piece = sleeping
+                ? Bodies.rectangle(80 + col * 40, SHELF_Y, 38, 14)
+                : Bodies.rectangle(80 + col * 40, SHELF_Y, 38, 14, { isStatic: true });
+            shelf.push(piece);
+        }
+        Composite.add(world, shelf);
+        if (sleeping) {
+            // asleep, not static: with sleeping off in the engine they stay
+            // asleep, so the grid indexes them as resting bodies
+            shelf.forEach(function(piece) { Body.setStatic(piece, false); });
+            shelf.forEach(function(piece) { require('../src/core/Sleeping').set(piece, true); });
+        }
+
+        for (var index = 0; index < 30; index++) {
+            debris.push(Bodies.rectangle(80 + random() * 380, SHELF_Y - 30 - random() * 60, 10, 10));
+        }
+        Composite.add(world, debris);
+
+        if (moveBeforeFirstStep) {
+            shelf.forEach(function(piece) {
+                Body.setPosition(piece, { x: piece.position.x, y: piece.position.y - 20 });
+            });
+        }
+
+        var shelfIds = new Set(shelf.map(function(piece) { return piece.id; }));
+        var debrisStartY = 0;
+
+        var checked = checkedAgainstSweep(function() {
+            for (var step = 0; step < 150; step++) {
+                if (step >= 30) {
+                    if (step === 30) {
+                        debrisStartY = debris.reduce(function(sum, body) { return sum + body.position.y; }, 0) / debris.length;
+                    }
+                    for (var s = 0; s < shelf.length; s++) {
+                        move(shelf[s], step - 30);
+                    }
+                    movingSteps++;
+                }
+                Engine.update(engine, DELTA);
+                if (step >= 30) {
+                    var touching = engine.pairs.list.some(function(pair) {
+                        return pair.isActive && shelfIds.has(pair.bodyA.parent.id) !== shelfIds.has(pair.bodyB.parent.id);
+                    });
+                    if (touching) {
+                        contactSteps++;
+                    }
+                }
+            }
+        });
+
+        var debrisEndY = debris.reduce(function(sum, body) { return sum + body.position.y; }, 0) / debris.length;
+
+        return {
+            checked: checked,
+            shelf: shelf,
+            contactShare: contactSteps / movingSteps,
+            debrisRise: debrisStartY - debrisEndY
+        };
+    }
+
+    test.each(SETTERS)('%s: the grid confirms the sweep\'s pairs on every step, and the debris rides the shelf', function(name, move) {
+        var result = runShelf(move);
+
+        expect(result.checked.calls).toBe(150);
+        expect(result.checked.first).toBe(null);
+        expect(result.checked.mismatches).toBe(0);
+        // promoted by the move, never tagged
+        result.shelf.forEach(function(piece) {
+            expect(piece._sMoved).toBe(true);
+            expect(piece._sIndexed).toBe(false);
+        });
+        // the debris stays on the moving shelf
+        expect(result.contactShare).toBeGreaterThan(0.9);
+    });
+
+    test('a rising shelf carries its debris up', function() {
+        var result = runShelf(SETTERS[0][1]);
+        // 120 steps at 1px a step
+        expect(result.debrisRise).toBeGreaterThan(80);
+    });
+
+    test('NEGATIVE: with the promotion switched off, the moved shelf misses pairs', function() {
+        var promote = Body._promoteIfIndexed;
+        var result;
+
+        Body._promoteIfIndexed = function() {};
+        try {
+            result = runShelf(SETTERS[0][1]);
+        } finally {
+            Body._promoteIfIndexed = promote;
+        }
+
+        expect(result.checked.mismatches).toBeGreaterThan(10);
+        result.shelf.forEach(function(piece) {
+            expect(piece._sMoved).toBe(false);
+        });
+    });
+
+    test('a sleeping body moved after the grid indexed it is promoted the same way', function() {
+        var result = runShelf(SETTERS[0][1], { sleeping: true });
+
+        result.shelf.forEach(function(piece) {
+            expect(piece.isSleeping).toBe(true);
+            expect(piece._sMoved).toBe(true);
+        });
+        expect(result.checked.mismatches).toBe(0);
+        expect(result.contactShare).toBeGreaterThan(0.9);
+    });
+
+    test('a static moved before the grid first indexed it is indexed at its new pose, not promoted', function() {
+        var engine = createGridEngine();
+        var floor = Bodies.rectangle(200, 400, 60, 20, { isStatic: true });
+        var box = Bodies.rectangle(200, 330, 20, 20);
+        Composite.add(engine.world, [floor, box]);
+
+        Body.setPosition(floor, { x: 200, y: 350 });
+
+        var checked = checkedAgainstSweep(function() {
+            for (var step = 0; step < 20; step++) {
+                Engine.update(engine, DELTA);
+            }
+        });
+
+        expect(floor._sMoved).toBe(false);
+        expect(floor._sIndexed).toBe(true);
+        expect(checked.mismatches).toBe(0);
+        expect(hasCollisionBetween(engine.detector.collisions, box, floor)).toBe(true);
+
+        // and the first move once it is indexed promotes it
+        Body.setPosition(floor, { x: 200, y: 349 });
+        expect(floor._sMoved).toBe(true);
+    });
+
+    test('a promotion moves the static epoch and records the body in its world\'s journal, once', function() {
+        var engine = createGridEngine();
+        var tiles = [];
+        for (var index = 0; index < 20; index++) {
+            tiles.push(Bodies.rectangle(20 + index * 30, 200, 24, 12, { isStatic: true }));
+        }
+        Composite.add(engine.world, tiles);
+        Engine.update(engine, DELTA);
+        Engine.update(engine, DELTA);
+
+        var world = engine.world;
+        var epoch = Common._bodyStaticEpoch;
+        var touched = world._touchedCount;
+
+        expect(world._journalLive).toBe(true);
+        Body.setPosition(tiles[4], { x: tiles[4].position.x + 3, y: 200 });
+
+        expect(Common._bodyStaticEpoch).toBe(epoch + 1);
+        expect(world._touchedCount).toBe(touched + 1);
+        expect(world._touched[touched]).toBe(tiles[4]);
+
+        // a promoted body is a mover for good: a second move records nothing
+        Body.setPosition(tiles[4], { x: tiles[4].position.x + 3, y: 200 });
+        Body.setAngle(tiles[4], 0.2);
+        expect(Common._bodyStaticEpoch).toBe(epoch + 1);
+        expect(world._touchedCount).toBe(touched + 1);
+
+        Engine.update(engine, DELTA);
+        expect(engine.detector._sgrid.movers).toContain(tiles[4]);
+        expect(tiles[4]._sIndexed).toBe(false);
+    });
+
+    test('on the sweep nothing is indexed, so a move promotes nothing', function() {
+        var engine = Engine.create();
+        var floor = Bodies.rectangle(200, 400, 60, 20, { isStatic: true });
+        Composite.add(engine.world, floor);
+        Engine.update(engine, DELTA);
+
+        var epoch = Common._bodyStaticEpoch;
+        Body.setPosition(floor, { x: 210, y: 400 });
+
+        expect(floor._sMoved).toBe(false);
+        expect(Common._bodyStaticEpoch).toBe(epoch);
+    });
+
+    test('Detector.setGridDynamic is gone', function() {
+        expect(Detector.setGridDynamic).toBeUndefined();
+    });
+});

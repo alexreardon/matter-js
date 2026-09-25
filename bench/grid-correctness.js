@@ -145,9 +145,12 @@ function makeRemovalCase() {
 
 // moving-static (inner-scroll) case: a body that is isStatic but MOVES each
 // frame (like a destructible inside a scrolling container repositioned by
-// syncScrollSurfaces). Tagged `_gridDynamic` so the grid treats it as a mover and it
-// never goes stale in the static index. It sweeps through the fixed page (must
-// skip static-static) and the falling debris (must detect).
+// syncScrollSurfaces). Nothing tags it: the first setPosition after the grid
+// indexes it promotes it to a mover (Body._promoteIfIndexed), so it never goes
+// stale in the static index. It sweeps through the fixed page (must skip
+// static-static) and the falling debris (must detect). At the smaller cells the
+// bar is oversized, which is scanned live anyway; from 32px it is bucketed,
+// which is where a missing promotion shows
 function makeMovingStaticCase() {
     let bar = null;
     let t = 0;
@@ -158,7 +161,6 @@ function makeMovingStaticCase() {
             }
         }
         bar = Bodies.rectangle(400, 560, 280, 18, { isStatic: true });
-        Detector.setGridDynamic(bar);
         Composite.add(world, bar);
         for (let i = 0; i < 40; i++) {
             Composite.add(world, Bodies.rectangle(280 + rand() * 360, 350 + rand() * 150, 13, 13, { friction: 0.3, restitution: 0.2 }));

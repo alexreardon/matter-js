@@ -141,33 +141,6 @@ var Collision = require('./Collision');
     };
 
     /**
-     * Tags a body as grid-dynamic, meaning the grid broadphase treats it
-     * as a mover (re-indexed every step) even while `isStatic` is `true`. This is
-     * what a static body that MOVES (an inner-scroll surface tracking the page)
-     * needs, since the persistent static index would otherwise hold it at its
-     * old position.
-     *
-     * Use this rather than assigning `body._gridDynamic` directly: the flag
-     * changes the body's moving-vs-resting role, so it has to invalidate the
-     * cached mover lists (see `Common._bodyStaticEpoch`). Repeat calls with the
-     * flag already set are free, so a caller may re-tag every step.
-     * @method setGridDynamic
-     * @param {body} body
-     * @param {bool} [isGridDynamic=true]
-     */
-    Detector.setGridDynamic = function(body, isGridDynamic) {
-        var flag = isGridDynamic !== false;
-
-        if (body._gridDynamic === flag) {
-            return;
-        }
-
-        body._gridDynamic = flag;
-        Common._bodyStaticEpoch++;
-        Common._journalTouch(body);
-    };
-
-    /**
      * Efficiently finds all collisions among all the bodies in `detector.bodies` using a broadphase algorithm.
      * 
      * _Note:_ The specific ordering of collisions returned is not guaranteed between releases and may change for performance reasons.
@@ -756,7 +729,7 @@ var Collision = require('./Collision');
 
             body._sIndexed = false;
 
-            if (!(body.isStatic || body.isSleeping) || body._gridDynamic === true) {
+            if (!(body.isStatic || body.isSleeping) || body._sMoved === true) {
                 continue;
             }
 
@@ -948,7 +921,7 @@ var Collision = require('./Collision');
 
             // from here, the full walk's classification of one body, write for
             // write (see there)
-            var isStaticNow = (body.isStatic || body.isSleeping) && body._gridDynamic !== true;
+            var isStaticNow = (body.isStatic || body.isSleeping) && body._sMoved !== true;
 
             if (body._sDeparted) {
                 body._sDeparted = false;
@@ -1044,10 +1017,10 @@ var Collision = require('./Collision');
      * journal, not yet read (see _classifyFromJournal). A body not in the
      * journal keeps its role, so the engine's movers among those are the
      * detector's movers that are neither static nor sleeping (the detector
-     * also counts a static tagged `_gridDynamic`); each body in the journal is
-     * read as it is now, and merged in by `_sWorldIndex` like the detector's
-     * own. The journal is only read here, never emptied: the detector reads it
-     * later in the same update.
+     * also counts a resting body promoted by a move, `_sMoved`); each body in
+     * the journal is read as it is now, and merged in by `_sWorldIndex` like
+     * the detector's own. The journal is only read here, never emptied: the
+     * detector reads it later in the same update.
      *
      * It can only when the journal describes every change since that
      * classification, which are the conditions under which the detector reads
@@ -1267,11 +1240,11 @@ var Collision = require('./Collision');
 
         for (i = 0; i < n; i++) {
             var body = bodies[i],
-                // a body tagged `_gridDynamic` (e.g. an inner-scroll surface
-                // that is static but moves each tick) is treated as a mover so
-                // it is re-bucketed every step and never goes stale in the
-                // static index
-                isStaticNow = (body.isStatic || body.isSleeping) && body._gridDynamic !== true;
+                // a resting body a setter moved after it was indexed (e.g. an
+                // inner-scroll surface that is static but moves each tick, see
+                // Body._promoteIfIndexed) is a mover, so it is re-bucketed
+                // every step and never goes stale in the static index
+                isStaticNow = (body.isStatic || body.isSleeping) && body._sMoved !== true;
 
             body._sWalk = walkStamp;
             body._sWorldIndex = i;
@@ -1363,9 +1336,10 @@ var Collision = require('./Collision');
      *
      * The static index is rebuilt only when the static membership changes
      * (detected per body via a cached `_sPrev` flag plus a `staticCount` guard),
-     * e.g. on release. A static body that MOVES while staying static (inner-scroll
-     * surfaces) is not handled here and must be treated as a mover by the caller;
-     * the page-destroyer integration does this.
+     * e.g. on release. A resting body that MOVES while staying at rest (an
+     * inner-scroll surface) is promoted to a mover by the `Body` setter that
+     * moved it, once the index holds it (see Body._promoteIfIndexed), and is a
+     * mover from then on; nothing has to tag it.
      *
      * The static buckets (and the oversized-static list) hold body REFERENCES,
      * not indices into `detector.bodies`. The index outlives a step, but Matter
@@ -1379,7 +1353,7 @@ var Collision = require('./Collision');
      * build, loudly and on purpose.
      *
      * Every per-body field this path writes (`_sPrev`, `_gsStamp`,
-     * `_gridDynamic`, `_sc*`, `_s*` index membership) is pre-declared in
+     * `_sMoved`, `_sc*`, `_s*` index membership) is pre-declared in
      * `Body.create`; see the rule there before introducing a new one (a lazily
      * added field splits body hidden classes and slows the whole engine,
      * measured 1.3-4.8x).
@@ -1496,9 +1470,10 @@ var Collision = require('./Collision');
         // single costs in the step, while its ANSWER almost never changes: the
         // mover set only moves when the body set changes (add / remove, each of
         // which bumps Common._bodySetEpoch) or when some body's
-        // moving-vs-resting role flips (`Body.setStatic`, `Sleeping.set`,
-        // `Detector.setGridDynamic`, each of which bumps the static epoch). So
-        // cache the result and rebuild only on those signals.
+        // moving-vs-resting role flips (`Body.setStatic`, `Sleeping.set`, and
+        // a setter promoting a moved indexed resting body, each of which bumps
+        // the static epoch). So cache the result and rebuild only on those
+        // signals.
         //
         // And when it has to be rebuilt, the change is usually a handful of
         // bodies in a world of thousands, which is where the body journal comes
@@ -1834,8 +1809,8 @@ var Collision = require('./Collision');
                 mMinX = mBounds[mBoundsBase], mMaxX = mBounds[mBoundsBase + 1],
                 mMinY = mBounds[mBoundsBase + 2], mMaxY = mBounds[mBoundsBase + 3],
                 mFilter = m.collisionFilter,
-                // a tagged moving-static surface is a mover here but must still
-                // not generate static-static pairs (the sweep skips those)
+                // a moved static promoted to a mover must still not generate
+                // static-static pairs (the sweep skips those)
                 mStatic = m.isStatic || m.isSleeping,
                 localStamp = ++g.stamp,
                 mIsOver = mOver[mGen] === 1;
@@ -1849,7 +1824,7 @@ var Collision = require('./Collision');
             // static list for normal statics it overlaps, a bounded O(statics).
             // Normal movers find THIS body via their own oversized pass (it is
             // in dOver); oversized statics/movers are handled by the sOver/dOver
-            // passes below. Skipped for a static (tagged moving) mover, since
+            // passes below. Skipped for a static (promoted, moving) mover, since
             // static-static never resolves.
             if (mIsOver) {
                 // not in the mover index, so the sweep above cannot reach it;
@@ -1941,7 +1916,7 @@ var Collision = require('./Collision');
 
                         // collect static candidates on a cache miss (tested
                         // from the list after the walk; skipped when the outer
-                        // body is itself static, as a tagged moving surface vs
+                        // body is itself static, as a promoted moving static vs
                         // the static page is static-static and never resolves).
                         // The cell hash is only needed here, so a mover holding
                         // its cached list pays no hashing at all
@@ -2009,8 +1984,8 @@ var Collision = require('./Collision');
 
                 // mover vs its static candidates (cached or just collected).
                 // Their bounds were captured with the list: a body in the static
-                // index does not move (one that does must be tagged with
-                // Detector.setGridDynamic, which makes it a mover instead), so
+                // index does not move (a setter that moves one promotes it to
+                // a mover instead, see Body._promoteIfIndexed), so
                 // the test runs off contiguous memory and only a candidate that
                 // overlaps is ever dereferenced
                 if (!mStatic) {
