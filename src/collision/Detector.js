@@ -701,12 +701,17 @@ var Collision = require('./Collision');
         // (`built` is only set at the end of one), which bumps the epoch and so
         // invalidates every cached list at once
         if (g.built) {
-            var changed = g.changedCells;
+            // filled BY INDEX up to `g.changedCount`, never cleared (see the
+            // invalidation sweep in `_collisionsGridStatic`)
+            var changed = g.changedCells,
+                changedAt = g.changedCount;
             for (cx = cx0; cx <= cx1; cx++) {
                 for (cy = cy0; cy <= cy1; cy++) {
-                    changed.push(cx, cy);
+                    changed[changedAt++] = cx;
+                    changed[changedAt++] = cy;
                 }
             }
+            g.changedCount = changedAt;
         }
 
         for (cx = cx0; cx <= cx1; cx++) {
@@ -770,6 +775,7 @@ var Collision = require('./Collision');
         // `Engine._bodiesUpdate` this step, so its bounds describe where it is
         // now, not the cells it is being pulled out of
         var changed = g.changedCells,
+            changedAt = g.changedCount,
             ucx,
             ucy,
             ucx1 = body._sCx1,
@@ -777,9 +783,12 @@ var Collision = require('./Collision');
 
         for (ucx = body._sCx0; ucx <= ucx1; ucx++) {
             for (ucy = body._sCy0; ucy <= ucy1; ucy++) {
-                changed.push(ucx, ucy);
+                changed[changedAt++] = ucx;
+                changed[changedAt++] = ucy;
             }
         }
+
+        g.changedCount = changedAt;
 
         for (i = 0; i < buckets.length; i++) {
             var bucket = buckets[i];
@@ -851,7 +860,7 @@ var Collision = require('./Collision');
         g.indexed.length = 0;
         // the epoch bump below invalidates every cached candidate list, so
         // per-cell reports from this rebuild would be a pure cost
-        g.changedCells.length = 0;
+        g.changedCount = 0;
 
         for (i = 0; i < n; i++) {
             var body = bodies[i];
@@ -1027,8 +1036,9 @@ var Collision = require('./Collision');
                 // every bucket changes) so each mover's cached static-candidate
                 // list can be validated cheaply. An incremental change reports
                 // the cells it touched here instead, as flat (cx, cy) pairs
-                // consumed once per step by the invalidation sweep below
-                epoch: 0, changedCells: [],
+                // consumed once per step by the invalidation sweep below.
+                // Only the first `changedCount` values are live (see there)
+                epoch: 0, changedCells: [], changedCount: 0,
                 cellSize: 0
             };
         }
@@ -1382,8 +1392,14 @@ var Collision = require('./Collision');
         // entries all fail the key test, which is the right answer (no mover
         // covers it). Typical cost is a few dozen cells against the thousands of
         // list rebuilds the old global epoch bump forced.
+        //
+        // `changedCells` is filled BY INDEX and bounded by `g.changedCount`,
+        // never by its length, so a step's reports are dropped by zeroing the
+        // count: no length store (a StoreIC call in TurboFan) and no backing
+        // store dropped and regrown every step. Slots past the count are stale
+        // cells from a longer earlier step and nothing reads them
         var changedCells = g.changedCells,
-            changedLength = changedCells.length;
+            changedLength = g.changedCount;
 
         if (changedLength > 0) {
             if (dEntryCount > 0) {
@@ -1402,7 +1418,7 @@ var Collision = require('./Collision');
                 }
             }
 
-            changedCells.length = 0;
+            g.changedCount = 0;
         }
 
         // 4) candidate generation: each mover is an outer body; pair it with
