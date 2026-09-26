@@ -283,10 +283,16 @@ var Common = require('../core/Common');
         var vertex,
             delta;
 
-        // the self-projection memo describes these vertex positions
+        // the self-projection memo describes these vertex positions, and the
+        // box tag their shape: a scale can change both. Body.scale re-takes
+        // the tag after its axes follow (see Body._updateBoxTag); a direct
+        // call leaves the body on the general support search
         var spBody = vertices.length > 0 ? vertices[0].body : null;
         if (spBody) {
             spBody._spValid = false;
+            spBody._boxCorners = -1;
+            spBody._boxHalf0 = 0;
+            spBody._boxHalf1 = 0;
         }
 
         for (var i = 0; i < vertices.length; i++) {

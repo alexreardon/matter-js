@@ -200,6 +200,33 @@ describe('the box tag is decided by geometry', () => {
         }
     });
 
+    it('a direct Vertices.scale drops the tag, and Body.setVertices takes it again', () => {
+        // the axes of an axis-aligned box stay valid under a non-uniform scale,
+        // so only the half extents go stale: the support search would read the
+        // old ones
+        const body = Bodies.rectangle(100, 100, 40, 20);
+        expect(isBox(body)).toBe(true);
+
+        Vertices.scale(body.vertices, 3, 1, body.position);
+
+        expect(isBox(body)).toBe(false);
+        expect(body._boxHalf0).toBe(0);
+        expect(body._boxHalf1).toBe(0);
+
+        Body.setVertices(body, body.vertices);
+
+        expect(isBox(body)).toBe(true);
+        expect(findCornerTableViolation(body)).toBe(null);
+    });
+
+    it('Body.scale still re-takes the tag after its own Vertices.scale', () => {
+        const body = Bodies.rectangle(100, 100, 40, 20, { angle: 0.4 });
+        Body.scale(body, 1.5, 1.5);
+
+        expect(isBox(body)).toBe(true);
+        expect(findCornerTableViolation(body)).toBe(null);
+    });
+
     it('rotation and translation keep the tag valid without recomputing it', () => {
         const body = Bodies.rectangle(300, 200, 26, 11);
 
