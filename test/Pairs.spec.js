@@ -148,6 +148,68 @@ describe('Pairs record table', () => {
         expect(grows).toBeGreaterThan(0);
     });
 
+    it('keeps every pair reachable when a removal shifts a cluster back across the table end', () => {
+        // a fixed 16-slot table held under half load never grows, so its
+        // clusters wrap past the last slot on a large share of operations; the
+        // shift test must compare distances cyclically (masked) there
+        Pairs._initialSize = 16;
+        const pairs = Pairs.create();
+        const random = makeRandom(12345);
+        const reference = new Map();
+        let crossingRemovals = 0;
+
+        for (let op = 0; op < 20000; op++) {
+            const idA = 1 + Math.floor(random() * 60);
+            const idB = 1 + Math.floor(random() * 60);
+            if (idA === idB) {
+                continue;
+            }
+
+            const entry = makeEntry(idA, idB);
+
+            // remove a random live pair at the live cap, and on 40 percent of
+            // the operations below it; otherwise insert a new one
+            const removing = reference.size > 0 && (reference.size >= 7 || random() < 0.4);
+            const liveIds = removing ? Array.from(reference.keys()) : null;
+            const live = removing ? reference.get(liveIds[Math.floor(random() * liveIds.length)]) : null;
+
+            if (live) {
+                // does the cluster after the removed slot run past the last
+                // slot? Then the shift crosses the table end
+                const keys = pairs._recordKeys;
+                const mask = pairs._recordMask;
+                let slot = Pair.hash(live.pair.bodyA.id, live.pair.bodyB.id) & mask;
+                while (keys[slot] !== live.pair.id) {
+                    slot = (slot + 1) & mask;
+                }
+                let next = (slot + 1) & mask;
+                while (keys[next] !== 0) {
+                    if (next === 0) {
+                        crossingRemovals += 1;
+                        break;
+                    }
+                    next = (next + 1) & mask;
+                }
+
+                Pairs._recordRemove(pairs, live.pair.id, live.pair);
+                reference.delete(live.pair.id);
+            } else if (!reference.has(entry.pair.id)) {
+                Pairs._recordInsert(pairs, entry.pair.id, entry.collision);
+                reference.set(entry.pair.id, entry);
+            } else {
+                continue;
+            }
+
+            const violation = findViolation(pairs, reference);
+            if (violation !== null) {
+                throw new Error('op ' + op + ': ' + violation);
+            }
+        }
+
+        expect(pairs._recordKeys.length).toBe(16);
+        expect(crossingRemovals).toBeGreaterThan(100);
+    });
+
     it('never grows a table whose live count stays under half load', () => {
         Pairs._initialSize = 64;
         const pairs = Pairs.create();
