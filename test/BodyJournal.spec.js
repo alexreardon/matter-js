@@ -354,57 +354,57 @@ describe('the grid body journal', () => {
         let result;
         try {
             result = runPair({
-            steps: 150,
-            sleeping: true,
-            setup(arms, add) {
-                setupPage(arms, add);
-                for (let k = 0; k < 6; k++) {
-                    add(() => Bodies.rectangle(80 + k * 110, 590, 20, 20));
-                }
-                // companions: awake, held up by a force each update
-                companionsAt = arms[0].bodies.length;
-                for (let k = 0; k < 6; k++) {
-                    add(() => Bodies.rectangle(100 + k * 110, 470, 16, 16));
-                }
-            },
-            listen(arms) {
-                for (const arm of arms) {
-                    const count = arm.bodies.length;
+                steps: 150,
+                sleeping: true,
+                setup(arms, add) {
+                    setupPage(arms, add);
                     for (let k = 0; k < 6; k++) {
-                        const sleeper = arm.bodies[count - 12 + k];
-                        const companion = arm.bodies[count - 6 + k];
-                        Events.on(sleeper, 'sleepStart', () => {
-                            if (arm === arms[0]) {
-                                fired++;
-                            }
-                            if (adds) {
-                                const body = Bodies.rectangle(60 + arm.bodies.length * 7 % 700, 560, 18, 18);
-                                arm.indexOf.set(body, arm.bodies.length);
-                                arm.bodies.push(body);
-                                Composite.add(arm.world, body);
-                            } else {
-                                Composite.remove(arm.world, companion);
-                            }
-                        });
+                        add(() => Bodies.rectangle(80 + k * 110, 590, 20, 20));
                     }
-                }
-            },
-            perStep(step, arms, random) {
+                    // companions: awake, held up by a force each update
+                    companionsAt = arms[0].bodies.length;
+                    for (let k = 0; k < 6; k++) {
+                        add(() => Bodies.rectangle(100 + k * 110, 470, 16, 16));
+                    }
+                },
+                listen(arms) {
+                    for (const arm of arms) {
+                        const count = arm.bodies.length;
+                        for (let k = 0; k < 6; k++) {
+                            const sleeper = arm.bodies[count - 12 + k];
+                            const companion = arm.bodies[count - 6 + k];
+                            Events.on(sleeper, 'sleepStart', () => {
+                                if (arm === arms[0]) {
+                                    fired++;
+                                }
+                                if (adds) {
+                                    const body = Bodies.rectangle(60 + arm.bodies.length * 7 % 700, 560, 18, 18);
+                                    arm.indexOf.set(body, arm.bodies.length);
+                                    arm.bodies.push(body);
+                                    Composite.add(arm.world, body);
+                                } else {
+                                    Composite.remove(arm.world, companion);
+                                }
+                            });
+                        }
+                    }
+                },
+                perStep(step, arms, random) {
                 // a release now and then, between updates, which the engine
                 // reads from the journal
-                const release = step % 3 === 0 ? pick(arms[0], random, (body) => body.isStatic && inWorld(arms[0], body)) : -1;
-                for (const arm of arms) {
-                    if (release !== -1) {
-                        Body.setStatic(arm.bodies[release], false);
-                    }
-                    // the companions, the last six bodies the setup added
-                    for (const companion of arm.bodies.slice(companionsAt, companionsAt + 6)) {
-                        if (inWorld(arm, companion)) {
-                            Body.applyForce(companion, companion.position, { x: 0, y: -0.001 * companion.mass });
+                    const release = step % 3 === 0 ? pick(arms[0], random, (body) => body.isStatic && inWorld(arms[0], body)) : -1;
+                    for (const arm of arms) {
+                        if (release !== -1) {
+                            Body.setStatic(arm.bodies[release], false);
+                        }
+                        // the companions, the last six bodies the setup added
+                        for (const companion of arm.bodies.slice(companionsAt, companionsAt + 6)) {
+                            if (inWorld(arm, companion)) {
+                                Body.applyForce(companion, companion.position, { x: 0, y: -0.001 * companion.mass });
+                            }
                         }
                     }
                 }
-            }
             });
         } finally {
             Detector._moversFromJournal = moversFromJournal;
