@@ -37,12 +37,16 @@ var Body = require('../body/Body');
     Engine.create = function(options) {
         options = options || {};
 
-        // the broadphase is the DETECTOR's (see Detector.create). An engine
-        // option by that name is overwritten by the back-compatibility
-        // `engine.broadphase` below, so the engine would quietly run the sweep
-        if (typeof options.broadphase === 'string') {
-            throw new Error('Matter.Engine: the broadphase is set on the detector, e.g. '
-                + "Engine.create({ detector: Detector.create({ broadphase: '" + options.broadphase + "' }) })");
+        // the broadphase and its cell size are the DETECTOR's (see
+        // Detector.create). An engine option named `broadphase` is overwritten
+        // by the back-compatibility `engine.broadphase` below, and one named
+        // `cellSize` is read by nothing, so either would be silently ignored.
+        // The suggested code is a literal, never the value given: that may be
+        // the name of no broadphase at all
+        if (typeof options.broadphase === 'string' || options.cellSize !== undefined) {
+            throw new Error('Matter.Engine: the broadphase and cellSize are set on the detector, not the engine '
+                + '(got broadphase ' + String(options.broadphase) + ', cellSize ' + String(options.cellSize) + '), e.g. '
+                + "Engine.create({ detector: Detector.create({ broadphase: 'grid', cellSize: 32 }) })");
         }
 
         var defaults = {
@@ -82,7 +86,10 @@ var Body = require('../body/Body');
         engine._moverEpoch = -1;
         engine._moverSetEpoch = -1;
 
-        // for temporary back compatibility only
+        // for temporary back compatibility only: upstream's stubs for the
+        // `Matter.Grid` module it deleted. They are unrelated to the grid
+        // broadphase, which is `engine.detector.broadphase === 'grid'`, and
+        // nothing reads them
         engine.grid = { buckets: [] };
         engine.world.gravity = engine.gravity;
         engine.broadphase = engine.grid;
@@ -112,6 +119,12 @@ var Body = require('../body/Body');
             timing = engine.timing,
             timestamp = timing.timestamp,
             i;
+
+        // a detector configured with no broadphase, or a grid cell size it
+        // cannot use, throws here, before this update changes anything, rather
+        // than from the broadphase half way through it (see
+        // Detector._assertConfig)
+        Detector._assertConfig(detector);
 
         // warn if high delta
         if (delta > Engine._deltaMax) {
@@ -723,7 +736,8 @@ var Body = require('../body/Body');
      */
 
     /**
-     * A `Matter.Grid` instance.
+     * A `Matter.Grid` instance. An upstream back-compatibility stub, unrelated
+     * to the grid broadphase (`engine.detector.broadphase`); nothing reads it.
      *
      * @deprecated replaced by `engine.detector`
      * @property grid
@@ -732,7 +746,8 @@ var Body = require('../body/Body');
      */
 
     /**
-     * Replaced by and now alias for `engine.grid`.
+     * Replaced by and now alias for `engine.grid`. Not the detector's
+     * `broadphase`, which chooses the broadphase (see `Detector.create`).
      *
      * @deprecated replaced by `engine.detector`
      * @property broadphase

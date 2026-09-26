@@ -333,9 +333,36 @@ describe('Detector configuration', function() {
         expect(engine.detector._sgrid.cellSize).toBe(48);
     });
 
-    test('an engine-level broadphase option throws rather than being ignored', function() {
-        // upstream's back-compatibility `engine.broadphase` would overwrite it
+    test('an engine-level broadphase or cellSize option throws rather than being ignored', function() {
+        // upstream's back-compatibility `engine.broadphase` would overwrite
+        // the first, and nothing would read the second
         expect(function() { Engine.create({ broadphase: 'grid' }); }).toThrow(/detector/);
+        expect(function() { Engine.create({ cellSize: 16 }); }).toThrow(/detector/);
+        expect(function() { Engine.create({ detector: Detector.create({ broadphase: 'grid' }), cellSize: 16 }); }).toThrow(/detector/);
+        expect(Engine.create({ cellSize: undefined }).detector.cellSize).toBe(32);
+    });
+
+    test('the engine-level error suggests code that runs, whatever name it was given', function() {
+        var message = '';
+        try {
+            Engine.create({ broadphase: 'gridStatic' });
+        } catch (error) {
+            message = error.message;
+        }
+
+        // the bad name is reported, but never pasted into the suggested call
+        expect(message).toMatch(/gridStatic/);
+        expect(message).not.toMatch(/broadphase: 'gridStatic'/);
+        var suggested = message.match(/Detector\.create\((\{.*?\})\)/);
+        expect(suggested).not.toBe(null);
+        // eslint-disable-next-line no-new-func
+        var options = new Function('return ' + suggested[1])();
+        expect(Detector.create(options).broadphase).toBe('grid');
+    });
+
+    test('a cell size given as undefined takes the default, as an absent one does', function() {
+        expect(Detector.create({ cellSize: undefined }).cellSize).toBe(32);
+        expect(Detector.create({ broadphase: 'grid', cellSize: undefined }).cellSize).toBe(32);
     });
 
     test.each([['gridStatic'], ['Grid'], [''], [null], [undefined], [1]])('an unknown broadphase %p throws at Detector.create', function(broadphase) {
@@ -354,8 +381,11 @@ describe('Detector configuration', function() {
         expect(function() { Detector.collisions({ bodies: [], collisions: [], pairs: null }); }).toThrow(/unknown broadphase/);
     });
 
-    test.each([[0], [-8], [NaN], [Infinity], ['32'], [undefined]])('a cell size of %p throws at create, and at the next grid step', function(cellSize) {
-        expect(function() { Detector.create({ broadphase: 'grid', cellSize: cellSize }); }).toThrow(/cellSize/);
+    test.each([[0], [-0], [-8], [NaN], [Infinity], ['32'], [1e-310], [5e-324], [undefined]])('a cell size of %p throws at create, and at the next grid step', function(cellSize) {
+        // an unset cell size takes the default at create (see above)
+        if (cellSize !== undefined) {
+            expect(function() { Detector.create({ broadphase: 'grid', cellSize: cellSize }); }).toThrow(/cellSize/);
+        }
 
         var engine = createGridEngine();
         Composite.add(engine.world, Bodies.rectangle(100, 100, 40, 40));
@@ -363,6 +393,57 @@ describe('Detector configuration', function() {
 
         engine.detector.cellSize = cellSize;
         expect(function() { Engine.update(engine, DELTA); }).toThrow(/cellSize/);
+    });
+
+    // the grid seeded its remembered cell size with 0 and checked a cell size
+    // only when it CHANGED, so a zero set before the first grid step was never
+    // checked: its inverse is Infinity, every body lands in cell Infinity, and
+    // the insert loop never ends (it died, eventually, on an array too long)
+    test.each([[0], [-0], [1e-310]])('a cell size of %p set before the first grid step throws there, with or without an engine', function(cellSize) {
+        var detector = Detector.create({ broadphase: 'grid' });
+        detector.cellSize = cellSize;
+        var engine = Engine.create({ detector: detector });
+        Composite.add(engine.world, [
+            Bodies.rectangle(100, 100, 40, 40, { isStatic: true }),
+            Bodies.rectangle(100, 60, 20, 20)
+        ]);
+        expect(function() { Engine.update(engine, DELTA); }).toThrow(/cellSize/);
+
+        var bare = Detector.create({ broadphase: 'grid' });
+        bare.cellSize = cellSize;
+        Detector.setBodies(bare, engine.world.bodies.slice());
+        expect(function() { Detector.collisions(bare); }).toThrow(/cellSize/);
+
+        // a sweep never reads the cell size, until it is switched to the grid
+        var sweep = Engine.create();
+        Composite.add(sweep.world, Bodies.rectangle(100, 100, 40, 40, { isStatic: true }));
+        sweep.detector.cellSize = cellSize;
+        Engine.update(sweep, DELTA);
+        sweep.detector.broadphase = 'grid';
+        expect(function() { Engine.update(sweep, DELTA); }).toThrow(/cellSize/);
+    });
+
+    test.each([
+        ['a bad cell size', function(detector) { detector.cellSize = 0; }, /cellSize/],
+        ['an unknown broadphase', function(detector) { detector.broadphase = 'gridStatic'; }, /unknown broadphase/]
+    ])('an update that throws on %s changes nothing first', function(name, breakIt, error) {
+        var engine = createGridEngine();
+        var box = Bodies.rectangle(100, 100, 20, 20);
+        Composite.add(engine.world, [box, Bodies.rectangle(100, 300, 400, 20, { isStatic: true })]);
+        Engine.update(engine, DELTA);
+
+        var before = { x: box.position.x, y: box.position.y, timestamp: engine.timing.timestamp, bodies: engine.world.bodies };
+        breakIt(engine.detector);
+        expect(function() { Engine.update(engine, DELTA); }).toThrow(error);
+
+        expect(box.position.x).toBe(before.x);
+        expect(box.position.y).toBe(before.y);
+        expect(engine.timing.timestamp).toBe(before.timestamp);
+        // the update never lent the world its own array, so an add after the
+        // throw edits it in place rather than copying it
+        expect(engine.world._bodiesLent).toBe(false);
+        Composite.add(engine.world, Bodies.rectangle(50, 50, 10, 10));
+        expect(engine.world.bodies).toBe(before.bodies);
     });
 
     test('a cell-size change between updates rebuilds the static index once, and the grid still matches the sweep', function() {

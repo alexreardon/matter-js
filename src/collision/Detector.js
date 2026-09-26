@@ -36,7 +36,7 @@ var Collision = require('./Collision');
             broadphase: 'sweep',
             // the grid's cell size in pixels, read by the grid broadphase only.
             // Tune it to roughly the typical static body's size
-            cellSize: 32,
+            cellSize: Detector._defaultCellSize,
             // whether `bodies` is a private copy the sweep may sort in place
             // (see Detector.setBodies)
             _bodiesOwned: true,
@@ -52,6 +52,14 @@ var Collision = require('./Collision');
 
         var detector = Common.extend(defaults, options);
 
+        // Common.extend copies an option given as `undefined`, so a cell size
+        // left unset that way takes the default like an absent one. The
+        // broadphase does not: an unset broadphase quietly running the sweep
+        // is the failure the check below exists to rule out
+        if (detector.cellSize === undefined) {
+            detector.cellSize = Detector._defaultCellSize;
+        }
+
         if (!Detector._isBroadphase(detector.broadphase)) {
             throw Detector._broadphaseError(detector.broadphase);
         }
@@ -62,6 +70,14 @@ var Collision = require('./Collision');
 
         return detector;
     };
+
+    /**
+     * The grid's cell size when a detector is not given one.
+     * @private
+     * @property _defaultCellSize
+     * @type number
+     */
+    Detector._defaultCellSize = 32;
 
     /**
      * Whether `broadphase` names a broadphase `Detector.collisions` runs.
@@ -76,14 +92,42 @@ var Collision = require('./Collision');
 
     /**
      * Whether `cellSize` is a cell size the grid can use: a finite number of
-     * pixels above zero.
+     * pixels above zero whose inverse is finite too. The grid maps a
+     * coordinate to its cell by multiplying by that inverse, and an infinite
+     * one (a denormal cell size such as `1e-310`) puts every body in cell
+     * `Infinity`, whose cell loop never ends.
      * @private
      * @method _isCellSize
      * @param {} cellSize
      * @return {boolean}
      */
     Detector._isCellSize = function(cellSize) {
-        return typeof cellSize === 'number' && cellSize > 0 && cellSize < Infinity;
+        return typeof cellSize === 'number' && cellSize > 0 && cellSize < Infinity && 1 / cellSize < Infinity;
+    };
+
+    /**
+     * Throws if `detector` names no broadphase, or names the grid with a cell
+     * size it cannot use: the checks `Detector.collisions` and the grid make
+     * when they run, made up front. `Engine.update` calls this before it
+     * changes anything, so an update that throws on its configuration leaves
+     * the engine, the world and every body as they were.
+     * @private
+     * @method _assertConfig
+     * @param {detector} detector
+     */
+    Detector._assertConfig = function(detector) {
+        var broadphase = detector.broadphase;
+
+        if (broadphase === 'grid') {
+            if (!Detector._isCellSize(detector.cellSize)) {
+                throw Detector._cellSizeError(detector.cellSize);
+            }
+            return;
+        }
+
+        if (broadphase !== 'sweep') {
+            throw Detector._broadphaseError(broadphase);
+        }
     };
 
     /**
@@ -106,7 +150,8 @@ var Collision = require('./Collision');
      * @return {Error}
      */
     Detector._cellSizeError = function(cellSize) {
-        return new Error('Matter.Detector: cellSize must be a finite number above 0, got ' + String(cellSize));
+        return new Error('Matter.Detector: cellSize must be a finite number above 0 with a finite inverse, got '
+            + String(cellSize));
     };
 
     /**
@@ -1439,7 +1484,9 @@ var Collision = require('./Collision');
                 // consumed once per step by the invalidation sweep below.
                 // Only the first `changedCount` values are live (see there)
                 epoch: 0, changedCells: [], changedCount: 0,
-                cellSize: 0
+                // the cell size the index was built at. NaN, which no cell size
+                // equals, so the first step checks the detector's like any change
+                cellSize: NaN
             };
         }
 
@@ -1451,8 +1498,9 @@ var Collision = require('./Collision');
         // persistent static index built under the old size; force a rebuild
         // (without this, live cell-size tuning queries stale static buckets
         // and silently misses mover-vs-static collisions). A cell size is
-        // checked here, where one is first seen, so a bad one assigned to
-        // `detector.cellSize` throws rather than indexing nothing
+        // checked here, where one is first seen (the first step included, as
+        // the seed is NaN), so a bad one assigned to `detector.cellSize`
+        // throws rather than indexing nothing or looping forever
         if (g.cellSize !== cellSize) {
             if (!Detector._isCellSize(cellSize)) {
                 throw Detector._cellSizeError(cellSize);
