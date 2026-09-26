@@ -105,7 +105,9 @@ var Body = require('../body/Body');
      *
      * `engine.pairs.collisionStart` is filled on every update. `engine.pairs.collisionActive`
      * and `engine.pairs.collisionEnd` are filled only while their event has a listener
-     * when the update reaches collision detection, and are otherwise left empty.
+     * when the update reaches collision detection, and are otherwise left empty. So a
+     * `collisionActive` or `collisionEnd` listener added during an update (from a
+     * `beforeSolve` or `collisionStart` listener, say) is first called on the next update.
      * @method update
      * @param {engine} engine
      * @param {number} [delta=16.666]
@@ -673,6 +675,13 @@ var Body = require('../body/Body');
      * detector never reads a stale box. Keep this `true` if anything reads those properties between
      * updates, such as `Render`'s velocity and bounds views, `Query`, `MouseConstraint` or your own
      * code.
+     *
+     * Positions are otherwise the same either way, with one known exception: with `enableSleeping`
+     * also on, a run that includes updates with a `delta` of `0` can drift from the same run with
+     * this `true` (by about 1e-4 px within a few hundred updates in a measured scene).
+     *
+     * A `collisionActive` or `collisionEnd` listener added part way through an update misses that
+     * update either way (see `Engine.update`).
      *
      * @property enableSolvedVelocityAndBounds
      * @type boolean
