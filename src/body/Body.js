@@ -782,6 +782,16 @@ var Axes = require('../geometry/Axes');
             return;
         }
 
+        // the axis test above admits a shear of up to its tolerance, and a
+        // parallelogram's corners project exactly to the half extents on its
+        // own edge normals, so the corner test below cannot see it. What the
+        // shear moves is a corner's ranking against the other axis, by about
+        // the dot times the longer half extent: refuse it in world units, as
+        // the corner test refuses everything else
+        if ((half0 > half1 ? half0 : half1) * Math.abs(axis0X * axis1X + axis0Y * axis1Y) > Body._boxCornerTolerance) {
+            return;
+        }
+
         for (k = 0; k < 4; k++) {
             var side0 = offsets0[k],
                 side1 = offsets1[k];

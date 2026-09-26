@@ -91,6 +91,15 @@ function makeCircleReshapedToRectangle() {
     return body;
 }
 
+// a near-uniform scale of a rotated box shears it by less than the axis
+// tolerance (|a0.a1| ~1e-9), which on a body thousands of px long still moves a
+// corner's ranking by more than the corner tolerance
+function makeLongSheared() {
+    const body = Bodies.rectangle(500, 500, 4000, 20, { angle: 0.7 });
+    Body.scale(body, 1 + 1e-9, 1);
+    return body;
+}
+
 function makeNonOrthogonalAxes() {
     const body = Bodies.rectangle(100, 100, 30, 40);
     Body.set(body, 'axes', [{ x: 1, y: 0 }, { x: 0.6, y: 0.8 }]);
@@ -119,12 +128,14 @@ const CONTROLS = [
     ['rectangle after Body.setCentre (position off the centre)', makeMovedCentre, false],
     ['rectangle reshaped to a triangle by Body.setVertices', makeReshapedToTriangle, false],
     ['circle reshaped to a rectangle by Body.setVertices', makeCircleReshapedToRectangle, true],
-    ['rectangle given non-orthogonal axes through Body.set', makeNonOrthogonalAxes, false]
+    ['rectangle given non-orthogonal axes through Body.set', makeNonOrthogonalAxes, false],
+    ['4000 px rectangle rotated at build (angle 0.7, still a box)', () => Bodies.rectangle(500, 500, 4000, 20, { angle: 0.7 }), true],
+    ['4000 px rotated rectangle sheared inside the axis tolerance', makeLongSheared, false]
 ];
 
 describe('the box tag is decided by geometry', () => {
     it('covers every control', () => {
-        expect(CONTROLS.length).toBe(21);
+        expect(CONTROLS.length).toBe(23);
     });
 
     it.each(CONTROLS)('%s', (label, build, expected) => {
