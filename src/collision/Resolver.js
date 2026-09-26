@@ -559,8 +559,8 @@ var Body = require('../body/Body');
                     positionImpulse.y = 0;
 
                     // see _postSolveBody. This path never clears a decayed
-                    // impulse, so a frozen body it moves stays a mover for the
-                    // grid until the impulse underflows to zero: correct, and
+                    // impulse, so a frozen body it moves only by decay stays a
+                    // mover for the grid: correct, if costlier, and
                     // Engine.update never takes this path
                     if (body._sMoved === true) {
                         Body._driftEnded(body);
