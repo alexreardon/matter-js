@@ -125,7 +125,7 @@ These are load-bearing; each has cost real time when broken.
 | `npm run test-unit` | Body, Engine, Detector, Pairs, Determinism, Shape, Version, DeadWrites, BoxTag, BoxNarrowphase, RestRow, BodyJournal |
 | `npm run audit-shapes` | V8 natives: one body map per population, no dictionary-mode objects, no sizeable holey arrays |
 | Examples suite (below) | the 46-example similarity gate |
-| `node bench/grid-correctness.js` | grid vs sweep pair differential, 5 scenes x 5 cell sizes, one a static moved every step with no tag |
+| `node bench/grid-correctness.js` | grid vs sweep pair differential, 7 scenes x 5 cell sizes: one a static moved every step with no tag, one statics added and dynamics frozen next to RESTING movers (a lost changed-cell report), one debris frozen while carrying an impulse plus statics released, moved and frozen again between updates |
 | `CHECK=1 node bench/ab-churn.js <baseline> 500` | per-step body-state equivalence under membership change |
 
 **`npm run test-node` cannot run while `.bench/` exists.** `bench-suite`

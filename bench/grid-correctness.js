@@ -73,11 +73,14 @@ function setOf(cols) {
     return set;
 }
 
-function run(name, build, steps, cell, mutate) {
+function run(name, build, steps, cell, mutate, gravityY) {
     seed = 1234567;
     // the reference simulation advances on the sweep; the grid under test is a
     // detector of its own, given the same bodies every step
     const engine = Engine.create({ enableSleeping: false, detector: Detector.create({ broadphase: 'sweep' }) });
+    if (gravityY !== undefined) {
+        engine.gravity.y = gravityY;
+    }
     walls(engine.world);
     build(engine.world);
     const delta = 1000 / 60;
@@ -173,6 +176,104 @@ function makeMovingStaticCase() {
     return { build, mutate };
 }
 
+// static ADD case (review-1): statics added, and dynamics frozen, next to
+// RESTING movers after the index is built. A resting mover keeps its cell
+// span, so its cached static-candidate list stays valid unless the insert
+// path reports the cells it filled (`g.changedCount` in _staticIndexInsert);
+// every other scene here either moves its movers or only ever removes
+// statics, so none could see a lost report. Run without gravity, so the
+// movers rest where they are put
+function makeStaticAddCase() {
+    const movers = [];
+    const helpers = [];
+    let step = 0;
+    const build = (world) => {
+        for (let i = 0; i < 30; i++) {
+            const mover = Bodies.rectangle(80 + (i % 10) * 60, 80 + Math.floor(i / 10) * 60, 12, 12, { frictionAir: 0 });
+            movers.push(mover);
+            Composite.add(world, mover);
+        }
+        // statics far away, so the index is non-empty and built
+        for (let i = 0; i < 20; i++) {
+            Composite.add(world, Bodies.rectangle(900 + i * 16, 700, 15, 15, { isStatic: true }));
+        }
+        // dynamics well clear of the movers, frozen next to them later
+        for (let i = 0; i < 30; i++) {
+            const helper = Bodies.rectangle(80 + (i % 10) * 60, 400 + Math.floor(i / 10) * 40, 10, 10, { frictionAir: 0 });
+            helpers.push(helper);
+            Composite.add(world, helper);
+        }
+    };
+    const mutate = (world) => {
+        step++;
+        // one static added over a resting mover per step
+        if (step >= 10 && step < 40) {
+            const mover = movers[step - 10];
+            Composite.add(world, Bodies.rectangle(mover.position.x + 4, mover.position.y, 10, 10, { isStatic: true }));
+        }
+        // and one dynamic frozen and put next to a resting mover per step
+        if (step >= 50 && step < 80) {
+            const mover = movers[step - 50];
+            const helper = helpers[step - 50];
+            Body.setStatic(helper, true);
+            Body.setPosition(helper, { x: mover.position.x - 4, y: mover.position.y });
+        }
+    };
+    return { build, mutate };
+}
+
+// re-freeze case (review-10): debris frozen while it still carries a warmed
+// position impulse, which Body.setStatic does not clear, so the resolver goes
+// on moving it for about 90 updates with no setter running; and statics
+// released, moved by a setter and frozen again between two updates (review-6).
+// The grid must run the first as a mover until it stops, and re-index the
+// second where it rests
+function makeRefreezeCase() {
+    const live = [];
+    const page = [];
+    let step = 0;
+    const build = (world) => {
+        for (let i = 0; i < 60; i++) {
+            const tile = Bodies.rectangle(40 + i * 20, 700, 20, 20);
+            Body.setStatic(tile, true);
+            Composite.add(world, tile);
+        }
+        for (let r = 0; r < 6; r++) {
+            for (let c = 0; c < 30; c++) {
+                const tile = Bodies.rectangle(60 + c * 38, 300 + r * 30, 34, 16);
+                Body.setStatic(tile, true);
+                Composite.add(world, tile);
+                page.push(tile);
+            }
+        }
+    };
+    const mutate = (world) => {
+        step++;
+        if (step < 250) {
+            for (let k = 0; k < 2; k++) {
+                const box = Bodies.rectangle(40 + rand() * 1100, 20 + rand() * 60, 10 + rand() * 12, 10 + rand() * 12);
+                Body.setVelocity(box, { x: (rand() - 0.5) * 3, y: 3 + rand() * 4 });
+                Composite.add(world, box);
+                live.push(box);
+            }
+        }
+        for (const body of live) {
+            if (!body.isStatic && (body.positionImpulse.x !== 0 || body.positionImpulse.y !== 0) && rand() < 0.05) {
+                Body.setStatic(body, true);
+            }
+        }
+        if (step % 3 === 0) {
+            const tile = page[Math.floor(rand() * page.length)];
+            if (tile.isStatic) {
+                Body.setStatic(tile, false);
+                Body.setPosition(tile, { x: 60 + rand() * 1100, y: 300 + rand() * 180 });
+                Body.setStatic(tile, true);
+            }
+        }
+    };
+    return { build, mutate };
+}
+
 let allOk = true;
 for (const cell of [16, 24, 32, 48, 64]) {
     allOk = run('denseBullets', sceneDenseBullets, 400, cell) && allOk;
@@ -182,6 +283,10 @@ for (const cell of [16, 24, 32, 48, 64]) {
     allOk = run('removeStatics', removal.build, 300, cell, removal.mutate) && allOk;
     const moving = makeMovingStaticCase();
     allOk = run('movingStatic', moving.build, 300, cell, moving.mutate) && allOk;
+    const adding = makeStaticAddCase();
+    allOk = run('addStatics', adding.build, 100, cell, adding.mutate, 0) && allOk;
+    const refreeze = makeRefreezeCase();
+    allOk = run('refreeze', refreeze.build, 360, cell, refreeze.mutate) && allOk;
 }
 console.log(allOk ? '\nALL SCENES IDENTICAL ✓' : '\nDIVERGENCE DETECTED ✗');
 process.exit(allOk ? 0 : 1);
