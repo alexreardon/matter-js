@@ -17,8 +17,12 @@
 //    is where a closed form and a float comparison can disagree;
 // 2. a shadow differential inside two small storm-shaped churn scenes, one on
 //    the game's axis-aligned statics and one on rotated statics, where the
-//    world steps on the GENERAL result and the box result is checked beside it;
-// 3. two mutants that must be caught, so the differential can say no.
+//    world steps on the GENERAL result and the box result is checked beside it.
+//    The general result is taken from the arguments `collides` must pass (the
+//    lower id first with direction 1, then the reverse with -1), never from the
+//    call's own, so a call site passing the wrong bodies or direction fails too;
+// 3. two mutants that must be caught, so the differential can say no;
+// 4. near-boxes (a corner moved 0.01 px, a slight shear) the tag must refuse.
 const Matter = require('../src/module/main.js');
 const { Engine, Composite, Bodies, Body, Collision, Detector } = Matter;
 
@@ -269,9 +273,17 @@ const MUTANTS = {
 function runShadowDifferential({ rotatedStatics, mutant, steps }) {
     const realBoxSearch = Collision._findSupportsBox;
     const realLevelPair = Collision._supportsFromLevelPair;
+    const realCollides = Collision.collides;
     const general = Collision._findSupports;
     const counters = { boxCalls: 0, generalCalls: 0, first: 0, second: 0 };
     let insideBoxSearch = false;
+    // which support search of the current `collides` call this is (0 or 1)
+    let supportCall = 0;
+
+    Collision.collides = function() {
+        supportCall = 0;
+        return realCollides.apply(this, arguments);
+    };
 
     if (mutant === MUTANTS.tieByIndex) {
         Collision._supportsFromLevelPair = function(bodyA, vertices, indexA, indexB) {
@@ -315,9 +327,20 @@ function runShadowDifferential({ rotatedStatics, mutant, steps }) {
             bodyB._boxHalf0 = half0;
         }
 
-        // the world steps on the general answer, so a mutant cannot steer the
-        // scene away from the states the unmutated run compares on
-        const result = general(bodyA, bodyB, normal, direction);
+        // the general answer is computed from the arguments `collides` MUST
+        // pass, derived from the pair alone rather than read off this call:
+        // the lower id first with direction 1 on the first search, the other
+        // way round with -1 on the second. A call site that passed the wrong
+        // bodies or direction would otherwise agree with itself. The world
+        // steps on this answer, so a mutant cannot steer the scene away from
+        // the states the unmutated run compares on
+        const lower = bodyA.id < bodyB.id ? bodyA : bodyB;
+        const higher = lower === bodyA ? bodyB : bodyA;
+        const second = supportCall === 1;
+        supportCall++;
+        const result = second
+            ? general(higher, lower, normal, -1)
+            : general(lower, higher, normal, 1);
 
         if (result[0] !== box0) {
             counters.first++;
@@ -345,6 +368,7 @@ function runShadowDifferential({ rotatedStatics, mutant, steps }) {
         paths.restore();
         Collision._findSupportsBox = realBoxSearch;
         Collision._supportsFromLevelPair = realLevelPair;
+        Collision.collides = realCollides;
         Collision._findSupports = general;
     }
 }
@@ -386,5 +410,28 @@ describe('the differential catches a wrong box search', () => {
     it('level corners settled by index alone', () => {
         const result = runShadowDifferential({ rotatedStatics: false, mutant: MUTANTS.tieByIndex, steps: 120 });
         expect(result.counters.first + result.counters.second).toBeGreaterThan(0);
+    });
+});
+
+describe('near-boxes stay on the general search', () => {
+    // four vertices and two orthogonal axes, but not a box about its
+    // position: the tag must refuse them, or the closed form answers for a
+    // shape it does not describe
+    it('a 40 x 20 rectangle with one corner moved 0.01 px is untagged', () => {
+        const body = Body.create({
+            position: { x: 100, y: 100 },
+            vertices: [{ x: 0, y: 0 }, { x: 40, y: -0.01 }, { x: 40, y: 20 }, { x: 0, y: 20 }]
+        });
+
+        expect(body.axes.length).toBe(2);
+        expect(body._boxCorners).toBe(-1);
+    });
+
+    it('a rotated rectangle sheared slightly by a non-uniform scale is untagged', () => {
+        const body = Bodies.rectangle(100, 100, 40, 20, { angle: 0.5 });
+        Body.scale(body, 1.001, 1);
+
+        expect(body.axes.length).toBe(2);
+        expect(body._boxCorners).toBe(-1);
     });
 });
