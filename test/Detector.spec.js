@@ -602,52 +602,73 @@ describe('the grid visit stamp', function() {
 
         var problems = [];
         var staleStamps = 0;
-        var checked = checkedAgainstSweep(function() {
-            for (var step = 0; step < 240; step++) {
-                var before = world.bodies.map(function(body) { return body._gsStamp; });
-                var newest = Math.max.apply(null, before);
-                if (step === 40) {
+        var ids = function(list) { return list.map(function(body) { return body.id; }).join(','); };
+        var grid = Detector._collisionsGrid;
+        var step;
+
+        // the grid's mover list against the world as the grid saw it: every
+        // body not at rest, and every resting body a move promoted (a freeze
+        // while carrying an impulse, here, whose drift the resolver may end
+        // later in the same update)
+        Detector._collisionsGrid = function(detector) {
+            var collisions = grid.apply(this, arguments);
+            var expected = detector.bodies.filter(function(body) { return !(body.isStatic || body.isSleeping) || body._sMoved; });
+            if (ids(detector._sgrid.movers) !== ids(expected)) {
+                problems.push('grid movers ' + step);
+            }
+            return collisions;
+        };
+
+        var checked;
+        try {
+            checked = checkedAgainstSweep(function() {
+                for (step = 0; step < 240; step++) {
+                    var before = world.bodies.map(function(body) { return body._gsStamp; });
+                    var newest = Math.max.apply(null, before);
+                    if (step === 40) {
                     // a fresh detector over the same world: every body still
                     // carries the old one's stamps
-                    var fresh = Detector.create({ broadphase: 'grid', cellSize: 32 });
-                    fresh.pairs = engine.pairs;
-                    engine.detector = fresh;
-                    Composite.setModified(world, true, true, false);
-                }
-                if (step >= 40) {
+                        var fresh = Detector.create({ broadphase: 'grid', cellSize: 32 });
+                        fresh.pairs = engine.pairs;
+                        engine.detector = fresh;
+                        Composite.setModified(world, true, true, false);
+                    }
+                    if (step >= 40) {
                     // a release every step, and a freeze every third
-                    var statics = world.bodies.filter(function(body) { return body.isStatic; });
-                    var chosen = statics[Math.floor(random() * statics.length)];
-                    Body.setStatic(chosen, false);
-                    Body.setVelocity(chosen, { x: random() * 4 - 2, y: -1 });
-                    if (step % 3 === 0) {
-                        var moving = world.bodies.filter(function(body) { return !body.isStatic; });
-                        Body.setStatic(moving[Math.floor(random() * moving.length)], true);
+                        var statics = world.bodies.filter(function(body) { return body.isStatic; });
+                        var chosen = statics[Math.floor(random() * statics.length)];
+                        Body.setStatic(chosen, false);
+                        Body.setVelocity(chosen, { x: random() * 4 - 2, y: -1 });
+                        if (step % 3 === 0) {
+                            var moving = world.bodies.filter(function(body) { return !body.isStatic; });
+                            Body.setStatic(moving[Math.floor(random() * moving.length)], true);
+                        }
+                    }
+                    Engine.update(engine, DELTA);
+
+                    // a stamp this update wrote is newer than every stamp any
+                    // body carried before it, so no pass can mistake a body
+                    // another detector visited for one it visited itself
+                    world.bodies.forEach(function(body, index) {
+                        if (index < before.length && body._gsStamp !== before[index] && body._gsStamp <= newest) {
+                            staleStamps++;
+                        }
+                    });
+
+                    var g = engine.detector._sgrid;
+                    var movers = world.bodies.filter(function(body) { return !(body.isStatic || body.isSleeping); });
+                    if (ids(engine._moverBodies) !== ids(movers)) {
+                        problems.push('engine movers ' + step);
+                    }
+                    var badIndexed = g.indexed.filter(function(body) { return !body.isStatic; });
+                    if (badIndexed.length > 0) {
+                        problems.push('indexed ' + step);
                     }
                 }
-                Engine.update(engine, DELTA);
-
-                // a stamp this update wrote is newer than every stamp any
-                // body carried before it, so no pass can mistake a body
-                // another detector visited for one it visited itself
-                world.bodies.forEach(function(body, index) {
-                    if (index < before.length && body._gsStamp !== before[index] && body._gsStamp <= newest) {
-                        staleStamps++;
-                    }
-                });
-
-                var g = engine.detector._sgrid;
-                var movers = world.bodies.filter(function(body) { return !(body.isStatic || body.isSleeping); });
-                var ids = function(list) { return list.map(function(body) { return body.id; }).join(','); };
-                if (ids(engine._moverBodies) !== ids(movers) || ids(g.movers) !== ids(movers)) {
-                    problems.push(step);
-                }
-                var badIndexed = g.indexed.filter(function(body) { return !body.isStatic; });
-                if (badIndexed.length > 0) {
-                    problems.push('indexed ' + step);
-                }
-            }
-        });
+            });
+        } finally {
+            Detector._collisionsGrid = grid;
+        }
 
         expect(staleStamps).toBe(0);
         expect(problems).toEqual([]);
@@ -1133,6 +1154,65 @@ describe('a resting body moved after the grid indexed it', function() {
         expect(shelf._sMoved).toBe(true);
         Engine.update(engine, DELTA);
         expect(engine.detector._sgrid.movers).toContain(shelf);
+    });
+
+    // Body.setStatic does not clear a warmed position impulse (upstream does
+    // not either), so the resolver goes on moving a body frozen while it
+    // carried one for about 90 updates, and nothing reports those moves: the
+    // index held it where it was frozen, and the grid missed 1 to 3 percent of
+    // the contacts the sweep finds against drifted statics
+    test.each([[16], [32], [64]])('a body frozen while carrying an impulse drifts as a mover, and is indexed where it stops (cell %p)', function(cellSize) {
+        var engine = Engine.create({
+            enableSleeping: false,
+            enableSolvedVelocityAndBounds: false,
+            detector: Detector.create({ broadphase: 'grid', cellSize: cellSize })
+        });
+        var world = engine.world;
+        var random = createRandom(0xd21f);
+        var live = [];
+        var frozen = [];
+        var frozenAsMovers = 0;
+
+        for (var index = 0; index < 40; index++) {
+            var tile = Bodies.rectangle(12 + index * 24, 600, 24, 24);
+            Body.setStatic(tile, true);
+            Composite.add(world, tile);
+        }
+
+        var checked = checkedAgainstSweep(function() {
+            for (var step = 0; step < 360; step++) {
+                if (step < 260) {
+                    for (var k = 0; k < 2; k++) {
+                        var box = Bodies.rectangle(40 + random() * 880, 20 + random() * 60, 10 + random() * 12, 10 + random() * 12);
+                        Body.setVelocity(box, { x: (random() - 0.5) * 3, y: 3 + random() * 4 });
+                        Composite.add(world, box);
+                        live.push(box);
+                    }
+                    live.forEach(function(body) {
+                        if (!body.isStatic && (body.positionImpulse.x !== 0 || body.positionImpulse.y !== 0) && random() < 0.05) {
+                            Body.setStatic(body, true);
+                            frozenAsMovers += body._sMoved ? 1 : 0;
+                            frozen.push(body);
+                        }
+                    });
+                }
+                Engine.update(engine, DELTA);
+            }
+        });
+
+        expect(frozen.length).toBeGreaterThan(60);
+        expect(checked.calls).toBe(360);
+        expect(checked.first).toBe(null);
+        expect(checked.mismatches).toBe(0);
+        expect(frozenAsMovers).toBe(frozen.length);
+        // a hundred updates after the last freeze every drift has ended, and
+        // each frozen body is indexed where it stopped
+        frozen.forEach(function(body) {
+            expect(body.positionImpulse.x === 0 && body.positionImpulse.y === 0).toBe(true);
+            expect(body._sMoved).toBe(false);
+            expect(body._sIndexed).toBe(true);
+        });
+        expect(engine.detector._sgrid.movers.filter(function(body) { return body.isStatic; })).toEqual([]);
     });
 
     test('on the sweep nothing is indexed, so a move promotes nothing', function() {

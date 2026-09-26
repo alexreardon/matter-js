@@ -109,7 +109,11 @@ These are load-bearing; each has cost real time when broken.
   a mover when those bounds changed (the bounds are all the index holds of a
   body, so a setter that leaves them as they were promotes nothing), until a
   real `Body.setStatic` / `Sleeping.set` transition ends it
-  (`Body._endPromotion`). A NEW
+  (`Body._endPromotion`). The RESOLVER moves one kind of resting body too, a body
+  frozen while it carries a warmed `positionImpulse`: `Body.setStatic`
+  promotes it up front and `Body._driftEnded` ends that when the resolver
+  clears the impulse. A new path that moves a resting body without a setter
+  needs the same. A NEW
   method that moves or reshapes a body must capture the bounds first and call
   it with them after, or the grid keeps answering for the old pose.
   `test/Detector.spec.js` runs every setter against the sweep.

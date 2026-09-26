@@ -11,6 +11,7 @@ module.exports = Resolver;
 var Vertices = require('../geometry/Vertices');
 var Common = require('../core/Common');
 var Bounds = require('../geometry/Bounds');
+var Body = require('../body/Body');
 
 (function() {
 
@@ -373,6 +374,13 @@ var Bounds = require('../geometry/Bounds');
             // reset cached impulse if the body has velocity along it
             positionImpulse.x = 0;
             positionImpulse.y = 0;
+
+            // a body frozen while it carried the impulse has stopped moving
+            // (see Body._driftEnded)
+            if (body._sMoved === true) {
+                Body._driftEnded(body);
+            }
+
             return false;
         }
 
@@ -387,6 +395,12 @@ var Bounds = require('../geometry/Bounds');
             && positionImpulse.y < 1e-9 && positionImpulse.y > -1e-9) {
             positionImpulse.x = 0;
             positionImpulse.y = 0;
+
+            // as above
+            if (body._sMoved === true) {
+                Body._driftEnded(body);
+            }
+
             return false;
         }
 
@@ -543,6 +557,14 @@ var Bounds = require('../geometry/Bounds');
                     // reset cached impulse if the body has velocity along it
                     positionImpulse.x = 0;
                     positionImpulse.y = 0;
+
+                    // see _postSolveBody. This path never clears a decayed
+                    // impulse, so a frozen body it moves stays a mover for the
+                    // grid until the impulse underflows to zero: correct, and
+                    // Engine.update never takes this path
+                    if (body._sMoved === true) {
+                        Body._driftEnded(body);
+                    }
                 } else {
                     // warm the next iteration
                     positionImpulse.x *= positionWarming;

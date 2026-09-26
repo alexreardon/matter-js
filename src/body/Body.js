@@ -530,6 +530,28 @@ var Axes = require('../geometry/Axes');
     };
 
     /**
+     * Ends the grid promotion a body frozen while carrying a warmed position
+     * impulse took (see Body.setStatic), once the resolver has cleared that
+     * impulse and so stopped moving it: the body is indexed where the drift
+     * left it. Recorded as any change of role is, the static epoch moved and
+     * the body journaled, since nothing else is happening to it that would.
+     * A promotion a setter made ends here too, if the body also carried an
+     * impulse; its next move promotes it again.
+     * @method _driftEnded
+     * @private
+     * @param {body} body
+     */
+    Body._driftEnded = function(body) {
+        if (body._sMoved !== true || !(body.isStatic || body.isSleeping)) {
+            return;
+        }
+
+        Body._endPromotion(body);
+        Common._bodyStaticEpoch++;
+        Common._journalTouch(body);
+    };
+
+    /**
      * Sets the body as static, including isStatic flag and setting mass and inertia to Infinity.
      * @method setStatic
      * @param {body} body
@@ -546,6 +568,16 @@ var Axes = require('../geometry/Axes');
         // a real change of rest ends a grid promotion (see Body._endPromotion)
         if (!body.isStatic !== !isStatic) {
             Body._endPromotion(body);
+        }
+
+        // frozen while carrying a warmed position impulse, which this does not
+        // clear (upstream does not): the resolver goes on moving the body
+        // until the impulse decays, about 90 updates and a few pixels (up to
+        // tens), and nothing reports those moves. So the grid runs it as a
+        // mover from the start, as it runs a static a setter moves, and
+        // indexes it where it stops (see Body._driftEnded)
+        if (isStatic && (body.positionImpulse.x !== 0 || body.positionImpulse.y !== 0)) {
+            body._sMoved = true;
         }
 
         for (var i = 0; i < body.parts.length; i++) {
