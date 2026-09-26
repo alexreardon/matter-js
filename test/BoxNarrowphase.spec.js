@@ -9,8 +9,14 @@
 //
 // The fused SAT is a RE-BASELINE, not a bit-identical rewrite: it computes the
 // overlap from `position` and the half extents rather than from the vertices,
-// so the overlap differs in its last bits. What it must keep is every DECISION
-// made on it: the separating verdict, and the axis object chosen.
+// so the overlap differs in its last bits. The DECISIONS made on it (the
+// separating verdict, the axis object chosen) match the general code on every
+// call the sweeps and scenes below make, but not everywhere: a pair within
+// about 1e-10 px of touching can get the other verdict, and an exact tie
+// between two axes (squares on the diagonal, parallel faces) can pick the
+// other axis and so the other normal (review-9). Random poses almost never
+// land on either, so a pass here says nothing about them; what bounds them is
+// that both answers are within float noise of each other.
 //
 // The box search must return the SAME two vertex objects in the SAME order on
 // every call, because `Pair.update` matches contacts by vertex identity and the

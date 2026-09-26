@@ -8,8 +8,10 @@
 // cannot tell a real regression from chaotic float-reordering noise, so it gets
 // re-blessed and masks bugs. This spec separates the two by scene type:
 //
-//   Tier 1 (non-chaotic guards, tight epsilon): scenes that settle to a fixed
-//     pose (a stack, a box on a ramp). Their final transform is pinned. A real
+//   Tier 1 (non-chaotic guards, tight epsilon): scenes that do not amplify
+//     float noise over the steps they run (a stack that settles; a box that
+//     lands on a ramp, stopped before it tips onto a corner, from where it
+//     amplifies about tenfold per step). Their final transform is pinned. A real
 //     solver/broadphase regression moves them well past EPS; a float-reordering
 //     micro-optimisation stays under it. EPS (not bit-exact) is the bar on
 //     purpose, so an intended reordering opt does not force a re-bless. The
@@ -71,7 +73,10 @@ function buildStack({ engine, bodies }) {
 }
 
 // A single box falling onto a tilted ramp and sliding: rotated SAT axes, angular
-// integration, sliding friction. A single body on a ramp is non-chaotic.
+// integration, sliding friction. It is non-chaotic only until about step 32,
+// where it tips onto one corner and rocks: from there a 1e-9 px nudge of its
+// start grows about tenfold per step (1e-5 px by step 40, 0.1 px by step 60),
+// so the scene is run for 30 steps, where the same nudge still moves it 1e-9.
 function buildRamp({ engine, bodies }) {
     const platform = Bodies.rectangle(300, 400, 400, 20, { isStatic: true, angle: 0.3 });
     Composite.add(engine.world, platform);
@@ -124,14 +129,14 @@ const STACK_GOLDEN = [
     [300, 460.4116826427915, 0],
 ];
 
-// Re-pinned for the fused box-box SAT, whose overlap differs from the general
-// reduction in its last bits (~1e-14 here). The box ends this scene rocking on
-// one corner, which amplifies that about tenfold per step from step 32, so the
-// pose moved 0.109 px; the previous golden was
-// [332.53018802282975, 383.8983859568409, 0.2969428164780015].
+// The pose at step 30, before the box tips (see buildRamp). The fused box-box
+// SAT moves it 6e-14 from the general reduction, far inside EPS; at step 60,
+// where this scene used to end, the same last-bit change moved it 0.109 px and
+// forced a re-pin.
+const RAMP_STEPS = 30;
 const RAMP_GOLDEN = [
     [300, 400, 0.3],
-    [332.42112848514074, 383.806144477094, 0.3068018467253259],
+    [332.6376045283045, 380.9227706551147, 0.5292270363536637],
 ];
 
 describe('Tier 1: non-chaotic regression guards (pinned pose, epsilon)', () => {
@@ -149,7 +154,7 @@ describe('Tier 1: non-chaotic regression guards (pinned pose, epsilon)', () => {
     });
 
     test('a box slides down a ramp to the pinned pose (sweep)', () => {
-        const bodies = run({ steps: 60, broadphase: 'sweep', setup: buildRamp });
+        const bodies = run({ steps: RAMP_STEPS, broadphase: 'sweep', setup: buildRamp });
         expectPose(bodies, RAMP_GOLDEN);
     });
 });
