@@ -173,12 +173,26 @@ form in the release loop above, or remove the worktree first.
   measured on) and says so at `buildPage`.
 - **To compare two RELEASES**, use `BASELINE_REF`:
   `BASELINE_REF=v0.20.0-perf16 npm run bench-suite`. This is the only
-  whole-suite instrument that can see a single release. Two cautions: read its
-  GENERAL scenes, which are small and hold a ~2% spread; its page scenes run on
-  the sweep arm, which carries a much wider session spread. And its baseline arm
-  is hardcoded `broadphase: 'sweep'` (`bench/suite.js`), so its grid column
-  compares the grid against the OTHER release's SWEEP and is not a release
-  comparison at all.
+  whole-suite instrument that can see a single release. A fork release as the
+  baseline gets a grid arm of its own (four arms, so four processes), and the
+  grid column then reads grid against grid; every arm's grid calls are counted
+  and a wrong broadphase fails the run. Loaded from `src`, every tree before
+  `9c42889` holds `Matter.Body` in dictionary mode (the circular require that
+  commit fixed), so prefer `BASELINE_REF=9c42889` to `v0.20.0-perf18` for
+  perf18: same engine, fast load. On the page scenes it measured no difference
+  (stock `0.20.0` from source against its bundle, same build position); the
+  commit records it biasing the in-process A/B benches.
+- **Build order is not neutral.** On the page scenes, the arm BUILT first in a
+  process read 20-50% slower than the same code built second (three copies of
+  stock `0.20.0` in one process, blocks interleaved, 2026-09-27; a `gc()`
+  between builds did not remove it). The grid arms barely feel it; the sweep
+  arms, which touch every body every step, do. Through perf18 `bench/suite.js`
+  always built the upstream arm first, so every published upstream PAGE cell
+  carried that penalty and the fork's page percentages were overstated, the
+  drop-in ones most. The suite now rotates the build order across its processes,
+  one process per arm, and keeps each arm's best. `bench/vs-rapier.js` still
+  builds upstream first. Any in-process bench that builds its arms in a fixed
+  order carries the same bias: rotate it, or run the arms both ways.
 - **A bench that releases page tiles must build them DYNAMIC and then make them
   static.** `Body.setStatic(body, false)` on a body CREATED static leaves `mass`
   at `Infinity`, the solver divides by a zero inverse mass, and every released
@@ -190,7 +204,11 @@ form in the release loop above, or remove the worktree first.
 The README's fork-vs-upstream table has a self-check in its methodology block:
 keeping the fastest reading per cell should bring every upstream number within
 `7%` of the previous release's. That agreement is what proves the table measured
-the engine rather than a busy laptop.
+the engine rather than a busy laptop. At `perf19` the upstream PAGE cells fell
+3-23% at once, which is the build-order fix above and not the machine: the
+general cells held within 2%, and each run's rotation-0 process (the old build
+order) read five of the seven old page cells back within 7%. Check against the
+`perf19` cells from now on.
 
 **A release whose win is smaller than that table's session noise gets measured
 build-to-build, not published into those cells.** This happened at `perf15`: the

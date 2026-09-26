@@ -18,9 +18,13 @@
 //                      difference is the micro-optimisations alone
 //   3. fork (shipped)  the fork as page-rage consumes it (the grid broadphase)
 //
-// Each scenario runs in its own child process so heap growth and JIT state from
-// one cannot bias the next. The baseline tree is provisioned automatically as a
-// git worktree at `.bench/stock-0.20.0`.
+// A fork release as the baseline (`BASELINE_REF`) adds a fourth arm, that
+// release on the grid, and every arm's grid calls are counted and asserted.
+//
+// Each scenario runs in its own child processes so heap growth and JIT state from
+// one cannot bias the next: one process per arm by default, the build order
+// rotated each time (see runScenario for why build order matters). The baseline
+// tree is provisioned automatically as a git worktree at `.bench/stock-<ref>`.
 //
 // Usage:
 //   node bench/suite.js                  all scenarios, markdown table at the end
@@ -33,7 +37,7 @@
 const path = require('path');
 const fs = require('fs');
 const { execFileSync, spawnSync } = require('child_process');
-const { createEngine, afterRestingMove } = require('./lib/broadphase');
+const { createEngine, afterRestingMove, apiOf, countGridCalls } = require('./lib/broadphase');
 
 const FORK_ROOT = path.join(__dirname, '..');
 const FORK_MAIN = path.join(FORK_ROOT, 'src', 'module', 'main.js');
@@ -484,11 +488,24 @@ const scenarios = [
 
 // Arms
 
-const ARMS = [
-    { key: 'upstream', label: 'upstream 0.20.0', tree: 'baseline', broadphase: 'sweep' },
+const UPSTREAM_ARM = { key: 'upstream', label: BASELINE_REF + ' (sweep)', tree: 'baseline', broadphase: 'sweep' };
+const BASELINE_GRID_ARM = { key: 'baseline-grid', label: BASELINE_REF + ' (grid)', tree: 'baseline', broadphase: 'grid' };
+const FORK_ARMS = [
     { key: 'fork-sweep', label: 'fork (sweep)', tree: 'fork', broadphase: 'sweep' },
     { key: 'fork-grid', label: 'fork (grid)', tree: 'fork', broadphase: 'grid' }
 ];
+
+// A baseline that is itself a fork release has the grid too, so it gets a grid
+// arm, and the grid column then reads grid against grid. Without it the column
+// compares this tree's grid against the other release's SWEEP, which is not a
+// release comparison at all
+function getArms() {
+    const baselineApi = apiOf(loadIsolated(BASELINE_MAIN));
+    if (baselineApi === 'upstream') {
+        return [UPSTREAM_ARM].concat(FORK_ARMS);
+    }
+    return [UPSTREAM_ARM, BASELINE_GRID_ARM].concat(FORK_ARMS);
+}
 
 // Two of the arms are the same tree in different configurations, so they must
 // not share a module instance: an older release configures the broadphase on
@@ -497,7 +514,7 @@ const ARMS = [
 // itself last would silently win for both). Purging the tree's cache subtree
 // first gives every arm its own module graph.
 function loadIsolated(mainPath) {
-    const root = path.resolve(path.dirname(mainPath), '..', '..');
+    const root = mainPath === FORK_MAIN ? FORK_ROOT : BASELINE_ROOT;
     for (const cached of Object.keys(require.cache)) {
         if (cached.startsWith(root + path.sep)) {
             delete require.cache[cached];
@@ -527,8 +544,41 @@ function meanOfBest(values, take) {
         .reduce((total, value) => total + value, 0) / take;
 }
 
-function runScenario(scenario, blocks) {
-    const arms = ARMS.map(arm => Object.assign({}, arm, { instance: makeArm(arm, scenario) }));
+// Every grid arm must have run the grid on every update, and no sweep arm ever,
+// whichever API its build configures the broadphase with. Counted rather than
+// assumed: a current build handed an old build's module globals, or the
+// reverse, runs the sweep without a word
+function assertBroadphases(arms, updates) {
+    for (const arm of arms) {
+        const expected = arm.broadphase === 'grid' ? updates : 0;
+        if (arm.gridCalls.calls !== expected) {
+            throw new Error(arm.label + ' made ' + arm.gridCalls.calls + ' grid calls over ' +
+                updates + ' updates on the ' + arm.broadphase + ' broadphase (expected ' + expected + ')');
+        }
+    }
+}
+
+// The arms are BUILT in an order rotated by `rotation`, and timed in the order
+// getArms lists them. Build order is not neutral: on the page scenes the arm
+// built FIRST read 20-50% slower than the same code built second, in one
+// process, with the blocks interleaved (measured 2026-09-27 with three copies of
+// stock 0.20.0; a `gc()` between builds did not remove it, and neither did
+// loading the bundle instead of the source). Through perf18 the upstream arm was
+// always built first, so every published upstream PAGE cell carried that
+// penalty. The parent rotates the build order across its processes, so each arm
+// is built in every position once, and keeps each arm's best
+function runScenario(scenario, blocks, rotation) {
+    const listed = getArms();
+    const buildOrder = listed.map((_, index) => (index + rotation) % listed.length);
+    const instances = [];
+    for (const index of buildOrder) {
+        instances[index] = makeArm(listed[index], scenario);
+    }
+    const arms = listed.map((arm, index) => Object.assign({}, arm, {
+        instance: instances[index],
+        gridCalls: countGridCalls({ Matter: instances[index].Matter }),
+        builtAt: buildOrder.indexOf(index)
+    }));
 
     for (let i = 0; i < scenario.warmup; i++) {
         for (let a = 0; a < arms.length; a++) {
@@ -552,13 +602,17 @@ function runScenario(scenario, blocks) {
         }
     }
 
+    assertBroadphases(arms, scenario.warmup + blocks * scenario.blockUpdates);
+
     const takeBest = Math.max(3, Math.round(blocks * 0.2));
 
     const results = arms.map((arm, index) => ({
         key: arm.key,
         label: arm.label,
         median: median(blockTimes[index]),
-        best: meanOfBest(blockTimes[index], takeBest)
+        best: meanOfBest(blockTimes[index], takeBest),
+        gridCalls: arm.gridCalls.calls,
+        builtAt: arm.builtAt
     }));
 
     // sanity: the arms must have simulated the same scene, and a non-finite body
@@ -648,7 +702,7 @@ async function runAlloc(scenario) {
     observer.observe({ entryTypes: ['gc'] });
 
     const results = [];
-    for (const arm of ARMS) {
+    for (const arm of getArms()) {
         const instance = makeArm(arm, scenario);
         for (let i = 0; i < Math.min(scenario.warmup, 200); i++) {
             instance.step();
@@ -718,25 +772,36 @@ function formatAgainst(value, baseline, unit) {
 
 const GROUP_LINKS = { 'Page Rage': 'https://page-rage.com' };
 
+// With a fork release as the baseline, the grid column reads against that
+// release's grid arm (see getArms) rather than its sweep
+function findGridBaseline(row) {
+    return row.results.find(result => result.key === 'baseline-grid') ||
+        row.results.find(result => result.key === 'upstream');
+}
+
 function buildTable(rows) {
     const lines = [];
-    lines.push('| Scenario | Bodies | Upstream ' + figure(BASELINE_REF) + ' | Fork | Fork (grid broadphase) |');
-    lines.push('| --- | --- | --- | --- | --- |');
+    const hasBaselineGrid = rows.some(row => row.results.some(result => result.key === 'baseline-grid'));
+    const baselineGridHeader = hasBaselineGrid ? ' ' + figure(BASELINE_REF) + ' (grid) |' : '';
+    lines.push('| Scenario | Bodies | Upstream ' + figure(BASELINE_REF) + ' | Fork |' + baselineGridHeader + ' Fork (grid broadphase) |');
+    lines.push('| --- | --- | --- | --- | --- |' + (hasBaselineGrid ? ' --- |' : ''));
     let group = null;
     for (const row of rows) {
         if (row.group !== group) {
             group = row.group;
             const label = GROUP_LINKS[group] ? '[' + group + '](' + GROUP_LINKS[group] + ')' : group;
-            lines.push('| **' + label + '** | | | | |');
+            lines.push('| **' + label + '** | | | | |' + (hasBaselineGrid ? ' |' : ''));
         }
         const upstream = row.results.find(result => result.key === 'upstream');
         const forkSweep = row.results.find(result => result.key === 'fork-sweep');
         const forkGrid = row.results.find(result => result.key === 'fork-grid');
+        const gridBaseline = findGridBaseline(row);
         lines.push('| ' + row.title +
             ' | ' + figure(row.bodies.toLocaleString('en-US')) +
             ' | ' + figure(upstream.best.toFixed(0) + 'us') +
             ' | ' + formatAgainst(forkSweep.best, upstream.best, 'us') +
-            ' | ' + formatAgainst(forkGrid.best, upstream.best, 'us') + ' |');
+            (hasBaselineGrid ? ' | ' + figure(gridBaseline.best.toFixed(0) + 'us') : '') +
+            ' | ' + formatAgainst(forkGrid.best, gridBaseline.best, 'us') + ' |');
     }
     return lines.join('\n');
 }
@@ -745,7 +810,8 @@ function formatAllocRow(row) {
     const upstream = row.results.find(result => result.key === 'upstream');
     const forkSweep = row.results.find(result => result.key === 'fork-sweep');
     const forkGrid = row.results.find(result => result.key === 'fork-grid');
-    const measured = [upstream, forkSweep, forkGrid].every(result => result.bytesPerStep !== null);
+    const gridBaseline = findGridBaseline(row);
+    const measured = [upstream, forkSweep, forkGrid, gridBaseline].every(result => result.bytesPerStep !== null);
     if (!measured) {
         return { upstream: 'n/a', forkSweep: 'n/a', forkGrid: 'n/a' };
     }
@@ -753,7 +819,7 @@ function formatAllocRow(row) {
     return {
         upstream: figure(baseline.toFixed(1) + ' KB'),
         forkSweep: formatAgainst(forkSweep.bytesPerStep / 1024, baseline, ' KB'),
-        forkGrid: formatAgainst(forkGrid.bytesPerStep / 1024, baseline, ' KB')
+        forkGrid: formatAgainst(forkGrid.bytesPerStep / 1024, gridBaseline.bytesPerStep / 1024, ' KB')
     };
 }
 
@@ -772,6 +838,7 @@ function buildAllocTable(rows) {
 
 const args = process.argv.slice(2);
 const scenarioArg = args.find(arg => arg.startsWith('--scenario='));
+const rotationArg = args.find(arg => arg.startsWith('--rotation='));
 const allocArg = args.find(arg => arg.startsWith('--alloc='));
 const onlyArg = args.find(arg => arg.startsWith('--only='));
 const blocksArg = args.find(arg => arg.startsWith('--blocks='));
@@ -779,7 +846,9 @@ const quick = args.includes('--quick');
 const defaultBlocks = quick ? 9 : 24;
 const blocks = blocksArg ? Number(blocksArg.split('=')[1]) : defaultBlocks;
 const repeatsArg = args.find(arg => arg.startsWith('--repeats='));
-const repeats = repeatsArg ? Number(repeatsArg.split('=')[1]) : (quick ? 1 : 3);
+// unset, one process per arm, so each arm is built in every position once (see
+// runScenario); resolved once the baseline exists, since a fork baseline adds an arm
+const requestedRepeats = repeatsArg ? Number(repeatsArg.split('=')[1]) : (quick ? 1 : null);
 // `--alloc-only` skips the timing pass, which is the long one: regenerating the
 // memory table alone does not need three timed processes per scenario
 const allocOnly = args.includes('--alloc-only');
@@ -806,9 +875,11 @@ if (allocArg) {
     // scenes DIVERGE, and a scene cut short is still chaotic enough that the
     // arms are doing genuinely different amounts of work. Short-warmup runs
     // reported a 19% regression on a scenario that reproduces at -16%.
-    process.stdout.write('__RESULT__' + JSON.stringify(runScenario(findScenario(scenarioArg.split('=')[1]), blocks)) + '\n');
+    process.stdout.write('__RESULT__' + JSON.stringify(runScenario(findScenario(scenarioArg.split('=')[1]), blocks, rotationArg ? Number(rotationArg.split('=')[1]) : 0)) + '\n');
 } else {
     ensureBaseline();
+    const armCount = getArms().length;
+    const repeats = requestedRepeats === null ? armCount : requestedRepeats;
 
     const only = onlyArg ? onlyArg.split('=')[1].split(',') : null;
     const selected = only ? scenarios.filter(scenario => only.includes(scenario.key)) : scenarios;
@@ -817,9 +888,12 @@ if (allocArg) {
         process.exit(1);
     }
 
-    console.log('matter-js benchmark suite: fork vs stock ' + BASELINE_REF);
+    console.log('matter-js benchmark suite: fork vs ' + BASELINE_REF);
     console.log(blocks + ' timed blocks per arm, arms interleaved in one process, ' +
         repeats + ' process' + (repeats === 1 ? '' : 'es') + ' per scenario, each arm keeping its best');
+    if (repeats < armCount) {
+        console.log('WARNING: fewer processes than arms, so some arm is never built outside its worst position; treat these as indicative only');
+    }
     if (blocks < 8) {
         console.log('WARNING: fewer than 8 blocks leaves nothing to reject noise with, treat these as indicative only');
     }
@@ -848,7 +922,8 @@ if (allocArg) {
         const merged = JSON.parse(JSON.stringify(runs[0]));
         for (const result of merged.results) {
             const samples = runs.map(run => run.results.find(other => other.key === result.key));
-            result.best = Math.min.apply(null, samples.map(sample => sample.best));
+            result.bests = samples.map(sample => sample.best);
+            result.best = Math.min.apply(null, result.bests);
             result.median = Math.min.apply(null, samples.map(sample => sample.median));
         }
         return merged;
@@ -861,13 +936,14 @@ if (allocArg) {
         for (let repeat = 0; repeat < repeats; repeat++) {
             runs.push(runChild([], [
                 '--scenario=' + scenario.key,
+                '--rotation=' + repeat,
                 '--blocks=' + blocks
             ].concat(quick ? ['--quick'] : [])));
         }
         const row = mergeRepeats(runs);
         rows.push(row);
 
-        const upstream = row.results.find(result => result.key === 'upstream');
+        const upstream = findGridBaseline(row);
         const forkGrid = row.results.find(result => result.key === 'fork-grid');
         const change = 100 * (forkGrid.best - upstream.best) / upstream.best;
         const badArm = row.checks.find(check => check.nonFinite > 0);
@@ -882,7 +958,9 @@ if (allocArg) {
         console.log('');
         console.log('Times are us per `Engine.update`, mean of the fastest fifth of blocks.');
         for (const row of rows) {
-            const detail = row.results.map(result => result.label + ' median ' + result.median.toFixed(0) + 'us').join(', ');
+            const detail = row.results.map(result => result.label + ' best ' + result.best.toFixed(1) +
+                'us (per process ' + result.bests.map(value => value.toFixed(0)).join('/') + ') median ' +
+                result.median.toFixed(0) + 'us, ' + result.gridCalls + ' grid calls').join('; ');
             console.log('  ' + row.key.padEnd(18) + row.bodies + ' bodies (' + row.movers + ' movers): ' + detail);
         }
     }
