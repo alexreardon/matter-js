@@ -1,5 +1,5 @@
 /*!
- * matter-js 0.20.0-perf18 by @liabru
+ * matter-js 0.20.0-perf19 by @liabru
  * http://brm.io/matter-js/
  * License MIT
  * 
@@ -146,9 +146,11 @@ module.exports = Common;
 
     /**
      * Counter bumped whenever any body's moving-vs-resting classification
-     * changes: `Body.setStatic`, `Sleeping.set` and `Detector.setGridDynamic`.
+     * changes: `Body.setStatic`, `Sleeping.set`, and a `Body` setter moving a
+     * resting body the grid has indexed, which promotes it to a mover (see
+     * `Body._promoteIfIndexed`).
      *
-     * `Engine.update` and the `gridStatic` broadphase both need the list of
+     * `Engine.update` and the grid broadphase both need the list of
      * moving bodies each step, and building it means touching every body in the
      * world. On a dense static page (thousands of intact tiles, a few hundred
      * movers) that walk is memory-bound and became one of the largest single
@@ -165,7 +167,151 @@ module.exports = Common;
      * change). Matter has always documented those flags as setter-owned.
      */
     Common._bodyStaticEpoch = 0;
-    
+
+    /**
+     * Counter bumped by `Composite.setModified` whenever it marks a composite
+     * modified, which every membership change makes: `Composite.add` /
+     * `remove` / `clear`, and a caller that edits `composite.bodies` directly
+     * and then calls it (the only signal such a caller gives).
+     *
+     * `Engine.update` hands a world with no child composites to its passes and
+     * its detector as `world.bodies` ITSELF (see `Composite._ownBodies`), so
+     * the array's identity no longer changes when its membership does, and the
+     * two mover classifications (`Engine.update`, and the grid
+     * broadphase) key on this instead. Every membership change bumps it: a
+     * direct edit through `setModified`, which is the only signal such a
+     * caller gives, and `Composite`'s own add and remove through
+     * `_setModifiedJournaled`, which also keeps the body journal (see
+     * `_journalTouch`) live.
+     *
+     * It is shared by every composite, so a change to one world also rebuilds
+     * the other's lists: a wasted walk, never a wrong one.
+     */
+    Common._bodySetEpoch = 0;
+
+    /**
+     * The stamp of the last full classification walk of any grid
+     * detector. One counter for every detector, so a stamp names one walk of
+     * one world, which is what lets it serve as a membership generation (see
+     * `_journalTouch`).
+     * @private
+     */
+    Common._walkStamp = 0;
+
+    /**
+     * How many full classification walks have run over an array that was not
+     * their detector's own world's array: a detector used on its own, a world
+     * with child composites, an update's array a listener has replaced. Such
+     * a walk restamps bodies some other world's journal may hold as members,
+     * so every journal started before it is read no more (see
+     * Detector._classifyFromJournal); the engine's own walks of a flat world
+     * never count.
+     * @private
+     */
+    Common._foreignWalks = 0;
+
+    /**
+     * Records `body` in its world's body journal, if it is a member of a world
+     * that keeps one.
+     *
+     * The journal is how the grid broadphase learns what changed in a
+     * flat world without walking every body in it. Once a detector has
+     * classified a world in full, the world keeps the list of bodies whose
+     * membership or moving-vs-resting role may have changed since
+     * (`composite._touched`, its first `_touchedCount` entries):
+     * `Composite.addBody`, `removeBodyAt` and `removeBodies` record the bodies
+     * they add or remove, and `Body.setStatic`, `Sleeping.set` and the
+     * promotion of a moved indexed resting body (`Body._promoteIfIndexed`)
+     * record a member through this. The detector then classifies just those
+     * bodies (`Detector._classifyFromJournal`).
+     *
+     * A body is a member while `body._sOwner` is the world and `body._sWalk`
+     * is the world's `_memberGen`, the stamp of the full walk that started
+     * the journal. A body in no world, or removed from one, records nothing,
+     * which is what keeps a body flagged before it is added out of the lists.
+     * Anything the journal cannot describe switches it off (`_journalLive`
+     * false) until the next full walk: a direct edit of `composite.bodies`
+     * signalled through `Composite.setModified`, `Composite.clear`, a body
+     * added twice, a list too long to be worth reading.
+     * @method _journalTouch
+     * @private
+     * @param {body} body
+     */
+    Common._journalTouch = function(body) {
+        var owner = body._sOwner;
+
+        if (owner !== null && owner._journalLive === true && body._sWalk === owner._memberGen) {
+            Common._journalPush(owner, body);
+        }
+    };
+
+    /**
+     * Appends `body` to `composite`'s journal, or switches the journal off
+     * once it holds a quarter of the world, where a full walk is the cheaper
+     * answer. The list is filled BY INDEX up to `_touchedCount` and never
+     * shrunk, so the steady state does not allocate.
+     * @method _journalPush
+     * @private
+     * @param {composite} composite
+     * @param {body} body
+     */
+    Common._journalPush = function(composite, body) {
+        var count = composite._touchedCount;
+
+        if (count >= 64 && count >= (composite.bodies.length >> 2)) {
+            composite._journalLive = false;
+            return;
+        }
+
+        composite._touched[count] = body;
+        composite._touchedCount = count + 1;
+    };
+
+    /**
+     * Whether the velocity solver may read `body` as the REST row: a static
+     * body whose `position - positionPrev` and `angle - anglePrev` are each
+     * exactly `+0` and whose `inverseInertia` is exactly `+0`.
+     *
+     * Such a body contributes a velocity of exactly `+0` at every contact
+     * point and a `+0` inertia term to every contact share, whatever its
+     * position, so `Resolver.preSolveVelocity` writes it a constant zero row
+     * without reading the body (see there). Every `Body` method that writes
+     * one of those fields stores the answer in `body._restStatic`, as does the
+     * position correction in `Resolver`.
+     *
+     * Each difference must be `+0`, not merely equal to zero: `-0` is equal to
+     * zero, and a `-0` velocity can reach a solved value as a `-0` where the
+     * zero row gives `+0`. A non-finite position fails too, since its
+     * difference is `NaN`.
+     *
+     * Contract: the same as `_bodyStaticEpoch` above. Code that assigns
+     * `position`, `positionPrev`, `angle`, `anglePrev` or `inverseInertia` of a
+     * static body directly, instead of through the `Body` methods, leaves the
+     * flag stale.
+     * @private
+     * @method _isRestingStatic
+     * @param {body} body
+     * @return {boolean}
+     */
+    Common._isRestingStatic = function(body) {
+        if (body.isStatic !== true) {
+            return false;
+        }
+
+        var position = body.position,
+            positionPrev = body.positionPrev,
+            inverseInertia = body.inverseInertia,
+            deltaX = position.x - positionPrev.x,
+            deltaY = position.y - positionPrev.y,
+            deltaAngle = body.angle - body.anglePrev;
+
+        // `1 / d` is `Infinity` for `+0` only (`-Infinity` for `-0`)
+        return deltaX === 0 && 1 / deltaX === Infinity
+            && deltaY === 0 && 1 / deltaY === Infinity
+            && deltaAngle === 0 && 1 / deltaAngle === Infinity
+            && inverseInertia === 0 && 1 / inverseInertia === Infinity;
+    };
+
     /**
      * Extends the object in the first argument using the object in the second argument.
      * @method extend
@@ -1443,10 +1589,16 @@ var Common = __webpack_require__(0);
         var vertex,
             delta;
 
-        // the self-projection memo describes these vertex positions
+        // the self-projection memo describes these vertex positions, and the
+        // box tag their shape: a scale can change both. Body.scale re-takes
+        // the tag after its axes follow (see Body._updateBoxTag); a direct
+        // call leaves the body on the general support search
         var spBody = vertices.length > 0 ? vertices[0].body : null;
         if (spBody) {
             spBody._spValid = false;
+            spBody._boxCorners = -1;
+            spBody._boxHalf0 = 0;
+            spBody._boxHalf1 = 0;
         }
 
         for (var i = 0; i < vertices.length; i++) {
@@ -1668,7 +1820,8 @@ module.exports = Body;
 
 var Vertices = __webpack_require__(3);
 var Vector = __webpack_require__(2);
-var Sleeping = __webpack_require__(7);
+// assigned after the IIFE below, see there
+var Sleeping;
 var Common = __webpack_require__(0);
 var Bounds = __webpack_require__(1);
 var Axes = __webpack_require__(11);
@@ -1681,6 +1834,18 @@ var Axes = __webpack_require__(11);
     Body._nextNonCollidingGroupId = -1;
     Body._nextCategory = 0x0001;
     Body._baseDelta = 1000 / 60;
+
+    // box tag tolerances (see Body._updateBoxTag). The axes come out of
+    // Axes.fromVertices normalised, so a real box is unit and orthogonal to
+    // float precision (~1e-16); the corner test is in world units, far above
+    // the ~1e-11 a centred, translated rectangle carries and far below any
+    // non-box shape
+    Body._boxAxisTolerance = 1e-9;
+    Body._boxCornerTolerance = 1e-6;
+
+    // per-corner scratch for Body._updateBoxTag, filled before it is read
+    var _boxTagOffsets0 = [0, 0, 0, 0],
+        _boxTagOffsets1 = [0, 0, 0, 0];
 
     /**
      * Creates a new rigid body model. The options parameter is an object that specifies any properties you wish to override the defaults.
@@ -1759,9 +1924,8 @@ var Axes = __webpack_require__(11);
             sleepCounter: 0,
             deltaTime: 1000 / 60,
             _original: null,
-            // per-step scratch stamps and flags used by the broadphase
-            // (grid/gridStatic modes), the resolver body collection, and the
-            // page-destroyer moving-static tag. Pre-declared so every body
+            // per-step scratch stamps and flags used by the grid broadphase
+            // and the resolver body collection. Pre-declared so every body
             // shares one hidden class: adding any of these lazily at first use
             // splits body object shapes and degrades every hot property access
             // site engine-wide (measured 1.3-4.8x slower whole-step when
@@ -1771,47 +1935,64 @@ var Axes = __webpack_require__(11);
             // hold, never assigned onto a body for the first time elsewhere.
             //
             // Classification-walk cluster: the per-step walk in
-            // Detector._collisionsGridStatic touches every one of these for
+            // Detector._collisionsGrid touches every one of these for
             // every body in the world, so they are declared adjacently
             // (declaration order fixes the in-object layout) to land on as few
             // cache lines as possible. isStatic / isSleeping live here rather
             // than with the public fields for the same reason.
             isStatic: false,
             isSleeping: false,
-            _gridDynamic: false,
+            // set, for good, when a pose setter moves this body while it rests
+            // in a grid static index: the grid then runs it as a mover (see
+            // Body._promoteIfIndexed)
+            _sMoved: false,
             _sPrev: false,
             _sIndexed: false,
             _sDeparted: false,
-            _sWalk: 0,
+            _sWalk: -1,
             _sWorldIndex: 0,
             _scEpoch: 0,
-            _stamp: 0,
             _gsStamp: 0,
-            _ov: false,
-            _ovD: false,
+            // set when an engine running with `enableSolvedVelocityAndBounds`
+            // false skipped this body's bounds refresh after a position
+            // correction: its bounds MAY lag its vertices until integration
+            // or `Body._updateStaleBounds` recomputes them. Never cleared by
+            // integration (that would be a store per mover per update), which
+            // is safe because the recompute is idempotent on fresh bounds.
+            // (This slot held the dead grid `_ovD` flag, so reusing it
+            // leaves the in-object layout of every field after it unchanged.)
+            _boundsStale: false,
             _solverStamp: 0,
             // slot index into the resolver's flat solver arrays (valid only
             // while _solverStamp matches the current solver epoch)
             _solverIndex: 0,
-            // gridStatic static-candidate cache (see Detector._collisionsGridStatic;
+            // grid static-candidate cache (see Detector._collisionsGrid;
             // _scEpoch is up in the classification-walk cluster)
             _scStatic: false,
-            _scCx0: 0,
-            _scCx1: 0,
-            _scCy0: 0,
-            _scCy1: 0,
+            // the cell span the list was built for. The span is read out of a
+            // Float64Array, so these hold doubles, and they are declared as
+            // doubles (NaN): with a small-integer default, the first store
+            // generalizes the field in V8 and DEPRECATES the map of every body
+            // built before it, each of which then keeps the old map until
+            // something next reads it. Never read while `_scList` is null
+            _scCx0: NaN,
+            _scCx1: NaN,
+            _scCy0: NaN,
+            _scCy1: NaN,
             _scList: null,
             // the candidate bounds captured alongside _scList, so the per-step
             // test loop reads contiguous memory instead of dereferencing every
             // candidate's bounds objects
             _scBounds: null,
-            // gridStatic static-index membership (see
+            // grid static-index membership (see
             // Detector._staticIndexInsert). _sBuckets holds the cell buckets
             // this body's reference sits in, so it can be removed from them
             // without recomputing anything; an EMPTY array means an oversized
             // static, which occupies no cells. _sIndexed is whether it is in
             // the index at all, _sWalk the stamp of the last classification
-            // walk that saw it (a stale stamp means it has left the world),
+            // walk that saw it (a stale stamp means it has left the world; it
+            // doubles as the body journal's membership generation, and is -1
+            // for a body in no world, see Common._journalTouch),
             // _sWorldIndex its position in that walk, which is the sort key
             // that keeps bucket contents in world order, and _sDeparted a
             // one-shot set by Composite.removeBody so a body removed and
@@ -1829,6 +2010,15 @@ var Axes = __webpack_require__(11);
             _sCx1: 0,
             _sCy0: 0,
             _sCy1: 0,
+            // Box tag, read by Collision.collides to choose the fused box-box
+            // SAT and the closed-form support search (see
+            // Body._updateBoxTag). _boxCorners is -1 unless this body is
+            // geometrically a rectangle centred on `position`; then it packs
+            // which vertex sits on which side of each axis. Declared BEFORE the
+            // memo so the last key is unchanged.
+            _boxHalf0: 0,
+            _boxHalf1: 0,
+            _boxCorners: -1,
             // Collision._selfProjection memo: this body's own vertices projected
             // onto its own axes, packed flat as [min0, max0, min1, max1, ...],
             // one pair per axis. _spValid is cleared by every site that moves a
@@ -1836,7 +2026,29 @@ var Axes = __webpack_require__(11);
             // Body.setVertices/setParts/scale and the inlined rotate in
             // Body.setPositionAndAngle)
             _sp: null,
-            _spValid: false
+            _spValid: false,
+            // whether the velocity solver may take this body's row as the
+            // constant REST row without reading the body: static, not moving,
+            // and an inverse inertia of exactly +0 (see
+            // Common._isRestingStatic). Written by every method below that
+            // changes one of those, and by the position correction in
+            // Resolver. Declared after every field the engine had before the
+            // body journal, so each of those keeps its place
+            _restStatic: false,
+            // the composite whose body journal this body is recorded in (see
+            // Common._journalTouch); a member while `_sWalk` also matches that
+            // composite's `_memberGen`. Read only by the journal's own paths
+            // and, in a full classification walk, only for a body the world's
+            // last walk did not stamp (see Composite._ownedGen), so it needs no
+            // place in the cluster above. Declared LAST so every field above
+            // keeps its place
+            _sOwner: null,
+            // the grid index (a grid detector's `_sgrid`) that _sBuckets and
+            // _sIndexedAt describe while _sIndexed, so a body moved to a world
+            // another grid engine steps is taken out of the first one's index
+            // rather than confusing the two (see Detector._staticIndexInsert).
+            // Declared LAST, after _sOwner, so every field above keeps its place
+            _sGrid: null
         };
 
         var body = Common.extend(defaults, options);
@@ -1987,9 +2199,13 @@ var Axes = __webpack_require__(11);
                 break;
             case 'axes':
                 // same assignment the default branch makes, plus the
-                // self-projection memo invalidation replacing axes needs
+                // self-projection memo invalidation replacing axes needs, and
+                // the box tag, which is derived from the axes. `_initProperties`
+                // always sets `axes` last among the geometry, so this is also
+                // where a new body takes its tag on its finished geometry
                 body.axes = value;
                 body._spValid = false;
+                Body._updateBoxTag(body);
                 break;
             case 'centre':
                 Body.setCentre(body, value);
@@ -1997,8 +2213,156 @@ var Axes = __webpack_require__(11);
             default:
                 body[property] = value;
 
+                // a plain assignment can be to a field the rest row stands
+                // for (`positionPrev`, `anglePrev`, `inverseInertia`)
+                if (body._restStatic === true) {
+                    body._restStatic = Common._isRestingStatic(body);
+                }
+
             }
         }
+    };
+
+    /**
+     * Recomputes the bounds of every part of `body` from its current vertices
+     * and velocity, if an engine running with `enableSolvedVelocityAndBounds`
+     * false left them possibly stale (see `body._boundsStale`). Called before a
+     * body stops being integrated, so the detector never reads a stale box.
+     * @method _updateStaleBounds
+     * @private
+     * @param {body} body
+     */
+    Body._updateStaleBounds = function(body) {
+        if (!body._boundsStale) {
+            return;
+        }
+
+        var parts = body.parts,
+            velocity = body.velocity;
+
+        for (var i = 0; i < parts.length; i++) {
+            Bounds.update(parts[i].bounds, parts[i].vertices, velocity);
+        }
+
+        body._boundsStale = false;
+    };
+
+    /**
+     * Promotes `body` to a mover of the grid broadphase when it is a resting
+     * body (static or asleep) that a grid detector already holds in its static
+     * index, and the setter that just ran changed its bounds. Every setter that
+     * moves or reshapes a body calls this after the move, with the bounds it
+     * had before (`setPosition`, `setAngle`, `setPositionAndAngle`,
+     * `scale`, `setVertices`, and through them `translate`, `rotate`,
+     * `setParts` and `Body.set`): the index captured the body's bounds when
+     * it bucketed it, and would otherwise go on answering for the old pose.
+     *
+     * The bounds are the whole of what the index holds of a body (the cells
+     * it covers, and the bounds each mover caches with its candidates), so a
+     * setter that leaves them exactly as they were (`setPosition` to where
+     * the body is, `translate` by zero, `setAngle` to its angle,
+     * `scale(1, 1)` about its position) promotes nothing, as
+     * `setPositionAndAngle` with nothing changed never did.
+     *
+     * A promoted body stays a mover while it rests (`_sMoved`); a real change
+     * of rest (`Body.setStatic` or `Sleeping.set` flipping its flag) ends
+     * the promotion (see Body._endPromotion). The promotion is recorded
+     * exactly as any change of role is: the static epoch moves, and the body
+     * goes in its world's body journal (see
+     * Common._bodyStaticEpoch and Common._journalTouch). A resting body moved
+     * before any grid step has indexed it needs none of this, and is simply
+     * indexed at its new pose; so does one removed from its world since the
+     * grid last classified it (`_sDeparted`), which the next classification
+     * takes out of the index whether or not it is added back.
+     *
+     * A body released (or woken) since the grid last classified it is still in
+     * the index, and a setter can move it before the next classification. If
+     * it is still moving then, that classification takes it out of the index;
+     * but if it rests again first, nothing else would, and the index would go
+     * on answering for the pose it was released from. So its move marks it as
+     * a removal does (`_sDeparted`), and the next classification takes it out
+     * and indexes it again wherever it rests. On the sweep nothing is ever
+     * indexed, so this is one field read.
+     * @method _promoteIfIndexed
+     * @private
+     * @param {body} body
+     * @param {number} minX the body's `bounds.min.x` before the setter ran
+     * @param {number} minY
+     * @param {number} maxX
+     * @param {number} maxY
+     */
+    Body._promoteIfIndexed = function(body, minX, minY, maxX, maxY) {
+        if (body._sIndexed !== true || body._sMoved === true || body._sDeparted === true) {
+            return;
+        }
+
+        var bounds = body.bounds;
+
+        if (bounds.min.x === minX && bounds.min.y === minY && bounds.max.x === maxX && bounds.max.y === maxY) {
+            return;
+        }
+
+        // released or woken since the grid indexed it: re-indexed where it
+        // rests, if it rests again before the grid next classifies it. The
+        // release already journaled it, which is what reads the mark
+        if (!(body.isStatic || body.isSleeping)) {
+            body._sDeparted = true;
+            return;
+        }
+
+        body._sMoved = true;
+        Common._bodyStaticEpoch++;
+        Common._journalTouch(body);
+    };
+
+    /**
+     * Ends a grid promotion (see Body._promoteIfIndexed) on a real change of
+     * rest: `Body.setStatic` or `Sleeping.set` flipping the body's flag,
+     * which journals it and moves the static epoch, so the grid classifies it
+     * afresh. A body promoted while it rested is a mover only while that rest
+     * lasts: released it is a mover anyway, and resting again it is indexed
+     * where it rests, rather than staying a mover for good (a teleported
+     * sleeper, a scrolled pane piece frozen again after a release). A body
+     * promoted since the grid last classified it is still in the index at the
+     * pose it was promoted from, so it is marked as a removal marks a body
+     * (`_sDeparted`), and the next classification takes it out and indexes
+     * it again if it rests.
+     * @method _endPromotion
+     * @private
+     * @param {body} body
+     */
+    Body._endPromotion = function(body) {
+        if (body._sMoved !== true) {
+            return;
+        }
+
+        body._sMoved = false;
+
+        if (body._sIndexed === true) {
+            body._sDeparted = true;
+        }
+    };
+
+    /**
+     * Ends the grid promotion a body frozen while carrying a warmed position
+     * impulse took (see Body.setStatic), once the resolver has cleared that
+     * impulse and so stopped moving it: the body is indexed where the drift
+     * left it. Recorded as any change of role is, the static epoch moved and
+     * the body journaled, since nothing else is happening to it that would.
+     * A promotion a setter made ends here too, if the body also carried an
+     * impulse; its next move promotes it again.
+     * @method _driftEnded
+     * @private
+     * @param {body} body
+     */
+    Body._driftEnded = function(body) {
+        if (body._sMoved !== true || !(body.isStatic || body.isSleeping)) {
+            return;
+        }
+
+        Body._endPromotion(body);
+        Common._bodyStaticEpoch++;
+        Common._journalTouch(body);
     };
 
     /**
@@ -2008,6 +2372,28 @@ var Axes = __webpack_require__(11);
      * @param {bool} isStatic
      */
     Body.setStatic = function(body, isStatic) {
+        // a static body is never integrated again, so bring bounds an engine
+        // deferred up to date first, while velocity still holds what they
+        // would have been padded by
+        if (isStatic) {
+            Body._updateStaleBounds(body);
+        }
+
+        // a real change of rest ends a grid promotion (see Body._endPromotion)
+        if (!body.isStatic !== !isStatic) {
+            Body._endPromotion(body);
+        }
+
+        // frozen while carrying a warmed position impulse, which this does not
+        // clear (upstream does not): the resolver goes on moving the body
+        // until the impulse decays, about 90 updates and a few pixels (up to
+        // tens), and nothing reports those moves. So the grid runs it as a
+        // mover from the start, as it runs a static a setter moves, and
+        // indexes it where it stops (see Body._driftEnded)
+        if (isStatic && (body.positionImpulse.x !== 0 || body.positionImpulse.y !== 0)) {
+            body._sMoved = true;
+        }
+
         for (var i = 0; i < body.parts.length; i++) {
             var part = body.parts[i];
 
@@ -2060,11 +2446,18 @@ var Axes = __webpack_require__(11);
             part.torque = 0;
 
             part.isStatic = isStatic;
+
+            // freezing establishes the rest row (positionPrev and anglePrev
+            // were just set to position and angle, and inverseInertia to 0)
+            // unless the position is not finite; releasing clears it
+            part._restStatic = Common._isRestingStatic(part);
         }
 
-        // invalidate the cached mover lists in Engine and the gridStatic
-        // broadphase (see Common._bodyStaticEpoch)
+        // invalidate the cached mover lists in Engine and the grid
+        // broadphase (see Common._bodyStaticEpoch), and record the body in its
+        // world's body journal (see Common._journalTouch)
         Common._bodyStaticEpoch++;
+        Common._journalTouch(body);
     };
 
     /**
@@ -2081,6 +2474,8 @@ var Axes = __webpack_require__(11);
         body.mass = mass;
         body.inverseMass = 1 / body.mass;
         body.density = body.mass / body.area;
+
+        body._restStatic = Common._isRestingStatic(body);
     };
 
     /**
@@ -2104,6 +2499,143 @@ var Axes = __webpack_require__(11);
     Body.setInertia = function(body, inertia) {
         body.inertia = inertia;
         body.inverseInertia = 1 / body.inertia;
+
+        body._restStatic = Common._isRestingStatic(body);
+    };
+
+    /**
+     * Takes the box tag that `Collision.collides` reads to choose the fused
+     * box-box separating-axis test (`Collision._overlapBoxes`) and the
+     * closed-form support search (`Collision._findSupportsBox`): `_boxCorners`,
+     * `_boxHalf0` and `_boxHalf1` (see `Body.create`).
+     *
+     * The tag is decided by ACTUAL geometry, never by the factory that built
+     * the body: four vertices, two unit and mutually orthogonal axes, one part,
+     * and every corner sitting at plus or minus the half extent on both axes
+     * about `position`. That last test is what rejects a parallelogram (two
+     * axes, four vertices, not a box), a compound parent (four hull corners
+     * about a centre of mass that is not the hull's centre), and a body whose
+     * centre was moved off its vertices by `Body.setCentre`. The vertex ring
+     * must also walk the perimeter, never a diagonal, because the support
+     * search reads a corner's two ring neighbours as its two box neighbours.
+     *
+     * Rotation and translation move the vertices, the axes and `position`
+     * together, so they change none of this; only the mutators that reshape a
+     * body call here.
+     * @method _updateBoxTag
+     * @private
+     * @param {body} body
+     */
+    Body._updateBoxTag = function(body) {
+        var vertices = body.vertices,
+            axes = body.axes;
+
+        body._boxCorners = -1;
+        body._boxHalf0 = 0;
+        body._boxHalf1 = 0;
+
+        if (body.parts.length !== 1 || !vertices || vertices.length !== 4 || !axes || axes.length !== 2) {
+            return;
+        }
+
+        var axis0X = axes[0].x,
+            axis0Y = axes[0].y,
+            axis1X = axes[1].x,
+            axis1Y = axes[1].y;
+
+        if (Math.abs(axis0X * axis0X + axis0Y * axis0Y - 1) > Body._boxAxisTolerance
+            || Math.abs(axis1X * axis1X + axis1Y * axis1Y - 1) > Body._boxAxisTolerance
+            || Math.abs(axis0X * axis1X + axis0Y * axis1Y) > Body._boxAxisTolerance) {
+            return;
+        }
+
+        var positionX = body.position.x,
+            positionY = body.position.y,
+            offsets0 = _boxTagOffsets0,
+            offsets1 = _boxTagOffsets1,
+            min0 = 0,
+            max0 = 0,
+            min1 = 0,
+            max1 = 0,
+            k;
+
+        for (k = 0; k < 4; k++) {
+            // the support search walks neighbours by array position, the
+            // general one by `vertex.index`; they must name the same vertex
+            if (vertices[k].index !== k) {
+                return;
+            }
+
+            var offsetX = vertices[k].x - positionX,
+                offsetY = vertices[k].y - positionY,
+                offset0 = offsetX * axis0X + offsetY * axis0Y,
+                offset1 = offsetX * axis1X + offsetY * axis1Y;
+
+            offsets0[k] = offset0;
+            offsets1[k] = offset1;
+
+            if (k === 0 || offset0 < min0) { min0 = offset0; }
+            if (k === 0 || offset0 > max0) { max0 = offset0; }
+            if (k === 0 || offset1 < min1) { min1 = offset1; }
+            if (k === 0 || offset1 > max1) { max1 = offset1; }
+        }
+
+        var half0 = (max0 - min0) * 0.5,
+            half1 = (max1 - min1) * 0.5,
+            corners = 0,
+            seen = 0,
+            firstCode = 0,
+            previousCode = 0;
+
+        if (!(half0 > 0) || !(half1 > 0)) {
+            return;
+        }
+
+        // the axis test above admits a shear of up to its tolerance, and a
+        // parallelogram's corners project exactly to the half extents on its
+        // own edge normals, so the corner test below cannot see it. What the
+        // shear moves is a corner's ranking against the other axis, by about
+        // the dot times the longer half extent: refuse it in world units, as
+        // the corner test refuses everything else
+        if ((half0 > half1 ? half0 : half1) * Math.abs(axis0X * axis1X + axis0Y * axis1Y) > Body._boxCornerTolerance) {
+            return;
+        }
+
+        for (k = 0; k < 4; k++) {
+            var side0 = offsets0[k],
+                side1 = offsets1[k];
+
+            if (Math.abs(Math.abs(side0) - half0) > Body._boxCornerTolerance
+                || Math.abs(Math.abs(side1) - half1) > Body._boxCornerTolerance) {
+                return;
+            }
+
+            var code = (side0 > 0 ? 1 : 0) | (side1 > 0 ? 2 : 0);
+
+            // two corners in one quadrant about `position`: not a box about it
+            if ((seen & (1 << code)) !== 0) {
+                return;
+            }
+
+            // ring neighbours differ in exactly one side; both is a diagonal
+            if (k === 0) {
+                firstCode = code;
+            } else if ((code ^ previousCode) === 3) {
+                return;
+            }
+
+            previousCode = code;
+            seen |= 1 << code;
+            corners |= k << (code * 2);
+        }
+
+        if ((firstCode ^ previousCode) === 3) {
+            return;
+        }
+
+        body._boxHalf0 = half0;
+        body._boxHalf1 = half1;
+        body._boxCorners = corners;
     };
 
     /**
@@ -2119,6 +2651,13 @@ var Axes = __webpack_require__(11);
      * @param {vector[]} vertices
      */
     Body.setVertices = function(body, vertices) {
+        // the bounds the grid may have indexed (see Body._promoteIfIndexed)
+        var bounds = body.bounds,
+            minX = bounds.min.x,
+            minY = bounds.min.y,
+            maxX = bounds.max.x,
+            maxY = bounds.max.y;
+
         // change vertices
         if (vertices[0].body === body) {
             body.vertices = vertices;
@@ -2144,6 +2683,11 @@ var Axes = __webpack_require__(11);
         // update geometry
         Vertices.translate(body.vertices, body.position);
         Bounds.update(body.bounds, body.vertices, body.velocity);
+
+        // both the vertices and the axes have been replaced
+        Body._updateBoxTag(body);
+
+        Body._promoteIfIndexed(body, minX, minY, maxX, maxY);
     };
 
     /**
@@ -2183,6 +2727,10 @@ var Axes = __webpack_require__(11);
                 body.parts.push(part);
             }
         }
+
+        // a compound parent is never a box: its position is the parts' centre
+        // of mass, not its hull's centre, even when the hull has four corners
+        Body._updateBoxTag(body);
 
         if (body.parts.length === 1)
             return;
@@ -2243,6 +2791,11 @@ var Axes = __webpack_require__(11);
             body.position.x += centre.x;
             body.position.y += centre.y;
         }
+
+        // `position` no longer sits at the centre of the vertices
+        Body._updateBoxTag(body);
+
+        body._restStatic = Common._isRestingStatic(body);
     };
 
     /**
@@ -2254,7 +2807,13 @@ var Axes = __webpack_require__(11);
      * @param {boolean} [updateVelocity=false]
      */
     Body.setPosition = function(body, position, updateVelocity) {
-        var delta = Vector.sub(position, body.position);
+        var delta = Vector.sub(position, body.position),
+            // the bounds the grid may have indexed (see Body._promoteIfIndexed)
+            bounds = body.bounds,
+            minX = bounds.min.x,
+            minY = bounds.min.y,
+            maxX = bounds.max.x,
+            maxY = bounds.max.y;
 
         if (updateVelocity) {
             body.positionPrev.x = body.position.x;
@@ -2274,6 +2833,9 @@ var Axes = __webpack_require__(11);
             Vertices.translate(part.vertices, delta);
             Bounds.update(part.bounds, part.vertices, body.velocity);
         }
+
+        body._restStatic = Common._isRestingStatic(body);
+        Body._promoteIfIndexed(body, minX, minY, maxX, maxY);
     };
 
     /**
@@ -2285,7 +2847,13 @@ var Axes = __webpack_require__(11);
      * @param {boolean} [updateVelocity=false]
      */
     Body.setAngle = function(body, angle, updateVelocity) {
-        var delta = angle - body.angle;
+        var delta = angle - body.angle,
+            // the bounds the grid may have indexed (see Body._promoteIfIndexed)
+            bounds = body.bounds,
+            minX = bounds.min.x,
+            minY = bounds.min.y,
+            maxX = bounds.max.x,
+            maxY = bounds.max.y;
         
         if (updateVelocity) {
             body.anglePrev = body.angle;
@@ -2305,6 +2873,9 @@ var Axes = __webpack_require__(11);
                 Vector.rotateAbout(part.position, delta, body.position, part.position);
             }
         }
+
+        body._restStatic = Common._isRestingStatic(body);
+        Body._promoteIfIndexed(body, minX, minY, maxX, maxY);
     };
 
     /**
@@ -2343,6 +2914,13 @@ var Axes = __webpack_require__(11);
             }
             return;
         }
+
+        // the bounds the grid may have indexed (see Body._promoteIfIndexed)
+        var bounds = body.bounds,
+            oldMinX = bounds.min.x,
+            oldMinY = bounds.min.y,
+            oldMaxX = bounds.max.x,
+            oldMaxY = bounds.max.y;
 
         // The setPosition half: shift position and positionPrev by the delta.
         var deltaX = x - body.position.x,
@@ -2416,12 +2994,13 @@ var Axes = __webpack_require__(11);
         if (velocity.x > 0) { maxX += velocity.x; } else { minX += velocity.x; }
         if (velocity.y > 0) { maxY += velocity.y; } else { minY += velocity.y; }
 
-        var bounds = body.bounds;
-
         bounds.min.x = minX;
         bounds.max.x = maxX;
         bounds.min.y = minY;
         bounds.max.y = maxY;
+
+        body._restStatic = Common._isRestingStatic(body);
+        Body._promoteIfIndexed(body, oldMinX, oldMinY, oldMaxX, oldMaxY);
     };
 
     /**
@@ -2432,12 +3011,21 @@ var Axes = __webpack_require__(11);
      * @param {vector} velocity
      */
     Body.setVelocity = function(body, velocity) {
+        // bounds an engine deferred are padded by the velocity they were
+        // deferred with, which this is about to overwrite, so bring them up
+        // to date first (see Body._updateStaleBounds). `setSpeed` comes
+        // through here; `setAngularVelocity` pads no bounds, and
+        // `setPosition` recomputes every bound it writes a velocity for
+        Body._updateStaleBounds(body);
+
         var timeScale = body.deltaTime / Body._baseDelta;
         body.positionPrev.x = body.position.x - velocity.x * timeScale;
         body.positionPrev.y = body.position.y - velocity.y * timeScale;
         body.velocity.x = (body.position.x - body.positionPrev.x) / timeScale;
         body.velocity.y = (body.position.y - body.positionPrev.y) / timeScale;
         body.speed = Vector.magnitude(body.velocity);
+
+        body._restStatic = Common._isRestingStatic(body);
     };
 
     /**
@@ -2489,6 +3077,8 @@ var Axes = __webpack_require__(11);
         body.anglePrev = body.angle - velocity * timeScale;
         body.angularVelocity = (body.angle - body.anglePrev) / timeScale;
         body.angularSpeed = Math.abs(body.angularVelocity);
+
+        body._restStatic = Common._isRestingStatic(body);
     };
 
     /**
@@ -2572,7 +3162,13 @@ var Axes = __webpack_require__(11);
      */
     Body.scale = function(body, scaleX, scaleY, point) {
         var totalArea = 0,
-            totalInertia = 0;
+            totalInertia = 0,
+            // the bounds the grid may have indexed (see Body._promoteIfIndexed)
+            bounds = body.bounds,
+            minX = bounds.min.x,
+            minY = bounds.min.y,
+            maxX = bounds.max.x,
+            maxY = bounds.max.y;
 
         point = point || body.position;
 
@@ -2604,8 +3200,16 @@ var Axes = __webpack_require__(11);
             part.position.x = point.x + (part.position.x - point.x) * scaleX;
             part.position.y = point.y + (part.position.y - point.y) * scaleY;
 
+            // the extents changed, and a non-uniform scale of a rotated box is
+            // a parallelogram, which keeps two axes but is no longer a box
+            Body._updateBoxTag(part);
+
             // update bounds
             Bounds.update(part.bounds, part.vertices, body.velocity);
+
+            // scaling about any point but the position moves the position
+            // without positionPrev
+            part._restStatic = Common._isRestingStatic(part);
         }
 
         // handle parent body
@@ -2627,6 +3231,8 @@ var Axes = __webpack_require__(11);
                 body.circleRadius = null;
             }
         }
+
+        Body._promoteIfIndexed(body, minX, minY, maxX, maxY);
     };
 
     /**
@@ -2661,6 +3267,13 @@ var Axes = __webpack_require__(11);
         body.angularVelocity = ((body.angle - body.anglePrev) * frictionAir * correction) + (body.torque / body.inertia) * deltaTimeSquared;
         body.anglePrev = body.angle;
         body.angle += body.angularVelocity;
+
+        // the engine integrates moving bodies only, so this is a direct call
+        // on a static. It keeps the rest row for a finite force and torque,
+        // and the check reads one false flag for every engine-driven update
+        if (body._restStatic === true) {
+            body._restStatic = Common._isRestingStatic(body);
+        }
 
         // transform the body geometry
         var parts = body.parts,
@@ -3394,6 +4007,17 @@ var Axes = __webpack_require__(11);
 
 })();
 
+// Sleeping requires Body back. Requiring it before the IIFE above makes that a
+// circular require WHILE Body is still empty, and Node's CommonJS loader then
+// gives Body's exports a temporary warning-proxy prototype for the rest of this
+// file's load. Every `Body.x = ...` store above would take the generic
+// [[Set]] path, and V8 drops an object built that way to dictionary mode at
+// around its 20th property, so every `Body.update` / `Body._baseDelta` load in
+// the engine became a generic LoadIC. Bundled builds were never affected; only
+// a source load through Node (every A/B bench) was. `npm run audit-shapes`
+// fails on any Matter module object in dictionary mode.
+Sleeping = __webpack_require__(7);
+
 
 /***/ }),
 /* 5 */
@@ -3414,6 +4038,8 @@ module.exports = Events;
 var Common = __webpack_require__(0);
 
 (function() {
+
+    Events._hasOwn = Object.prototype.hasOwnProperty;
 
     /**
      * Subscribes a callback function to the given object's `eventName`.
@@ -3486,8 +4112,32 @@ var Common = __webpack_require__(0);
             eventClone;
 
         var events = object.events;
-        
-        if (events && Common.keys(events).length > 0) {
+
+        if (!events) {
+            return;
+        }
+
+        // a single event name, which is every trigger inside the library:
+        // no split and no key list built only to test for emptiness. Events.on
+        // only ever writes own properties, so an own entry here is exactly
+        // the case the general path below reaches with a non-empty key list
+        if (eventNames.indexOf(' ') === -1) {
+            callbacks = events[eventNames];
+
+            if (callbacks && callbacks.length > 0 && Events._hasOwn.call(events, eventNames)) {
+                eventClone = Common.clone(event || {}, false);
+                eventClone.name = eventNames;
+                eventClone.source = object;
+
+                for (var k = 0; k < callbacks.length; k++) {
+                    callbacks[k].apply(object, [eventClone]);
+                }
+            }
+
+            return;
+        }
+
+        if (Common.keys(events).length > 0) {
             if (!event)
                 event = {};
 
@@ -3563,7 +4213,30 @@ var Body = __webpack_require__(4);
                 allBodies: null,
                 allConstraints: null,
                 allComposites: null
-            }
+            },
+            // whether `Engine.update` is holding `bodies` itself as the
+            // update's body list (see Composite._ownBodies)
+            _bodiesLent: false,
+            // the body journal a grid detector reads instead of
+            // walking every body (see Common._journalTouch): the bodies touched
+            // since it last read, filled by index up to `_touchedCount`;
+            // whether the list is complete; the stamp of the full walk that
+            // started it, which a member carries in `body._sWalk`; the next
+            // add's `body._sWorldIndex`, which keeps that sort key increasing
+            // in body order; and the body count the recorded changes account
+            // for, which a direct edit that never signalled does not match
+            _touched: [],
+            _touchedCount: 0,
+            _journalLive: false,
+            _memberGen: 0,
+            _nextOrdinal: 0,
+            _journalLength: 0,
+            // Common._foreignWalks when the journal started, and the stamp of
+            // the last full walk of this composite's own array: every body
+            // carrying it in `_sWalk` is owned by this composite, which lets
+            // the next walk skip reading `_sOwner` for it
+            _journalForeignWalks: 0,
+            _ownedGen: 0
         }, options);
     };
 
@@ -3581,6 +4254,18 @@ var Body = __webpack_require__(4);
     Composite.setModified = function(composite, isModified, updateParents, updateChildren) {
         composite.isModified = isModified;
 
+        // the body-set signal the mover classifications key on (see
+        // Common._bodySetEpoch). Here and not in add / remove, because a
+        // caller that edits `composite.bodies` directly signals only here.
+        // For the same reason this is the change the body journal cannot
+        // describe, so it switches the journal off until the next full walk
+        // (the add and remove below record what they change and signal
+        // through Composite._setModifiedJournaled instead)
+        if (isModified) {
+            Common._bodySetEpoch++;
+            composite._journalLive = false;
+        }
+
         if (isModified && composite.cache) {
             composite.cache.allBodies = null;
             composite.cache.allConstraints = null;
@@ -3596,6 +4281,31 @@ var Body = __webpack_require__(4);
                 var childComposite = composite.composites[i];
                 Composite.setModified(childComposite, isModified, updateParents, updateChildren);
             }
+        }
+    };
+
+    /**
+     * Marks the composite modified exactly as `setModified(composite, true,
+     * true, false)` does, for a change this composite's body journal has
+     * already recorded, so the journal stays live. Its parents are marked
+     * through `setModified`, which switches theirs off: a change to a child
+     * reorders a parent's `allBodies`, which no journal describes.
+     * @private
+     * @method _setModifiedJournaled
+     * @param {composite} composite
+     */
+    Composite._setModifiedJournaled = function(composite) {
+        composite.isModified = true;
+        Common._bodySetEpoch++;
+
+        if (composite.cache) {
+            composite.cache.allBodies = null;
+            composite.cache.allConstraints = null;
+            composite.cache.allComposites = null;
+        }
+
+        if (composite.parent) {
+            Composite.setModified(composite.parent, true, true, false);
         }
     };
 
@@ -3746,6 +4456,30 @@ var Body = __webpack_require__(4);
     };
 
     /**
+     * Gives the composite a private `bodies` array before it is changed in
+     * place, if `Engine.update` is holding the current one.
+     *
+     * For a world with no child composites, `Engine.update` uses
+     * `world.bodies` ITSELF as the update's body list, rather than the copy
+     * `Composite.allBodies` builds after every change, and the detector keeps
+     * it between updates. A listener that adds or removes a body during the
+     * update would otherwise change that list under the update, where the
+     * copy never changed: so the change goes to a fresh array and the update
+     * finishes with the membership it started with, as it always did. Outside
+     * an update the array is changed in place, and the change is signalled by
+     * `Composite.setModified` (see Common._bodySetEpoch).
+     * @private
+     * @method _ownBodies
+     * @param {composite} composite
+     */
+    Composite._ownBodies = function(composite) {
+        if (composite._bodiesLent === true) {
+            composite.bodies = composite.bodies.slice(0);
+            composite._bodiesLent = false;
+        }
+    };
+
+    /**
      * Adds a body to the given composite.
      * @private
      * @method addBody
@@ -3754,8 +4488,38 @@ var Body = __webpack_require__(4);
      * @return {composite} The original composite with the body added
      */
     Composite.addBody = function(composite, body) {
+        Composite._ownBodies(composite);
         composite.bodies.push(body);
-        Composite.setModified(composite, true, true, false);
+
+        // a body changing owner: a member of another composite's journal (a
+        // body in two composites) stops being recorded there, and its stamp,
+        // which vouched for its old owner, is dropped (see _ownedGen)
+        var previousOwner = body._sOwner;
+
+        if (previousOwner !== composite) {
+            if (previousOwner !== null && body._sWalk === previousOwner._memberGen) {
+                previousOwner._journalLive = false;
+            }
+            body._sWalk = -1;
+        }
+
+        // record the add in the body journal (see Common._journalTouch). The
+        // body goes on the END of the array, so the next ordinal keeps
+        // `_sWorldIndex` increasing in body order. A body that is already a
+        // member is going in TWICE, which no membership flag can describe
+        if (composite._journalLive === true) {
+            if (body._sOwner === composite && body._sWalk === composite._memberGen) {
+                composite._journalLive = false;
+            } else {
+                body._sWalk = composite._memberGen;
+                body._sWorldIndex = composite._nextOrdinal++;
+                composite._journalLength++;
+                Common._journalPush(composite, body);
+            }
+        }
+
+        body._sOwner = composite;
+        Composite._setModifiedJournaled(composite);
         return composite;
     };
 
@@ -3790,7 +4554,7 @@ var Body = __webpack_require__(4);
             body.positionImpulse.x = 0;
             body.positionImpulse.y = 0;
 
-            // Tell the gridStatic broadphase this body left the world. It
+            // Tell the grid broadphase this body left the world. It
             // notices a departure on its own by stamping bodies as it walks
             // them, but that cannot see a body removed and added back before
             // the next walk, which keeps its place in the static index while
@@ -3817,9 +4581,200 @@ var Body = __webpack_require__(4);
      * @return {composite} The original composite with the body removed
      */
     Composite.removeBodyAt = function(composite, position) {
+        var body = composite.bodies[position];
+
+        Composite._ownBodies(composite);
         composite.bodies.splice(position, 1);
-        Composite.setModified(composite, true, true, false);
+        Composite._journalRemoved(composite, body);
+        Composite._setModifiedJournaled(composite);
         return composite;
+    };
+
+    /**
+     * Records in the body journal that `body` left `composite`, and ends its
+     * membership (see Common._journalTouch). Removing a body the journal does
+     * not hold as a member is a change it cannot describe, so it switches off.
+     * @private
+     * @method _journalRemoved
+     * @param {composite} composite
+     * @param {body} body
+     */
+    Composite._journalRemoved = function(composite, body) {
+        if (composite._journalLive === true) {
+            if (body._sOwner === composite && body._sWalk === composite._memberGen) {
+                composite._journalLength--;
+                Common._journalPush(composite, body);
+            } else {
+                composite._journalLive = false;
+            }
+        }
+
+        if (body._sOwner === composite) {
+            body._sOwner = null;
+            body._sWalk = -1;
+        }
+    };
+
+    /**
+     * Removes every body in `bodies` from the given composite in ONE
+     * order-preserving pass over its body array, with everything
+     * `Composite.removeBody` does to each body it removes. For a caller
+     * removing many bodies at once this is O(bodies in the composite) once,
+     * where a `removeBody` per body is O(bodies) each. A body listed but not
+     * in the composite is left alone; a body in the composite more than once
+     * is removed every time. Does not search child composites, and does not
+     * trigger the `beforeRemove` / `afterRemove` events.
+     *
+     * Prefer this to editing `composite.bodies` and calling
+     * `Composite.setModified`: it records the removals in the body journal,
+     * so a grid detector need not walk every body to find them.
+     *
+     * `bodies` may be `composite.bodies` itself, which empties the
+     * composite. An entry that is not a body throws a `TypeError` before
+     * anything is changed.
+     * @method removeBodies
+     * @param {composite} composite
+     * @param {body[]} bodies
+     * @return {composite} The original composite with the bodies removed
+     */
+    Composite.removeBodies = function(composite, bodies) {
+        // the list read by the passes below must not be the array they
+        // compact: `removeBodies(composite, composite.bodies)` would truncate
+        // it under the pass that restores what it marked
+        if (bodies === composite.bodies) {
+            bodies = bodies.slice(0);
+        }
+
+        var bodiesLength = bodies.length,
+            saved = Composite._removeSaved,
+            i;
+
+        if (bodiesLength === 0) {
+            return composite;
+        }
+
+        // mark the listed bodies in `_sWalk` with values no walk ever
+        // writes, keeping what each held: -2 for a journal member, -3 for
+        // anything else, so the pass below can tell a removal the journal can
+        // describe from one it cannot. A listed body that turns out not to be
+        // here gets its value back afterwards, so a body in another world
+        // keeps its membership there
+        var isLive = composite._journalLive === true,
+            memberGen = composite._memberGen;
+
+        for (i = 0; i < bodiesLength; i++) {
+            var listed = bodies[i];
+
+            // not a body: undo the marks made so far before throwing, so a
+            // bad list leaves every body as it was (a mark left behind reads
+            // as 'listed' to every later call, which then removes the body)
+            if (listed === null || typeof listed !== 'object' || typeof listed._sWalk !== 'number') {
+                Composite._unmarkListed(bodies, i, saved);
+                throw new TypeError('Matter.Composite.removeBodies: bodies[' + i + '] is not a body');
+            }
+
+            var walk = listed._sWalk;
+
+            if (walk <= -2) {
+                // listed twice: already marked
+                saved[i] = 0;
+                continue;
+            }
+
+            saved[i] = walk;
+            listed._sWalk = isLive && listed._sOwner === composite && walk === memberGen ? -2 : -3;
+        }
+
+        Composite._ownBodies(composite);
+
+        var worldBodies = composite.bodies,
+            worldLength = worldBodies.length,
+            removed = 0,
+            write = 0;
+
+        for (i = 0; i < worldLength; i++) {
+            var body = worldBodies[i],
+                mark = body._sWalk;
+
+            if (mark > -2 || mark < -4) {
+                worldBodies[write++] = body;
+                continue;
+            }
+
+            removed++;
+
+            // what Composite.removeBody does to a body it removes
+            body.sleepCounter = 0;
+            body.positionImpulse.x = 0;
+            body.positionImpulse.y = 0;
+            body._sDeparted = true;
+
+            if (mark === -2) {
+                composite._journalLength--;
+                if (composite._journalLive === true) {
+                    Common._journalPush(composite, body);
+                }
+            } else if (mark === -3) {
+                composite._journalLive = false;
+            }
+
+            // -4: removed, and any later copy of it in the array goes too
+            body._sWalk = -4;
+        }
+
+        if (worldBodies.length !== write) {
+            worldBodies.length = write;
+        }
+
+        // a removed body ends its membership here, as in
+        // Composite._journalRemoved; any other listed body (one that was not
+        // here, or one owned by another composite) gets its stamp back, so
+        // its membership there is untouched
+        for (i = 0; i < bodiesLength; i++) {
+            var gone = bodies[i],
+                goneWalk = gone._sWalk;
+
+            if (goneWalk === -4 && gone._sOwner === composite) {
+                gone._sWalk = -1;
+                gone._sOwner = null;
+            } else if (goneWalk <= -2 && goneWalk >= -4) {
+                gone._sWalk = saved[i];
+            }
+
+            saved[i] = 0;
+        }
+
+        if (removed > 0) {
+            Composite._setModifiedJournaled(composite);
+        }
+
+        return composite;
+    };
+
+    // scratch for Composite.removeBodies: the `_sWalk` each listed body held
+    Composite._removeSaved = [];
+
+    /**
+     * Gives the first `count` bodies of a `Composite.removeBodies` list
+     * back the `_sWalk` it marked them over, for a call that stops before
+     * removing anything. A body listed twice holds its mark once and is given
+     * its value back by its first entry.
+     * @private
+     * @method _unmarkListed
+     * @param {body[]} bodies
+     * @param {number} count
+     * @param {number[]} saved
+     */
+    Composite._unmarkListed = function(bodies, count, saved) {
+        for (var i = 0; i < count; i++) {
+            var listed = bodies[i];
+
+            if (listed._sWalk === -2 || listed._sWalk === -3) {
+                listed._sWalk = saved[i];
+            }
+
+            saved[i] = 0;
+        }
     };
 
     /**
@@ -3832,7 +4787,8 @@ var Body = __webpack_require__(4);
      */
     Composite.addConstraint = function(composite, constraint) {
         composite.constraints.push(constraint);
-        Composite.setModified(composite, true, true, false);
+        // no body changed, so the body journal stays live
+        Composite._setModifiedJournaled(composite);
         return composite;
     };
 
@@ -3871,7 +4827,8 @@ var Body = __webpack_require__(4);
      */
     Composite.removeConstraintAt = function(composite, position) {
         composite.constraints.splice(position, 1);
-        Composite.setModified(composite, true, true, false);
+        // no body changed, so the body journal stays live
+        Composite._setModifiedJournaled(composite);
         return composite;
     };
 
@@ -3890,6 +4847,8 @@ var Body = __webpack_require__(4);
             }
         }
         
+        Composite._ownBodies(composite);
+
         // same reason as Composite.removeBody: a body leaving the world must not
         // stay in the resolver's warmed-impulse carry list
         for (var b = 0; b < composite.bodies.length; b++) {
@@ -4395,9 +5354,17 @@ var Common = __webpack_require__(0);
         var wasSleeping = body.isSleeping;
 
         if (wasSleeping !== isSleeping) {
-            // invalidate the cached mover lists in Engine and the gridStatic
-            // broadphase (see Common._bodyStaticEpoch)
+            // invalidate the cached mover lists in Engine and the grid
+            // broadphase (see Common._bodyStaticEpoch), and record the body in
+            // its world's body journal (see Common._journalTouch). Recorded
+            // before the flag flips, which is fine: the reader reads the flag
+            // when it reads the journal
             Common._bodyStaticEpoch++;
+            Common._journalTouch(body);
+
+            // a real change of rest ends a grid promotion (see
+            // Body._endPromotion)
+            Body._endPromotion(body);
 
             // Engine clears force buffers for moving bodies only, so a force
             // applied while this body was asleep must be dropped here rather
@@ -4408,6 +5375,11 @@ var Common = __webpack_require__(0);
         }
 
         if (isSleeping) {
+            // a sleeping body is not integrated, so bring bounds an engine
+            // deferred up to date first, while velocity still holds what they
+            // would have been padded by (see Body.setStatic)
+            Body._updateStaleBounds(body);
+
             body.isSleeping = true;
             body.sleepCounter = body.sleepThreshold;
 
@@ -4466,6 +5438,14 @@ var Pair = __webpack_require__(9);
 (function() {
     var _supports = [];
 
+    // Below this depth margin (world units) two box corners are treated as
+    // LEVEL along a support direction, and `Collision._findSupportsBox` makes
+    // the general search's own comparisons instead of reading the answer off
+    // the axes. It must sit far above the float error of those comparisons
+    // (~1e-11 at page coordinates) and far below any real corner separation
+    // (a box is at least a pixel on a side).
+    var _boxSupportTolerance = 1e-6;
+
     var _overlapAB = {
         overlap: 0,
         axis: null
@@ -4493,7 +5473,6 @@ var Pair = __webpack_require__(9);
             parentB: bodyB.parent,
             depth: 0,
             normal: { x: 0, y: 0 },
-            tangent: { x: 0, y: 0 },
             supports: [null, null],
             supportCount: 0
         };
@@ -4508,16 +5487,29 @@ var Pair = __webpack_require__(9);
      * @return {collision|null} A collision record if detected, otherwise null
      */
     Collision.collides = function(bodyA, bodyB, pairs) {
-        Collision._overlapAxes(_overlapAB, bodyA, bodyB.vertices, bodyA.axes);
+        // both sides tagged by Body._updateBoxTag: the fused box-box test and
+        // the closed-form support search replace the general polygon ones
+        var isBoxPair = bodyA._boxCorners >= 0 && bodyB._boxCorners >= 0;
 
-        if (_overlapAB.overlap <= 0) {
-            return null;
-        }
+        if (isBoxPair) {
+            Collision._overlapBoxes(_overlapAB, _overlapBA, bodyA, bodyB);
 
-        Collision._overlapAxes(_overlapBA, bodyB, bodyA.vertices, bodyB.axes);
+            // `_overlapBA` is not written when `_overlapAB` already separates
+            if (_overlapAB.overlap <= 0 || _overlapBA.overlap <= 0) {
+                return null;
+            }
+        } else {
+            Collision._overlapAxes(_overlapAB, bodyA, bodyB.vertices, bodyA.axes);
 
-        if (_overlapBA.overlap <= 0) {
-            return null;
+            if (_overlapAB.overlap <= 0) {
+                return null;
+            }
+
+            Collision._overlapAxes(_overlapBA, bodyB, bodyA.vertices, bodyB.axes);
+
+            if (_overlapBA.overlap <= 0) {
+                return null;
+            }
         }
 
         // Reuse collision records for gc efficiency. The live pair's record is
@@ -4541,8 +5533,8 @@ var Pair = __webpack_require__(9);
                 recordSlot = Pair.hash(idA, idB) & recordMask,
                 recordKey;
 
-            // tombstones (-1) match neither the pair id nor the empty sentinel,
-            // so the probe walks straight over them
+            // linear probe to the first empty slot; deletion shifts entries
+            // back rather than leaving tombstones, so every key walked is live
             while ((recordKey = recordKeys[recordSlot]) !== 0) {
                 if (recordKey === pairId) {
                     collision = pairs._recordValues[recordSlot];
@@ -4574,7 +5566,6 @@ var Pair = __webpack_require__(9);
         }
 
         var normal = collision.normal,
-            tangent = collision.tangent,
             supports = collision.supports,
             depth = minOverlap.overlap,
             minAxis = minOverlap.axis,
@@ -4591,14 +5582,13 @@ var Pair = __webpack_require__(9);
 
         normal.x = normalX;
         normal.y = normalY;
-        
-        tangent.x = -normalY;
-        tangent.y = normalX;
 
         collision.depth = depth;
 
         // find support points, there is always either exactly one or two
-        var supportsB = Collision._findSupports(bodyA, bodyB, normal, 1),
+        var supportsB = isBoxPair
+                ? Collision._findSupportsBox(bodyA, bodyB, normal, 1)
+                : Collision._findSupports(bodyA, bodyB, normal, 1),
             supportCount = 0;
 
         // find the supports from bodyB that are inside bodyA. Both points are
@@ -4616,7 +5606,9 @@ var Pair = __webpack_require__(9);
 
         // find the supports from bodyA that are inside bodyB
         if (supportCount < 2) {
-            var supportsA = Collision._findSupports(bodyB, bodyA, normal, -1);
+            var supportsA = isBoxPair
+                ? Collision._findSupportsBox(bodyB, bodyA, normal, -1)
+                : Collision._findSupports(bodyB, bodyA, normal, -1);
 
             if (supportCount === 0) {
                 // nothing the first test can do takes the count to 2, so the
@@ -4652,6 +5644,102 @@ var Pair = __webpack_require__(9);
         collision.supportCount = supportCount;
 
         return collision;
+    };
+
+    /**
+     * The separating-axis test for two boxes (both tagged by
+     * `Body._updateBoxTag`), fused over their four axes.
+     *
+     * The general test projects every corner of the other body onto each axis.
+     * For a box that projection is closed form: centred on the body's
+     * `position`, with radius `half0 * |axis . axis0| + half1 * |axis . axis1|`.
+     * So the overlap on axis `i` of A is
+     * `halfA_i + (halfB0 * |R[i][0]| + halfB1 * |R[i][1]|) - |delta . axisA_i|`,
+     * where `R[i][j] = axisA_i . axisB_j` is shared by all four tests, and no
+     * vertex is read at all.
+     *
+     * Writes the same `{ overlap, axis }` results two `_overlapAxes` calls
+     * write: the same axis objects, the same tie rule (the lower axis index
+     * wins a tie), and the same early out (`resultBA` is not written when
+     * `resultAB` already separates). The overlap itself differs from the
+     * general reduction in its last bits, because it is computed from
+     * `position` and the half extents rather than from the vertices, so this is
+     * a RE-BASELINE and not a bit-identical rewrite.
+     *
+     * A box never reads or fills the `_selfProjection` memo on this path; the
+     * memo stays for every pair with a side that is not a box.
+     * @method _overlapBoxes
+     * @private
+     * @param {object} resultAB B projected onto the axes of A
+     * @param {object} resultBA A projected onto the axes of B
+     * @param {body} bodyA
+     * @param {body} bodyB
+     */
+    Collision._overlapBoxes = function(resultAB, resultBA, bodyA, bodyB) {
+        var axesA = bodyA.axes,
+            axesB = bodyB.axes,
+            axisA0 = axesA[0],
+            axisA1 = axesA[1],
+            axisB0 = axesB[0],
+            axisB1 = axesB[1],
+            axisA0X = axisA0.x,
+            axisA0Y = axisA0.y,
+            axisA1X = axisA1.x,
+            axisA1Y = axisA1.y,
+            axisB0X = axisB0.x,
+            axisB0Y = axisB0.y,
+            axisB1X = axisB1.x,
+            axisB1Y = axisB1.y,
+            halfA0 = bodyA._boxHalf0,
+            halfA1 = bodyA._boxHalf1,
+            halfB0 = bodyB._boxHalf0,
+            halfB1 = bodyB._boxHalf1,
+            deltaX = bodyB.position.x - bodyA.position.x,
+            deltaY = bodyB.position.y - bodyA.position.y,
+            r00 = Math.abs(axisA0X * axisB0X + axisA0Y * axisB0Y),
+            r01 = Math.abs(axisA0X * axisB1X + axisA0Y * axisB1Y),
+            r10 = Math.abs(axisA1X * axisB0X + axisA1Y * axisB0Y),
+            r11 = Math.abs(axisA1X * axisB1X + axisA1Y * axisB1Y),
+            overlap0 = halfA0 + (halfB0 * r00 + halfB1 * r01) - Math.abs(deltaX * axisA0X + deltaY * axisA0Y),
+            overlap1;
+
+        if (overlap0 <= 0) {
+            resultAB.axis = axisA0;
+            resultAB.overlap = overlap0;
+            return;
+        }
+
+        overlap1 = halfA1 + (halfB0 * r10 + halfB1 * r11) - Math.abs(deltaX * axisA1X + deltaY * axisA1Y);
+
+        if (overlap1 < overlap0) {
+            resultAB.axis = axisA1;
+            resultAB.overlap = overlap1;
+
+            if (overlap1 <= 0) {
+                return;
+            }
+        } else {
+            resultAB.axis = axisA0;
+            resultAB.overlap = overlap0;
+        }
+
+        overlap0 = halfB0 + (halfA0 * r00 + halfA1 * r10) - Math.abs(deltaX * axisB0X + deltaY * axisB0Y);
+
+        if (overlap0 <= 0) {
+            resultBA.axis = axisB0;
+            resultBA.overlap = overlap0;
+            return;
+        }
+
+        overlap1 = halfB1 + (halfA0 * r01 + halfA1 * r11) - Math.abs(deltaX * axisB1X + deltaY * axisB1Y);
+
+        if (overlap1 < overlap0) {
+            resultBA.axis = axisB1;
+            resultBA.overlap = overlap1;
+        } else {
+            resultBA.axis = axisB0;
+            resultBA.overlap = overlap0;
+        }
     };
 
     /**
@@ -4917,6 +6005,150 @@ var Pair = __webpack_require__(9);
     };
 
     /**
+     * The support search for a box (tagged by `Body._updateBoxTag`) in closed
+     * form. It returns the SAME two vertex objects, in the SAME order, as
+     * `Collision._findSupports`, so contacts, their identity matching in
+     * `Pair.update`, and the solver's contact order are all unchanged.
+     *
+     * Along the search direction `n`, each side of axis `k` moves a corner
+     * `half_k * (n . axis_k)` deeper, so the deepest corner is on the positive
+     * side of both dot products, and its deeper neighbour is across the axis
+     * whose side costs less depth (`margin_k = half_k * |n . axis_k|`). The
+     * vertex a side pair names is read from `_boxCorners`.
+     *
+     * That reading is trusted only where the hill-climb's own float
+     * comparisons cannot disagree with it. A margin under
+     * `_boxSupportTolerance` is a tie the general search settles by
+     * rounding and by vertex index, so there this makes the general search's
+     * own comparisons on the two candidates alone. That is every contact whose
+     * normal is this box's own face normal, where the two corners of the face
+     * are level along it.
+     * @method _findSupportsBox
+     * @private
+     * @param {body} bodyA
+     * @param {body} bodyB
+     * @param {vector} normal
+     * @param {number} direction
+     * @return [vector]
+     */
+    Collision._findSupportsBox = function(bodyA, bodyB, normal, direction) {
+        var axes = bodyB.axes,
+            axis0 = axes[0],
+            axis1 = axes[1],
+            normalX = normal.x * direction,
+            normalY = normal.y * direction,
+            dot0 = normalX * axis0.x + normalY * axis0.y,
+            dot1 = normalX * axis1.x + normalY * axis1.y,
+            margin0 = bodyB._boxHalf0 * (dot0 < 0 ? -dot0 : dot0),
+            margin1 = bodyB._boxHalf1 * (dot1 < 0 ? -dot1 : dot1),
+            tolerance = _boxSupportTolerance,
+            corners = bodyB._boxCorners,
+            side0 = dot0 > 0 ? 1 : 0,
+            side1 = dot1 > 0 ? 2 : 0,
+            vertices = bodyB.vertices,
+            deepestIndex,
+            partnerIndex;
+
+        if (margin0 > tolerance && margin1 > tolerance) {
+            deepestIndex = (corners >> ((side0 | side1) << 1)) & 3;
+
+            if (margin0 + tolerance < margin1) {
+                partnerIndex = (corners >> (((side0 ^ 1) | side1) << 1)) & 3;
+            } else if (margin1 + tolerance < margin0) {
+                partnerIndex = (corners >> ((side0 | (side1 ^ 2)) << 1)) & 3;
+            } else {
+                // both neighbours are level with each other
+                return Collision._supportsBesideDeepest(bodyA, vertices, deepestIndex, normalX, normalY);
+            }
+
+            _supports[0] = vertices[deepestIndex];
+            _supports[1] = vertices[partnerIndex];
+
+            return _supports;
+        }
+
+        if (margin1 > tolerance) {
+            // the two corners across axis 0 are level
+            return Collision._supportsFromLevelPair(bodyA, vertices,
+                (corners >> (side1 << 1)) & 3, (corners >> ((1 | side1) << 1)) & 3, normalX, normalY);
+        }
+
+        if (margin0 > tolerance) {
+            // the two corners across axis 1 are level
+            return Collision._supportsFromLevelPair(bodyA, vertices,
+                (corners >> (side0 << 1)) & 3, (corners >> ((side0 | 2) << 1)) & 3, normalX, normalY);
+        }
+
+        // both margins inside the tolerance: a box too small to reason about
+        return Collision._findSupports(bodyA, bodyB, normal, direction);
+    };
+
+    /**
+     * The general search's last step, verbatim, for a deepest vertex already
+     * known: of its two neighbours, the next one wins only when strictly
+     * deeper.
+     * @method _supportsBesideDeepest
+     * @private
+     * @param {body} bodyA
+     * @param {vertices} vertices
+     * @param {number} deepestIndex
+     * @param {number} normalX
+     * @param {number} normalY
+     * @return [vector]
+     */
+    Collision._supportsBesideDeepest = function(bodyA, vertices, deepestIndex, normalX, normalY) {
+        var bodyAPositionX = bodyA.position.x,
+            bodyAPositionY = bodyA.position.y,
+            vertexA = vertices[deepestIndex],
+            vertexB = vertices[(deepestIndex + 1) & 3],
+            vertexC = vertices[(deepestIndex + 3) & 3];
+
+        _supports[0] = vertexA;
+
+        if (normalX * (bodyAPositionX - vertexB.x) + normalY * (bodyAPositionY - vertexB.y)
+            < normalX * (bodyAPositionX - vertexC.x) + normalY * (bodyAPositionY - vertexC.y)) {
+            _supports[1] = vertexB;
+        } else {
+            _supports[1] = vertexC;
+        }
+
+        return _supports;
+    };
+
+    /**
+     * Two level corners, one of which the general search picks as deepest and
+     * the other as its partner. The search scans in index order and replaces
+     * only on a strictly smaller distance, so the deeper one wins by the
+     * search's own distance expression and the lower index wins an exact tie.
+     * @method _supportsFromLevelPair
+     * @private
+     * @param {body} bodyA
+     * @param {vertices} vertices
+     * @param {number} indexA
+     * @param {number} indexB
+     * @param {number} normalX
+     * @param {number} normalY
+     * @return [vector]
+     */
+    Collision._supportsFromLevelPair = function(bodyA, vertices, indexA, indexB, normalX, normalY) {
+        var bodyAPositionX = bodyA.position.x,
+            bodyAPositionY = bodyA.position.y,
+            lower = vertices[indexA < indexB ? indexA : indexB],
+            upper = vertices[indexA < indexB ? indexB : indexA];
+
+        if (normalX * (bodyAPositionX - upper.x) + normalY * (bodyAPositionY - upper.y)
+            < normalX * (bodyAPositionX - lower.x) + normalY * (bodyAPositionY - lower.y)) {
+            _supports[0] = upper;
+            _supports[1] = lower;
+        } else {
+            _supports[0] = lower;
+            _supports[1] = upper;
+        }
+
+        return _supports;
+    };
+
+    /**
      * Tests TWO points against the same vertex set in one walk of its edges.
      *
      * Each edge contributes two terms that do not depend on the point being
@@ -5047,15 +6279,6 @@ var Pair = __webpack_require__(9);
      * @type vector
      * @default { x: 0, y: 0 }
      */
-
-    /**
-     * A normalised `Vector` that is the tangent direction to the collision normal.
-     *
-     * @property tangent
-     * @type vector
-     * @default { x: 0, y: 0 }
-     */
-
 
     /**
      * An array of body vertices that represent the support points in the collision.
@@ -6249,7 +7472,37 @@ var Collision = __webpack_require__(8);
 (function() {
 
     /**
+     * The grid broadphase's visit stamp, written to `body._gsStamp` (and to
+     * the flat mover stamps) to mark a body already seen by one pass: a
+     * candidate collected once however many of a mover's cells hold it, a
+     * journal entry read once however often it was recorded. ONE counter for
+     * every grid detector, so every stamp is fresh for every body: with a
+     * counter per detector, a stamp another detector left on a body could
+     * equal the one a pass took, and the pass skipped that body as already
+     * seen (a released static left out of the mover lists, a static left out
+     * of a mover's candidates).
+     *
+     * Known limit, unchanged by sharing the counter (one detector takes the
+     * same stamps either way): past `2^31` stamps, about 33 hours of a
+     * 300-mover world at 60 updates a second, the flat mover stamps (an
+     * `Int32Array`) wrap and stop deduping a mover reached through several
+     * cells, so its pair is emitted more than once, and `_gsStamp` leaves the
+     * small-integer range, which changes the field's representation on every
+     * body once.
+     * @private
+     */
+    var gridStamp = 0;
+
+    /**
      * Creates a new collision detector.
+     *
+     * The broadphase is chosen per detector, with `broadphase` (`'sweep'`, the
+     * default, or `'grid'`) and, for the grid, `cellSize`. To run an engine on
+     * the grid, give it a detector made for it:
+     *
+     *     Engine.create({ detector: Detector.create({ broadphase: 'grid' }) })
+     *
+     * Any other `broadphase` throws, here and on every `Detector.collisions`.
      * @method create
      * @param {} options
      * @return {detector} A new collision detector
@@ -6259,12 +7512,126 @@ var Collision = __webpack_require__(8);
             bodies: [],
             collisions: [],
             pairs: null,
+            // which broadphase `Detector.collisions` runs (see there)
+            broadphase: 'sweep',
+            // the grid's cell size in pixels, read by the grid broadphase only.
+            // Tune it to roughly the typical static body's size
+            cellSize: Detector._defaultCellSize,
             // whether `bodies` is a private copy the sweep may sort in place
             // (see Detector.setBodies)
-            _bodiesOwned: true
+            _bodiesOwned: true,
+            // the world whose own body array `bodies` is, set by
+            // `Engine.update` for a flat world: the grid broadphase then reads
+            // that world's body journal instead of walking every body (see
+            // Common._journalTouch). Null for a detector used on its own
+            _world: null,
+            // the grid broadphase's state, made on its first step (see
+            // Detector._collisionsGrid)
+            _sgrid: null
         };
 
-        return Common.extend(defaults, options);
+        var detector = Common.extend(defaults, options);
+
+        // Common.extend copies an option given as `undefined`, so a cell size
+        // left unset that way takes the default like an absent one. The
+        // broadphase does not: an unset broadphase quietly running the sweep
+        // is the failure the check below exists to rule out
+        if (detector.cellSize === undefined) {
+            detector.cellSize = Detector._defaultCellSize;
+        }
+
+        if (!Detector._isBroadphase(detector.broadphase)) {
+            throw Detector._broadphaseError(detector.broadphase);
+        }
+
+        if (!Detector._isCellSize(detector.cellSize)) {
+            throw Detector._cellSizeError(detector.cellSize);
+        }
+
+        return detector;
+    };
+
+    /**
+     * The grid's cell size when a detector is not given one.
+     * @private
+     * @property _defaultCellSize
+     * @type number
+     */
+    Detector._defaultCellSize = 32;
+
+    /**
+     * Whether `broadphase` names a broadphase `Detector.collisions` runs.
+     * @private
+     * @method _isBroadphase
+     * @param {} broadphase
+     * @return {boolean}
+     */
+    Detector._isBroadphase = function(broadphase) {
+        return broadphase === 'sweep' || broadphase === 'grid';
+    };
+
+    /**
+     * Whether `cellSize` is a cell size the grid can use: a finite number of
+     * pixels above zero whose inverse is finite too. The grid maps a
+     * coordinate to its cell by multiplying by that inverse, and an infinite
+     * one (a denormal cell size such as `1e-310`) puts every body in cell
+     * `Infinity`, whose cell loop never ends.
+     * @private
+     * @method _isCellSize
+     * @param {} cellSize
+     * @return {boolean}
+     */
+    Detector._isCellSize = function(cellSize) {
+        return typeof cellSize === 'number' && cellSize > 0 && cellSize < Infinity && 1 / cellSize < Infinity;
+    };
+
+    /**
+     * Throws if `detector` names no broadphase, or names the grid with a cell
+     * size it cannot use: the checks `Detector.collisions` and the grid make
+     * when they run, made up front. `Engine.update` calls this before it
+     * changes anything, so an update that throws on its configuration leaves
+     * the engine, the world and every body as they were.
+     * @private
+     * @method _assertConfig
+     * @param {detector} detector
+     */
+    Detector._assertConfig = function(detector) {
+        var broadphase = detector.broadphase;
+
+        if (broadphase === 'grid') {
+            if (!Detector._isCellSize(detector.cellSize)) {
+                throw Detector._cellSizeError(detector.cellSize);
+            }
+            return;
+        }
+
+        if (broadphase !== 'sweep') {
+            throw Detector._broadphaseError(broadphase);
+        }
+    };
+
+    /**
+     * The error for a detector whose `broadphase` names no broadphase.
+     * @private
+     * @method _broadphaseError
+     * @param {} broadphase
+     * @return {Error}
+     */
+    Detector._broadphaseError = function(broadphase) {
+        return new Error('Matter.Detector: unknown broadphase ' + String(broadphase)
+            + ", expected 'sweep' or 'grid' (e.g. Detector.create({ broadphase: 'grid' }))");
+    };
+
+    /**
+     * The error for a detector whose `cellSize` the grid cannot use.
+     * @private
+     * @method _cellSizeError
+     * @param {} cellSize
+     * @return {Error}
+     */
+    Detector._cellSizeError = function(cellSize) {
+        return new Error('Matter.Detector: cellSize must be a finite number above 0 with a finite inverse, got '
+            + String(cellSize));
     };
 
     /**
@@ -6276,13 +7643,16 @@ var Collision = __webpack_require__(8);
     Detector.setBodies = function(detector, bodies) {
         // only the sweep reorders detector.bodies (it sorts in place), so only
         // it needs a private copy. The grid modes reference the caller's array
-        // directly: Composite.allBodies builds a fresh array on any add or
-        // remove, so array identity still changes exactly when membership can
-        // have, which is what the classification caches key off. The copy for
-        // the sweep is taken lazily in _collisionsSweep, so a detector flipped
-        // to sweep after this call stays correct.
+        // directly, which for `Engine.update` on a flat world is `world.bodies`
+        // itself: its identity does NOT change when its membership does, so the
+        // classification cache keys on Common._bodySetEpoch as well. The copy
+        // for the sweep is taken lazily in _collisionsSweep, so a detector
+        // flipped to sweep after this call stays correct, and the caller's
+        // array is never reordered.
         detector.bodies = bodies;
         detector._bodiesOwned = false;
+        // whose array this is, `Engine.update` says again after this call
+        detector._world = null;
     };
 
     /**
@@ -6293,32 +7663,6 @@ var Collision = __webpack_require__(8);
     Detector.clear = function(detector) {
         detector.bodies = [];
         detector.collisions = [];
-    };
-
-    /**
-     * Tags a body as grid-dynamic, meaning the `gridStatic` broadphase treats it
-     * as a mover (re-indexed every step) even while `isStatic` is `true`. This is
-     * what a static body that MOVES (an inner-scroll surface tracking the page)
-     * needs, since the persistent static index would otherwise hold it at its
-     * old position.
-     *
-     * Use this rather than assigning `body._gridDynamic` directly: the flag
-     * changes the body's moving-vs-resting role, so it has to invalidate the
-     * cached mover lists (see `Common._bodyStaticEpoch`). Repeat calls with the
-     * flag already set are free, so a caller may re-tag every step.
-     * @method setGridDynamic
-     * @param {body} body
-     * @param {bool} [isGridDynamic=true]
-     */
-    Detector.setGridDynamic = function(body, isGridDynamic) {
-        var flag = isGridDynamic !== false;
-
-        if (body._gridDynamic === flag) {
-            return;
-        }
-
-        body._gridDynamic = flag;
-        Common._bodyStaticEpoch++;
     };
 
     /**
@@ -6431,36 +7775,36 @@ var Collision = __webpack_require__(8);
     };
 
     /**
-     * Default broadphase mode. `'sweep'` is the classic sort-and-sweep (the
-     * baseline). `'grid'` uses a uniform spatial grid that stays robust on the
-     * dense, column-aligned static fields page-destroyer produces. The grid
-     * emits collisions in a different but still deterministic order, so it is a
-     * re-baseline of the simulation, not bit-identical to the sweep.
-     */
-    Detector._mode = 'sweep';
-
-    /**
-     * Uniform grid cell size in pixels (grid mode only). Tunable per workload.
-     */
-    Detector._cellSize = 32;
-
-    /**
-     * Finds all collisions among `detector.bodies` using the configured
-     * broadphase mode (`Detector._mode`).
+     * Finds all collisions among `detector.bodies` using the detector's
+     * broadphase, `detector.broadphase`:
+     *
+     * - `'sweep'` is upstream's sort-and-sweep, and the default.
+     * - `'grid'` indexes static and sleeping bodies once and keeps the index
+     *   as bodies come and go, so each step costs about the MOVING bodies, not
+     *   the world (see `Detector._collisionsGrid`). It emits collisions in a
+     *   different but still deterministic order, so it is a re-baseline of the
+     *   simulation, not bit-identical to the sweep.
+     *
+     * Anything else throws, on every call rather than only at
+     * `Detector.create`: the config is a plain field a caller can assign, and a
+     * detector quietly falling back to the sweep is the failure this exists to
+     * rule out. Two string compares per step are free.
      * @method collisions
      * @param {detector} detector
      * @return {collision[]} collisions
      */
     Detector.collisions = function(detector) {
-        if (Detector._mode === 'gridStatic') {
-            return Detector._collisionsGridStatic(detector);
-        }
+        var broadphase = detector.broadphase;
 
-        if (Detector._mode === 'grid') {
+        if (broadphase === 'grid') {
             return Detector._collisionsGrid(detector);
         }
 
-        return Detector._collisionsSweep(detector);
+        if (broadphase === 'sweep') {
+            return Detector._collisionsSweep(detector);
+        }
+
+        throw Detector._broadphaseError(broadphase);
     };
 
     /**
@@ -6512,200 +7856,8 @@ var Collision = __webpack_require__(8);
     };
 
     /**
-     * Uniform-grid broadphase. Buckets every body into fixed-size cells, then
-     * generates candidate pairs only from shared cells. Alloc-light: bucket
-     * arrays and the touched-key list are reused across frames; dedup uses a
-     * per-body visited stamp; a body spanning more than `maxCells` cells goes in
-     * an oversized overflow list tested against all others. Deterministic
-     * emission order (outer body-array order, then cell scan order).
-     * @private
-     * @method _collisionsGrid
-     * @param {detector} detector
-     * @return {collision[]} collisions
-     */
-    Detector._collisionsGrid = function(detector) {
-        var bodies = detector.bodies,
-            n = bodies.length,
-            pairs = detector.pairs,
-            canCollide = Detector.canCollide,
-            collisions = detector.collisions,
-            collisionIndex = 0,
-            cellSize = Detector._cellSize || 32,
-            invCell = 1 / cellSize;
-
-        var grid = detector._grid;
-        if (!grid) {
-            grid = detector._grid = {
-                buckets: new Map(),
-                usedKeys: [],
-                oversized: [],
-                stamp: 1
-            };
-        }
-
-        var buckets = grid.buckets,
-            usedKeys = grid.usedKeys,
-            oversized = grid.oversized,
-            usedKeysLength = usedKeys.length,
-            i, cx, cy, u;
-
-        // reset frame: empty only the buckets touched last frame (keep the array
-        // objects in the Map for reuse, so steady state does not allocate)
-        for (u = 0; u < usedKeysLength; u++) {
-            var stale = buckets.get(usedKeys[u]);
-            if (stale !== undefined) {
-                stale.length = 0;
-            }
-        }
-        usedKeys.length = 0;
-        oversized.length = 0;
-
-        // a body spanning more than this many cells is tested against all others
-        var maxCells = 24,
-            // integer cell-key packing; offset keeps negative cells non-negative.
-            // Safe while |cell index| < 2^20 (coords within ~+/-16M px at 16px).
-            keyOffset = 0x100000,
-            keyStride = 0x200000;
-
-        // insert pass
-        for (i = 0; i < n; i++) {
-            var body = bodies[i],
-                bounds = body.bounds,
-                cx0 = Math.floor(bounds.min.x * invCell),
-                cx1 = Math.floor(bounds.max.x * invCell),
-                cy0 = Math.floor(bounds.min.y * invCell),
-                cy1 = Math.floor(bounds.max.y * invCell);
-
-            if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) > maxCells) {
-                body._ov = true;
-                oversized.push(i);
-                continue;
-            }
-            body._ov = false;
-
-            for (cx = cx0; cx <= cx1; cx++) {
-                var keyX = (cx + keyOffset) * keyStride;
-                for (cy = cy0; cy <= cy1; cy++) {
-                    var key = keyX + (cy + keyOffset),
-                        bucket = buckets.get(key);
-
-                    if (bucket === undefined) {
-                        bucket = [];
-                        buckets.set(key, bucket);
-                    }
-                    if (bucket.length === 0) {
-                        usedKeys.push(key);
-                    }
-                    bucket.push(i);
-                }
-            }
-        }
-
-        // candidate generation: each body pairs with higher-index bodies sharing
-        // a cell (the visited stamp dedups bodies found via multiple cells)
-        for (i = 0; i < n; i++) {
-            var bodyA = bodies[i];
-            if (bodyA._ov) {
-                continue;
-            }
-
-            var boundsA = bodyA.bounds,
-                aMinX = boundsA.min.x, aMaxX = boundsA.max.x,
-                aMinY = boundsA.min.y, aMaxY = boundsA.max.y,
-                aStatic = bodyA.isStatic || bodyA.isSleeping,
-                filterA = bodyA.collisionFilter,
-                localStamp = ++grid.stamp,
-                acx0 = Math.floor(aMinX * invCell),
-                acx1 = Math.floor(aMaxX * invCell),
-                acy0 = Math.floor(aMinY * invCell),
-                acy1 = Math.floor(aMaxY * invCell);
-
-            for (cx = acx0; cx <= acx1; cx++) {
-                var akX = (cx + keyOffset) * keyStride;
-                for (cy = acy0; cy <= acy1; cy++) {
-                    var occupants = buckets.get(akX + (cy + keyOffset));
-                    if (occupants === undefined) {
-                        continue;
-                    }
-
-                    for (var oi = 0; oi < occupants.length; oi++) {
-                        var j = occupants[oi];
-                        if (j <= i) {
-                            continue;
-                        }
-
-                        var bodyB = bodies[j];
-                        if (bodyB._stamp === localStamp) {
-                            continue;
-                        }
-                        bodyB._stamp = localStamp;
-
-                        if (aStatic && (bodyB.isStatic || bodyB.isSleeping)) {
-                            continue;
-                        }
-
-                        var boundsB = bodyB.bounds;
-                        if (aMaxX < boundsB.min.x || aMinX > boundsB.max.x
-                            || aMaxY < boundsB.min.y || aMinY > boundsB.max.y) {
-                            continue;
-                        }
-
-                        if (!canCollide(filterA, bodyB.collisionFilter)) {
-                            continue;
-                        }
-
-                        collisionIndex = Detector._testPair(bodyA, bodyB, pairs, collisions, collisionIndex);
-                    }
-                }
-            }
-        }
-
-        // oversized pass: each oversized body tested against all others (deduped
-        // oversized-vs-oversized by index). Few of these, so O(oversized * n)
-        var oversizedLength = oversized.length;
-        for (var oa = 0; oa < oversizedLength; oa++) {
-            var ia = oversized[oa],
-                ovA = bodies[ia],
-                ovBoundsA = ovA.bounds,
-                ovStaticA = ovA.isStatic || ovA.isSleeping,
-                ovFilterA = ovA.collisionFilter;
-
-            for (var jb = 0; jb < n; jb++) {
-                if (jb === ia) {
-                    continue;
-                }
-
-                var ovB = bodies[jb];
-                if (ovB._ov && jb < ia) {
-                    continue;
-                }
-                if (ovStaticA && (ovB.isStatic || ovB.isSleeping)) {
-                    continue;
-                }
-
-                var ovBoundsB = ovB.bounds;
-                if (ovBoundsA.max.x < ovBoundsB.min.x || ovBoundsA.min.x > ovBoundsB.max.x
-                    || ovBoundsA.max.y < ovBoundsB.min.y || ovBoundsA.min.y > ovBoundsB.max.y) {
-                    continue;
-                }
-                if (!canCollide(ovFilterA, ovB.collisionFilter)) {
-                    continue;
-                }
-
-                collisionIndex = Detector._testPair(ovA, ovB, pairs, collisions, collisionIndex);
-            }
-        }
-
-        if (collisions.length !== collisionIndex) {
-            collisions.length = collisionIndex;
-        }
-
-        return collisions;
-    };
-
-    /**
      * Creates an open-addressing hash table mapping packed cell keys to bucket
-     * arrays, replacing `Map` for the gridStatic cell indexes. Linear probing
+     * arrays, replacing `Map` for the grid's cell indexes. Linear probing
      * over two flat parallel arrays: `keys` (Float64Array; the packed cell key
      * `(cx + offset) * stride + (cy + offset)` is always positive within the
      * coordinate contract, so `0` marks an empty slot) and `vals` (the bucket
@@ -6763,7 +7915,7 @@ var Collision = __webpack_require__(8);
 
     /**
      * Per-axis cap on the mover cell index (see the insert pass in
-     * `_collisionsGridStatic`): `1 << _maxCellShift` cells, so the flat index is
+     * `_collisionsGrid`): `1 << _maxCellShift` cells, so the flat index is
      * never larger than `1 << (2 * _maxCellShift)` slots. A mover spread wider
      * than this wraps into the same slots, which stays correct because chain
      * entries carry their cell key.
@@ -6900,10 +8052,15 @@ var Collision = __webpack_require__(8);
         if (buckets === null) {
             buckets = body._sBuckets = [];
         } else {
-            buckets.length = 0;
+            // popped rather than `length = 0`, as the candidate list in
+            // `_collisionsGrid` is: no StoreIC call, capacity kept
+            while (buckets.length !== 0) {
+                buckets.pop();
+            }
         }
 
         body._sIndexed = true;
+        body._sGrid = g;
         body._sIndexedAt = g.indexed.length;
         g.indexed.push(body);
         g.sFlatValid = false;
@@ -6932,12 +8089,17 @@ var Collision = __webpack_require__(8);
         // (`built` is only set at the end of one), which bumps the epoch and so
         // invalidates every cached list at once
         if (g.built) {
-            var changed = g.changedCells;
+            // filled BY INDEX up to `g.changedCount`, never cleared (see the
+            // invalidation sweep in `_collisionsGrid`)
+            var changed = g.changedCells,
+                changedAt = g.changedCount;
             for (cx = cx0; cx <= cx1; cx++) {
                 for (cy = cy0; cy <= cy1; cy++) {
-                    changed.push(cx, cy);
+                    changed[changedAt++] = cx;
+                    changed[changedAt++] = cy;
                 }
             }
+            g.changedCount = changedAt;
         }
 
         for (cx = cx0; cx <= cx1; cx++) {
@@ -6946,8 +8108,8 @@ var Collision = __webpack_require__(8);
 
             for (cy = cy0; cy <= cy1; cy++) {
                 // store the body reference, not its index into detector.bodies:
-                // Matter re-slices that array on world.isModified, which
-                // reorders and shrinks it, so a stored index can dangle
+                // any add or remove reorders and shrinks that array, so a
+                // stored index can dangle
                 var bucket = Detector._cellGetOrCreate(
                     g.sTable, keyX + (cy + keyOffset), Detector._cellHash(cxOffset, cy + keyOffset)
                 );
@@ -7001,6 +8163,7 @@ var Collision = __webpack_require__(8);
         // `Engine._bodiesUpdate` this step, so its bounds describe where it is
         // now, not the cells it is being pulled out of
         var changed = g.changedCells,
+            changedAt = g.changedCount,
             ucx,
             ucy,
             ucx1 = body._sCx1,
@@ -7008,9 +8171,12 @@ var Collision = __webpack_require__(8);
 
         for (ucx = body._sCx0; ucx <= ucx1; ucx++) {
             for (ucy = body._sCy0; ucy <= ucy1; ucy++) {
-                changed.push(ucx, ucy);
+                changed[changedAt++] = ucx;
+                changed[changedAt++] = ucy;
             }
         }
+
+        g.changedCount = changedAt;
 
         for (i = 0; i < buckets.length; i++) {
             var bucket = buckets[i];
@@ -7020,17 +8186,33 @@ var Collision = __webpack_require__(8);
             }
         }
 
-        buckets.length = 0;
+        // popped rather than `length = 0` (see `_staticIndexInsert`)
+        while (buckets.length !== 0) {
+            buckets.pop();
+        }
     };
 
     /**
      * Removes a static body from the index entirely: out of the membership
-     * list, and out of every bucket it was inserted into.
+     * list, and out of every bucket it was inserted into. From the index of
+     * the grid that holds it (`body._sGrid`), which is `g` unless the body
+     * came from a world another grid engine steps: its buckets and slot
+     * describe that grid's index, and it is taken out of that one.
+     *
+     * That is how a body moved between two grid worlds leaves the first
+     * index. The removal marks it departed (Composite.removeBody), and
+     * whichever grid classifies it first takes it out of the index that holds
+     * it: the old grid, finding it gone from its world, or the new one,
+     * finding it departed. Either way the index that held it loses it whole,
+     * list, buckets and changed-cell report, and the new grid then indexes it
+     * afresh. Before, the old grid unbucketed it through the buckets the new
+     * one had given it.
      * @private
      * @method _staticIndexRemove
      */
     Detector._staticIndexRemove = function(g, body) {
-        var indexed = g.indexed,
+        var owner = body._sGrid === null ? g : body._sGrid,
+            indexed = owner.indexed,
             slot = body._sIndexedAt;
 
         // swap-remove from the membership list. Its order carries no meaning
@@ -7046,8 +8228,9 @@ var Collision = __webpack_require__(8);
 
         body._sIndexed = false;
         body._sIndexedAt = -1;
+        body._sGrid = null;
 
-        Detector._staticIndexUnbucket(g, body);
+        Detector._staticIndexUnbucket(owner, body);
     };
 
     /**
@@ -7076,17 +8259,29 @@ var Collision = __webpack_require__(8);
         g.sOver.length = 0;
         g.sFlat.length = 0;
         g.sFlatValid = false;
+
+        // every body the old index held lets go of it, including one that
+        // has left the world since (the loop below reaches only members)
+        for (i = 0; i < g.indexed.length; i++) {
+            var held = g.indexed[i];
+            if (held._sGrid === g) {
+                held._sIndexed = false;
+                held._sIndexedAt = -1;
+                held._sGrid = null;
+            }
+        }
+
         g.indexed.length = 0;
         // the epoch bump below invalidates every cached candidate list, so
         // per-cell reports from this rebuild would be a pure cost
-        g.changedCells.length = 0;
+        g.changedCount = 0;
 
         for (i = 0; i < n; i++) {
             var body = bodies[i];
 
             body._sIndexed = false;
 
-            if (!(body.isStatic || body.isSleeping) || body._gridDynamic === true) {
+            if (!(body.isStatic || body.isSleeping) || body._sMoved === true) {
                 continue;
             }
 
@@ -7132,6 +8327,7 @@ var Collision = __webpack_require__(8);
                     Detector._staticIndexUnbucket(g, body);
                     body._sIndexed = false;
                     body._sIndexedAt = -1;
+                    body._sGrid = null;
                     continue;
                 }
 
@@ -7160,51 +8356,603 @@ var Collision = __webpack_require__(8);
     };
 
     /**
-     * Static-index uniform-grid broadphase. The win over `_collisionsGrid`: the
-     * static field (intact page) is bucketed ONCE and reused; only dynamic
-     * bodies (movers) are re-bucketed each step, and only movers drive candidate
-     * generation. Static-static pairs are never visited (no resolved collision
+     * The largest share of a world's bodies that may be movers for the
+     * grid broadphase (and so the engine) to read the body journal
+     * rather than walk. Above it the full walks run, as before the journal.
+     *
+     * The journal removes the same work at any share, and the phase timers
+     * say so (at the storm bench shape, 45 percent movers, the two
+     * classifications cost 21 to 25 us less per update). But there the WHOLE
+     * update measured slower, in most runs and in functions the journal never
+     * touches (`Pairs.update`, the narrowphase, `Body.update`), by a median 4
+     * percent over 32 interleaved runs with the velocity option off, while the
+     * same code with the journal never read measured flat. Where the walks
+     * dominate, at a few movers in a large static world (the traversal shape,
+     * 2.6 percent movers), the update is 24 percent faster. Tests set this to 1
+     * to run the journal at every share.
+     * @private
+     * @property _journalMoverShare
+     * @type number
+     */
+    Detector._journalMoverShare = 0.25;
+
+    /**
+     * Starts `world`'s body journal from the full classification walk that
+     * just stamped every body in it with `walkStamp` (see
+     * Common._journalTouch): that stamp becomes the membership generation, the
+     * list starts empty, and the next add's sort key follows the `n` the walk
+     * wrote.
+     * @private
+     * @method _journalStart
+     */
+    Detector._journalStart = function(g, world, walkStamp, n) {
+        var touched = world._touched,
+            touchedCount = world._touchedCount;
+
+        // drop the references a switched-off journal may still hold
+        for (var i = 0; i < touchedCount; i++) {
+            touched[i] = null;
+        }
+
+        world._touchedCount = 0;
+        world._journalLive = true;
+        world._memberGen = walkStamp;
+        world._nextOrdinal = n;
+        world._journalLength = n;
+        world._journalForeignWalks = Common._foreignWalks;
+        g.journalUsed = false;
+        g.journalWorld = world;
+        g.journalGen = walkStamp;
+    };
+
+    /**
+     * Classifies from `world`'s body journal: the answer the full walk in
+     * `_collisionsGrid` gives, from the bodies that changed since the
+     * last classification rather than from every body in the world.
+     *
+     * Each journal entry is re-read against the body's state NOW, so the
+     * order and number of its entries do not matter. A member is classified
+     * exactly as the walk classifies it, with the same writes. A body that is
+     * no longer a member leaves the index, which is exactly what the walk's
+     * departure scan does to an indexed body its walk did not stamp; a
+     * departure the journal missed would still be found by that scan, since
+     * every member carries the walk stamp the scan tests against.
+     *
+     * The mover list keeps BODY order because `_sWorldIndex` stays increasing
+     * along the body array between walks: the walk writes it, each add gives
+     * a body going on the end the next ordinal, and a removal keeps the
+     * relative order of what remains. The static count is what the walk's
+     * count is, every body in the world that is not a mover.
+     * @private
+     * @method _classifyFromJournal
+     * @param {object} g
+     * @param {composite} world
+     * @param {number} n
+     */
+    Detector._classifyFromJournal = function(g, world, n) {
+        var touched = world._touched,
+            touchedCount = world._touchedCount,
+            memberGen = world._memberGen,
+            movers = g.movers,
+            moversLength = movers.length,
+            pendingAdd = g.pendingAdd,
+            arrivals = g.arrivals,
+            indexed = g.indexed,
+            // marks this pass's entries, so a body listed twice is classified
+            // once and the mover list below can drop every one of them. From
+            // the grid's one counter, whose every stamp is fresh (see
+            // gridStamp)
+            stamp = ++gridStamp,
+            staticDirty = false,
+            arrivalCount = 0,
+            moverCount = 0,
+            i;
+
+        pendingAdd.length = 0;
+
+        for (i = 0; i < touchedCount; i++) {
+            var body = touched[i];
+
+            touched[i] = null;
+
+            if (body._gsStamp === stamp) {
+                continue;
+            }
+
+            body._gsStamp = stamp;
+
+            if (body._sOwner !== world || body._sWalk !== memberGen) {
+                // no longer a member: what the departure scan does to an
+                // indexed body the walk did not stamp. Only a body in THIS
+                // index, as the scan only reads this index; the mover list
+                // below drops it either way
+                if (body._sIndexed && body._sGrid === g) {
+                    Detector._staticIndexRemove(g, body);
+                    staticDirty = true;
+                }
+                continue;
+            }
+
+            // from here, the full walk's classification of one body, write for
+            // write (see there)
+            var isStaticNow = (body.isStatic || body.isSleeping) && body._sMoved !== true;
+
+            if (body._sDeparted) {
+                body._sDeparted = false;
+                body._scEpoch = -1;
+                if (body._sIndexed) {
+                    Detector._staticIndexRemove(g, body);
+                    staticDirty = true;
+                }
+            }
+
+            if (body._sPrev !== isStaticNow) {
+                body._sPrev = isStaticNow;
+                body._scEpoch = -1;
+                staticDirty = true;
+            }
+
+            if (isStaticNow) {
+                if (!body._sIndexed) {
+                    pendingAdd.push(body);
+                    staticDirty = true;
+                }
+            } else {
+                arrivals[arrivalCount++] = body;
+                if (body._sIndexed) {
+                    Detector._staticIndexRemove(g, body);
+                    staticDirty = true;
+                }
+            }
+        }
+
+        world._touchedCount = 0;
+
+        if (touchedCount > 0) {
+            // drop every body this pass read from the mover list, keeping the
+            // rest in order, then merge the ones that are movers now back in by
+            // their sort key
+            for (i = 0; i < moversLength; i++) {
+                var kept = movers[i];
+                if (kept._gsStamp !== stamp) {
+                    movers[moverCount++] = kept;
+                }
+            }
+
+            // arrivals are few: insertion sort by the key
+            for (i = 1; i < arrivalCount; i++) {
+                var arriving = arrivals[i],
+                    arrivingKey = arriving._sWorldIndex,
+                    at = i;
+                while (at > 0 && arrivals[at - 1]._sWorldIndex > arrivingKey) {
+                    arrivals[at] = arrivals[at - 1];
+                    at--;
+                }
+                arrivals[at] = arriving;
+            }
+
+            var total = moverCount + arrivalCount,
+                from = moverCount - 1,
+                take = arrivalCount - 1,
+                write = total - 1;
+
+            // grown by push so the list stays packed, then merged from the end
+            while (movers.length < total) {
+                movers.push(null);
+            }
+
+            while (take >= 0) {
+                var arrival = arrivals[take];
+                if (from >= 0 && movers[from]._sWorldIndex > arrival._sWorldIndex) {
+                    movers[write--] = movers[from--];
+                } else {
+                    movers[write--] = arrival;
+                    arrivals[take--] = null;
+                }
+            }
+
+            if (movers.length !== total) {
+                movers.length = total;
+            }
+        }
+
+        g.staticCount = n - movers.length;
+        g.classifyDirty = staticDirty;
+    };
+
+    /**
+     * Builds `Engine.update`'s mover list (every body in `world` that is
+     * neither static nor sleeping, in body order) into `moverBodies` from
+     * what the grid classification already knows, instead of walking
+     * every body, and returns whether it could.
+     *
+     * The detector's mover list is exact for the world as its last
+     * classification saw it, and every change since is in the world's body
+     * journal, not yet read (see _classifyFromJournal). A body not in the
+     * journal keeps its role, so the engine's movers among those are the
+     * detector's movers that are neither static nor sleeping (the detector
+     * also counts a resting body promoted by a move, `_sMoved`); each body in
+     * the journal is read as it is now, and merged in by `_sWorldIndex` like
+     * the detector's own. The journal is only read here, never emptied: the
+     * detector reads it later in the same update.
+     *
+     * It can only when the journal describes every change since that
+     * classification, which are the conditions under which the detector reads
+     * it itself, and when `world.bodies` is still the array that
+     * classification read. The journal describes the WORLD as it is now, and
+     * `Engine.update` steps the array it took at its start: a listener that
+     * adds or removes a body during the update (a `sleepStart` listener,
+     * say, which runs before this) gives the world a fresh array the update
+     * does not step, and a caller that replaces `world.bodies` without
+     * signalling changes the world under a journal that never saw it. Either
+     * leaves the world an array the last classification never read, and the
+     * update then walks. Outside those, the array keeps its identity (an add
+     * or a remove between updates edits it in place), so the test costs the
+     * common case nothing.
+     * @private
+     * @method _moversFromJournal
+     * @param {detector} detector
+     * @param {composite} world
+     * @param {body[]} moverBodies
+     * @return {boolean}
+     */
+    Detector._moversFromJournal = function(detector, world, moverBodies) {
+        var g = detector._sgrid;
+
+        if (g === undefined || g === null || !g.built || g.journalWorld !== world
+            || g.classifyBodies !== world.bodies
+            || world._journalLive !== true || g.journalGen !== world._memberGen
+            || world._journalLength !== world.bodies.length
+            || world._journalForeignWalks !== Common._foreignWalks) {
+            return false;
+        }
+
+        var touched = world._touched,
+            touchedCount = world._touchedCount,
+            memberGen = world._memberGen,
+            movers = g.movers,
+            moversLength = movers.length,
+            arrivals = g.arrivals,
+            stamp = ++gridStamp,
+            arrivalCount = 0,
+            moverCount = 0,
+            i;
+
+        for (i = 0; i < touchedCount; i++) {
+            var body = touched[i];
+
+            if (body._gsStamp === stamp) {
+                continue;
+            }
+
+            body._gsStamp = stamp;
+
+            if (body._sOwner === world && body._sWalk === memberGen
+                && !(body.isStatic || body.isSleeping)) {
+                arrivals[arrivalCount++] = body;
+            }
+        }
+
+        for (i = 0; i < moversLength; i++) {
+            var kept = movers[i];
+            if (kept._gsStamp !== stamp && !(kept.isStatic || kept.isSleeping)) {
+                moverBodies[moverCount++] = kept;
+            }
+        }
+
+        // arrivals are few: insertion sort by the key
+        for (i = 1; i < arrivalCount; i++) {
+            var arriving = arrivals[i],
+                arrivingKey = arriving._sWorldIndex,
+                at = i;
+            while (at > 0 && arrivals[at - 1]._sWorldIndex > arrivingKey) {
+                arrivals[at] = arrivals[at - 1];
+                at--;
+            }
+            arrivals[at] = arriving;
+        }
+
+        var total = moverCount + arrivalCount,
+            from = moverCount - 1,
+            take = arrivalCount - 1,
+            write = total - 1;
+
+        // grown by push so the list stays packed, then merged from the end
+        while (moverBodies.length < total) {
+            moverBodies.push(null);
+        }
+
+        while (take >= 0) {
+            var arrival = arrivals[take];
+            if (from >= 0 && moverBodies[from]._sWorldIndex > arrival._sWorldIndex) {
+                moverBodies[write--] = moverBodies[from--];
+            } else {
+                moverBodies[write--] = arrival;
+                arrivals[take--] = null;
+            }
+        }
+
+        if (moverBodies.length !== total) {
+            moverBodies.length = total;
+        }
+
+        return true;
+    };
+
+    /**
+     * Stamps every body in `bodies` with `walkStamp` and makes `liveWorld` its
+     * owner, the check a full walk runs before it restarts the world's body
+     * journal, and returns whether the array holds any body twice (which no
+     * journal can describe). A body the world's last walk stamped (`ownedGen`)
+     * is owned by it already (see Composite._ownedGen), so for every body but
+     * the few that came in since this is one comparison and `_sOwner`, which
+     * lies past the cache line the walk touches, is never read. A body taken
+     * from a composite whose journal held it switches that journal off.
+     * @private
+     * @method _claimBodies
+     * @param {body[]} bodies
+     * @param {number} n
+     * @param {composite} liveWorld
+     * @param {number} ownedGen
+     * @param {number} walkStamp
+     * @return {boolean}
+     */
+    Detector._claimBodies = function(bodies, n, liveWorld, ownedGen, walkStamp) {
+        var duplicate = false;
+
+        for (var i = 0; i < n; i++) {
+            var body = bodies[i],
+                lastWalk = body._sWalk;
+
+            if (lastWalk !== ownedGen) {
+                if (lastWalk === walkStamp) {
+                    // seen already in this pass: the array holds it twice
+                    duplicate = true;
+                } else {
+                    // not known to be owned by this world (it came in by a
+                    // direct edit, say)
+                    var owner = body._sOwner;
+                    if (owner !== liveWorld) {
+                        if (owner !== null) {
+                            owner._journalLive = false;
+                        }
+                        body._sOwner = liveWorld;
+                    }
+                }
+            }
+
+            body._sWalk = walkStamp;
+        }
+
+        return duplicate;
+    };
+
+    /**
+     * The full classification walk of `_collisionsGrid`: every body in
+     * `bodies` classified as a mover or a static, the static index told what
+     * changed, and the body journal restarted from the walk when it can be.
+     * Writes `g.movers`, `g.pendingAdd`, `g.staticCount`, and in
+     * `g.classifyDirty` whether the static set changed. The fallback to the
+     * body journal's own pass, `_classifyFromJournal`, which writes the same.
+     * @private
+     * @method _classifyWalk
+     * @param {object} g
+     * @param {body[]} bodies
+     * @param {number} n
+     * @param {composite|null} world the world `Engine.update` named, if any
+     * @param {composite|null} liveWorld `world` when `bodies` is its own array
+     */
+    Detector._classifyWalk = function(g, bodies, n, world, liveWorld) {
+        var movers = g.movers,
+            staticDirty = false,
+            staticCount,
+            // an array the named world no longer holds: the one Engine.update
+            // lent, which a listener replaced during this update by adding or
+            // removing a body (see Composite._ownBodies). A body it removed
+            // and added back is re-indexed below where it sits in THIS array,
+            // but it sits elsewhere in the world's new one, which the next
+            // classification walks; so it keeps its departure mark for that
+            // walk to re-index it again (otherwise its buckets keep the order
+            // of the array it left, not the one a rebuild would give)
+            keepDeparted = world !== null && liveWorld === null && world.bodies !== bodies,
+            i;
+
+        // `movers` is filled BY INDEX and trimmed once below, rather than
+        // cleared with `movers.length = 0` and re-pushed. Clearing to zero
+        // drops the backing store, so every rebuild regrows it from empty
+        // and allocates; writing in place reuses it. This is the idiom the
+        // engine's own mover classification already uses (`Engine.update`)
+        var moverCount = 0,
+            duplicate = false;
+        staticCount = 0;
+
+        // this walk is also where the static index learns what changed, so
+        // it stamps every body it sees. A body still in the index whose
+        // stamp is stale on the next pass has LEFT the world, which is the
+        // one kind of change no per-body flag can report. The stamp is
+        // unique across every detector, since it also serves as the body
+        // journal's membership generation (see Common._journalTouch)
+        var walkStamp = g.walkStamp = ++Common._walkStamp,
+            ownedGen = liveWorld !== null ? liveWorld._ownedGen : 0,
+            // whether this walk checks the world for a body journal
+            // to start (no body twice, every body owned by the world): only
+            // where the journal would be read (see Detector._journalMoverShare)
+            verify = liveWorld !== null && movers.length <= n * Detector._journalMoverShare,
+            pendingAdd = g.pendingAdd;
+        pendingAdd.length = 0;
+
+        // A journal switched off before it was ever read is the mark
+        // of a caller that edits the body array directly and signals
+        // `Composite.setModified` on every update, for whom the check
+        // is a pure cost; after each such journal the check waits for
+        // twice as many walks, up to 63
+        if (verify) {
+            if (g.journalWorld === liveWorld) {
+                g.journalFailures = g.journalUsed ? 0 : Math.min(g.journalFailures + 1, 6);
+                g.journalSkip = (1 << g.journalFailures) - 1;
+            }
+            if (g.journalSkip > 0) {
+                g.journalSkip--;
+                verify = false;
+            }
+        }
+
+        // a walk of any array that is not its world's own replaces
+        // stamps some journal may count on, which is recorded once here
+        // rather than looked up per body (see Common._foreignWalks)
+        if (liveWorld === null) {
+            Common._foreignWalks++;
+        }
+
+        // the check is a pass of its own, ahead of the walk, so the walk below
+        // is the same loop as before the journal. Folded into the walk as a
+        // branch, it measured 2 to 3 percent slower on a whole traversal step
+        // even on the updates where the branch was never taken
+        if (verify) {
+            duplicate = Detector._claimBodies(bodies, n, liveWorld, ownedGen, walkStamp);
+        }
+
+        for (i = 0; i < n; i++) {
+            var body = bodies[i],
+                // a resting body a setter moved after it was indexed (e.g. an
+                // inner-scroll surface that is static but moves each tick, see
+                // Body._promoteIfIndexed) is a mover, so it is re-bucketed
+                // every step and never goes stale in the static index
+                isStaticNow = (body.isStatic || body.isSleeping) && body._sMoved !== true;
+
+            body._sWalk = walkStamp;
+            body._sWorldIndex = i;
+
+            // removed from the world and added back before this walk ran,
+            // so it is still indexed but may now sit at a different place in
+            // the body array. Drop it from the index and let the pass below
+            // re-insert it at its new position, or bucket order would no
+            // longer match the order a full rebuild produces
+            if (body._sDeparted) {
+                body._sDeparted = keepDeparted;
+                // out of the world it was in no mover index, so the
+                // per-cell invalidation sweep could not reach it
+                body._scEpoch = -1;
+                if (body._sIndexed) {
+                    Detector._staticIndexRemove(g, body);
+                    staticDirty = true;
+                }
+            }
+
+            if (body._sPrev !== isStaticNow) {
+                body._sPrev = isStaticNow;
+                // same reason: while it was static it was not a mover, so
+                // any cell that changed under it went unreported to it
+                body._scEpoch = -1;
+                staticDirty = true;
+            }
+
+            if (isStaticNow) {
+                staticCount++;
+                if (!body._sIndexed) {
+                    pendingAdd.push(body);
+                    staticDirty = true;
+                }
+            } else {
+                movers[moverCount++] = body;
+                if (body._sIndexed) {
+                    // released into a mover: unindex it here, so the apply
+                    // pass below never has to walk the membership list
+                    // looking for it
+                    Detector._staticIndexRemove(g, body);
+                    staticDirty = true;
+                }
+            }
+        }
+
+        // the trim is NOT optional. The ONE read of `movers.length` below
+        // (snapshotted into `moversLength`) is what bounds every consumer
+        // of it, so a slot left over from a longer previous list is read
+        // as a live mover. Held by Detector.spec's shrinking-mover-set
+        // test, which is the only gate that can see it: every other one
+        // either builds a fresh detector per scene or only ever shrinks
+        // the STATIC set
+        if (movers.length !== moverCount) {
+            movers.length = moverCount;
+        }
+
+        g.staticCount = staticCount;
+
+        // every body in the world is now stamped by this walk and owned
+        // by the world. Start the body journal from the walk, when it
+        // walked a flat world's own array and found no body twice;
+        // otherwise the world's journal no longer matches the stamps
+        // this walk wrote
+        if (verify) {
+            liveWorld._ownedGen = walkStamp;
+        }
+
+        if (verify && !duplicate) {
+            Detector._journalStart(g, liveWorld, walkStamp, n);
+        } else {
+            if (world !== null) {
+                world._journalLive = false;
+            }
+            g.journalWorld = null;
+        }
+
+        g.classifyDirty = staticDirty;
+    };
+
+    /**
+     * The grid broadphase (`detector.broadphase === 'grid'`): a uniform grid
+     * with a static index. The static field (intact page) is bucketed ONCE and
+     * reused; only dynamic bodies (movers) are re-bucketed each step, and only
+     * movers drive candidate generation. Static-static pairs are never visited (no resolved collision
      * can be static-static), so a calm page costs ~O(movers) per step instead of
      * O(all bodies) like the sweep. Re-baseline: emission order differs from the
      * sweep but is deterministic.
      *
      * The static index is rebuilt only when the static membership changes
      * (detected per body via a cached `_sPrev` flag plus a `staticCount` guard),
-     * e.g. on release. A static body that MOVES while staying static (inner-scroll
-     * surfaces) is not handled here and must be treated as a mover by the caller;
-     * the page-destroyer integration does this.
+     * e.g. on release. A resting body that MOVES while staying at rest (an
+     * inner-scroll surface) is promoted to a mover by the `Body` setter that
+     * moved it, once the index holds it (see Body._promoteIfIndexed), and is a
+     * mover from then on; nothing has to tag it.
      *
      * The static buckets (and the oversized-static list) hold body REFERENCES,
      * not indices into `detector.bodies`. The index outlives a step, but Matter
-     * re-slices `detector.bodies` from `Composite.allBodies` on `world.isModified`
-     * (any add/remove), which reorders and shrinks that array. Since the rebuild
+     * changes `detector.bodies` on any add or remove (a flat world's own array,
+     * edited in place), which reorders and shrinks it. Since the rebuild
      * fires only on static-membership changes, a stored index could point at the
      * wrong body or past the array end on a later step; a reference cannot.
      *
-     * Every per-body field this path writes (`_sPrev`, `_gsStamp`, `_ovD`,
-     * `_gridDynamic`, `_sc*`, `_s*` index membership) is pre-declared in
+     * The consumer greps its built bundle for this function's NAME to prove it
+     * shipped this fork rather than upstream, so renaming it breaks that
+     * build, loudly and on purpose.
+     *
+     * Every per-body field this path writes (`_sPrev`, `_gsStamp`,
+     * `_sMoved`, `_sc*`, `_s*` index membership) is pre-declared in
      * `Body.create`; see the rule there before introducing a new one (a lazily
      * added field splits body hidden classes and slows the whole engine,
      * measured 1.3-4.8x).
      *
      * Because that state lives on the BODY rather than on the detector, a body
-     * belongs to one gridStatic detector at a time. Sharing bodies between two
-     * engines was already unsupported here (the candidate cache and the
-     * broadphase stamps have the same constraint); the static index membership
-     * simply makes it explicit.
+     * belongs to one grid detector at a time. It can MOVE between worlds that
+     * two grid engines step (removed from one, added to the other): the index
+     * state names the grid that holds it (`_sGrid`), and the removal takes it
+     * out of that index whole (see _staticIndexRemove). A body indexed by two
+     * grids at once (two stepped worlds holding it, or a second grid detector
+     * run over a world another grid engine steps) is unsupported: the last to
+     * index it holds it, and the other answers wrongly for it.
      * @private
-     * @method _collisionsGridStatic
+     * @method _collisionsGrid
      * @param {detector} detector
      * @return {collision[]} collisions
      */
-    Detector._collisionsGridStatic = function(detector) {
+    Detector._collisionsGrid = function(detector) {
         var bodies = detector.bodies,
             n = bodies.length,
             pairs = detector.pairs,
             canCollide = Detector.canCollide,
             collisions = detector.collisions,
             collisionIndex = 0,
-            cellSize = Detector._cellSize || 32,
+            cellSize = detector.cellSize,
             invCell = 1 / cellSize,
             keyOffset = 0x100000,
             keyStride = 0x200000,
@@ -7223,15 +8971,25 @@ var Collision = __webpack_require__(8);
                 // world (which no per-body flag can report) is found by
                 // scanning for a stale walk stamp; plus this step's insertions
                 indexed: [], pendingAdd: [], walkStamp: 0,
+                // the world whose body journal this index follows, and the
+                // stamp of the full walk that started it (see
+                // _classifyFromJournal); the journal pass's scratch list of
+                // bodies joining the movers, and whether it changed the statics
+                journalWorld: null, journalGen: -1, arrivals: [], classifyDirty: false,
+                // whether the journal this index started has been read since,
+                // and the back-off for one that keeps being switched off unread
+                // (see the full walk below)
+                journalUsed: false, journalFailures: 0, journalSkip: 0,
                 // sFlat is the flat list of non-oversized statics that only an
                 // OVERSIZED MOVER reads, so it is rebuilt lazily, on the rare
                 // steps one exists, instead of maintained on every change
                 sFlatValid: false,
-                movers: [], stamp: 1, built: false, indexedStaticCount: -1,
+                movers: [], built: false, indexedStaticCount: -1,
                 // classification cache: the movers list and static count are
                 // only recomputed when the body set or any body's
                 // moving-vs-resting role actually changed
                 classifyBodies: null, classifyLength: -1, classifyEpoch: -1,
+                classifySetEpoch: -1,
                 staticCount: 0,
                 // mover cell index, rebuilt every step: per-cell chain heads
                 // over a flat entry list (`dNext` / `dItem` / `dKey`) addressed
@@ -7255,9 +9013,12 @@ var Collision = __webpack_require__(8);
                 // every bucket changes) so each mover's cached static-candidate
                 // list can be validated cheaply. An incremental change reports
                 // the cells it touched here instead, as flat (cx, cy) pairs
-                // consumed once per step by the invalidation sweep below
-                epoch: 0, changedCells: [],
-                cellSize: 0
+                // consumed once per step by the invalidation sweep below.
+                // Only the first `changedCount` values are live (see there)
+                epoch: 0, changedCells: [], changedCount: 0,
+                // the cell size the index was built at. NaN, which no cell size
+                // equals, so the first step checks the detector's like any change
+                cellSize: NaN
             };
         }
 
@@ -7268,8 +9029,14 @@ var Collision = __webpack_require__(8);
         // a cell-size change invalidates every bucket key, including the
         // persistent static index built under the old size; force a rebuild
         // (without this, live cell-size tuning queries stale static buckets
-        // and silently misses mover-vs-static collisions)
+        // and silently misses mover-vs-static collisions). A cell size is
+        // checked here, where one is first seen (the first step included, as
+        // the seed is NaN), so a bad one assigned to `detector.cellSize`
+        // throws rather than indexing nothing or looping forever
         if (g.cellSize !== cellSize) {
+            if (!Detector._isCellSize(cellSize)) {
+                throw Detector._cellSizeError(cellSize);
+            }
             g.cellSize = cellSize;
             g.built = false;
         }
@@ -7281,115 +9048,80 @@ var Collision = __webpack_require__(8);
         // This walk touches every body in the world, and on a dense static page
         // (thousands of intact tiles) it is memory-bound and one of the largest
         // single costs in the step, while its ANSWER almost never changes: the
-        // mover set only moves when the body set changes (add / remove, which
-        // hands the detector a NEW array via `Detector.setBodies`) or when some
-        // body's moving-vs-resting role flips (`Body.setStatic`,
-        // `Sleeping.set`, `Detector.setGridDynamic`, each of which bumps the
-        // epoch). So cache the result and rebuild only on those signals.
+        // mover set only moves when the body set changes (add / remove, each of
+        // which bumps Common._bodySetEpoch) or when some body's
+        // moving-vs-resting role flips (`Body.setStatic`, `Sleeping.set`, and
+        // a setter promoting a moved indexed resting body, each of which bumps
+        // the static epoch). So cache the result and rebuild only on those
+        // signals.
         //
-        // The body-set signal is the identity and length of `detector.bodies`
-        // rather than a flag set by `setBodies`, so a caller that assigns the
-        // array directly (rather than through the setter) is still correct:
-        // the cached movers list holds INDICES into it, and a stale index can
-        // read past the end of a shrunken array.
+        // And when it has to be rebuilt, the change is usually a handful of
+        // bodies in a world of thousands, which is where the body journal comes
+        // in (see Common._journalTouch): for a flat world stepped by an engine,
+        // the rebuild classifies just the bodies the journal records
+        // (`_classifyFromJournal`), and the full walk below runs only when the
+        // journal cannot describe the change.
+        //
+        // The body-set signal is that epoch AND the identity and length of
+        // `detector.bodies`, rather than a flag set by `setBodies`. The epoch
+        // is what sees a change to `world.bodies` in place (the array
+        // `Engine.update` hands over for a flat world, whose identity never
+        // changes), including one made between updates and read by a direct
+        // call here; the identity and length keep a caller that assigns the
+        // array directly correct. The cached movers list describes the array,
+        // so a stale one keeps a body that left it or misses one that joined.
         var movers = g.movers,
             staticDirty = !g.built,
             staticCount = g.staticCount,
-            classifyEpoch = Common._bodyStaticEpoch;
+            classifyEpoch = Common._bodyStaticEpoch,
+            classifySetEpoch = Common._bodySetEpoch;
 
-        if (g.classifyBodies !== bodies || g.classifyLength !== n || g.classifyEpoch !== classifyEpoch) {
+        if (g.classifyBodies !== bodies || g.classifyLength !== n || g.classifyEpoch !== classifyEpoch
+            || g.classifySetEpoch !== classifySetEpoch) {
+            // whether this is the array the last classification read. A flat
+            // world keeps its array through every add and remove made between
+            // updates; a new one is a copy a listener's change made during an
+            // update (which the journal recorded), or an array a caller put in
+            // the world's place without a signal (which the journal cannot
+            // have seen, and which keeps its length if it swapped a body). The
+            // two look alike from here, so a new array is walked: one walk
+            // after a listener's change, none in a world changed between updates
+            var sameArray = g.classifyBodies === bodies;
             g.classifyBodies = bodies;
             g.classifyLength = n;
             g.classifyEpoch = classifyEpoch;
-            // `movers` is filled BY INDEX and trimmed once below, rather than
-            // cleared with `movers.length = 0` and re-pushed. Clearing to zero
-            // drops the backing store, so every rebuild regrows it from empty
-            // and allocates; writing in place reuses it. This is the idiom the
-            // engine's own mover classification already uses (`Engine.update`),
-            // and on a page being destroyed this walk rebuilds EVERY step
-            var moverCount = 0;
-            staticCount = 0;
+            g.classifySetEpoch = classifySetEpoch;
 
-            // this walk is also where the static index learns what changed, so
-            // it stamps every body it sees. A body still in the index whose
-            // stamp is stale on the next pass has LEFT the world, which is the
-            // one kind of change no per-body flag can report
-            var walkStamp = ++g.walkStamp,
-                pendingAdd = g.pendingAdd;
-            pendingAdd.length = 0;
+            // the world whose body array this is, when `Engine.update` handed
+            // it over as the world's own (see Detector.setBodies). Only then can
+            // the world's body journal say what changed in it, and the
+            // classification reads that instead of walking every body
+            // (a detector made as a plain object rather than by
+            // Detector.create has no `_world` at all, and is used on its own)
+            var world = detector._world === undefined ? null : detector._world,
+                liveWorld = world !== null && world.bodies === bodies ? world : null;
 
-            for (i = 0; i < n; i++) {
-                var body = bodies[i],
-                    // a body tagged `_gridDynamic` (e.g. an inner-scroll surface
-                    // that is static but moves each tick) is treated as a mover so
-                    // it is re-bucketed every step and never goes stale in the
-                    // static index
-                    isStaticNow = (body.isStatic || body.isSleeping) && body._gridDynamic !== true;
-
-                body._sWalk = walkStamp;
-                body._sWorldIndex = i;
-
-                // removed from the world and added back before this walk ran,
-                // so it is still indexed but may now sit at a different place in
-                // the body array. Drop it from the index and let the pass below
-                // re-insert it at its new position, or bucket order would no
-                // longer match the order a full rebuild produces
-                if (body._sDeparted) {
-                    body._sDeparted = false;
-                    // out of the world it was in no mover index, so the
-                    // per-cell invalidation sweep could not reach it
-                    body._scEpoch = -1;
-                    if (body._sIndexed) {
-                        Detector._staticIndexRemove(g, body);
-                        staticDirty = true;
-                    }
-                }
-
-                if (body._sPrev !== isStaticNow) {
-                    body._sPrev = isStaticNow;
-                    // same reason: while it was static it was not a mover, so
-                    // any cell that changed under it went unreported to it
-                    body._scEpoch = -1;
+            // the journal is read only while it describes every change since
+            // this index's last full walk: started by that walk, still live,
+            // over the same array, and accounting for the array's length (a
+            // caller that edits the array without signalling changes that first)
+            if (liveWorld !== null && sameArray && g.built && liveWorld._journalLive === true
+                && g.journalWorld === liveWorld && g.journalGen === liveWorld._memberGen
+                && liveWorld._journalLength === n && liveWorld._journalForeignWalks === Common._foreignWalks
+                && movers.length <= n * Detector._journalMoverShare) {
+                Detector._classifyFromJournal(g, liveWorld, n);
+                g.journalUsed = true;
+                staticCount = g.staticCount;
+                if (g.classifyDirty) {
                     staticDirty = true;
                 }
-
-                if (isStaticNow) {
-                    staticCount++;
-                    if (!body._sIndexed) {
-                        pendingAdd.push(body);
-                        staticDirty = true;
-                    }
-                } else {
-                    movers[moverCount++] = i;
-                    if (body._sIndexed) {
-                        // released into a mover: unindex it here, so the apply
-                        // pass below never has to walk the membership list
-                        // looking for it
-                        Detector._staticIndexRemove(g, body);
-                        staticDirty = true;
-                    }
+            } else {
+                Detector._classifyWalk(g, bodies, n, world, liveWorld);
+                staticCount = g.staticCount;
+                if (g.classifyDirty) {
+                    staticDirty = true;
                 }
             }
-
-            // the trim is NOT optional. `movers` holds INDICES into `bodies`,
-            // and the ONE read of `movers.length` below (snapshotted into
-            // `moversLength`) is what bounds every consumer of it, so a slot
-            // left over from a longer previous list is read as a live mover and
-            // indexes past the end of a shrunken body array. Held by
-            // Detector.spec's shrinking-mover-set test, which is the only gate
-            // that can see it: every other one either builds a fresh detector
-            // per scene or only ever shrinks the STATIC set.
-            //
-            // A strictly safer shape exists, and is what the other `.length = 0`
-            // sites in this file should use if they are ever converted: keep a
-            // `g.moverCount` beside the existing `g.staticCount` and bound the
-            // consumers on that, so no trim is needed and the stale slot cannot
-            // be reached at all
-            if (movers.length !== moverCount) {
-                movers.length = moverCount;
-            }
-
-            g.staticCount = staticCount;
 
             // A change in static count means a static body was added to or
             // removed from the world (windowing add/remove, etc.). A removal is
@@ -7494,8 +9226,7 @@ var Collision = __webpack_require__(8);
             spanBase;
 
         for (mIns = 0; mIns < moversLength; mIns++) {
-            var di = movers[mIns],
-                dbody = bodies[di],
+            var dbody = movers[mIns],
                 dBounds = dbody.bounds,
                 dMinX = dBounds.min.x,
                 dMaxX = dBounds.max.x,
@@ -7514,7 +9245,6 @@ var Collision = __webpack_require__(8);
             mStamp[mIns] = -1;
 
             if ((dcx1 - dcx0 + 1) * (dcy1 - dcy0 + 1) > maxCells) {
-                dbody._ovD = true;
                 mOver[mIns] = 1;
                 dOver.push(mIns);
                 // an unwalkable span, so the insert pass skips this mover
@@ -7523,7 +9253,6 @@ var Collision = __webpack_require__(8);
                 continue;
             }
 
-            dbody._ovD = false;
             mOver[mIns] = 0;
             dSpan[spanBase] = dcx0;
             dSpan[spanBase + 1] = dcx1;
@@ -7610,8 +9339,14 @@ var Collision = __webpack_require__(8);
         // entries all fail the key test, which is the right answer (no mover
         // covers it). Typical cost is a few dozen cells against the thousands of
         // list rebuilds the old global epoch bump forced.
+        //
+        // `changedCells` is filled BY INDEX and bounded by `g.changedCount`,
+        // never by its length, so a step's reports are dropped by zeroing the
+        // count: no length store (a StoreIC call in TurboFan) and no backing
+        // store dropped and regrown every step. Slots past the count are stale
+        // cells from a longer earlier step and nothing reads them
         var changedCells = g.changedCells,
-            changedLength = changedCells.length;
+            changedLength = g.changedCount;
 
         if (changedLength > 0) {
             if (dEntryCount > 0) {
@@ -7625,12 +9360,12 @@ var Collision = __webpack_require__(8);
                         if (dKeyArr[dce] !== dcKey) {
                             continue;
                         }
-                        bodies[movers[dItem[dce]]]._scEpoch = -1;
+                        movers[dItem[dce]]._scEpoch = -1;
                     }
                 }
             }
 
-            changedCells.length = 0;
+            g.changedCount = 0;
         }
 
         // 4) candidate generation: each mover is an outer body; pair it with
@@ -7649,7 +9384,7 @@ var Collision = __webpack_require__(8);
             sFlat.length = 0;
             for (i = 0; i < n; i++) {
                 var flatBody = bodies[i];
-                if (flatBody._sIndexed && flatBody._sBuckets.length > 0) {
+                if (flatBody._sIndexed && flatBody._sGrid === g && flatBody._sBuckets.length > 0) {
                     sFlat.push(flatBody);
                 }
             }
@@ -7659,14 +9394,14 @@ var Collision = __webpack_require__(8);
         var sFlatLength = sFlat.length;
         for (var mGen = 0; mGen < moversLength; mGen++) {
             var mBoundsBase = mGen * 4,
-                m = bodies[movers[mGen]],
+                m = movers[mGen],
                 mMinX = mBounds[mBoundsBase], mMaxX = mBounds[mBoundsBase + 1],
                 mMinY = mBounds[mBoundsBase + 2], mMaxY = mBounds[mBoundsBase + 3],
                 mFilter = m.collisionFilter,
-                // a tagged moving-static surface is a mover here but must still
-                // not generate static-static pairs (the sweep skips those)
+                // a moved static promoted to a mover must still not generate
+                // static-static pairs (the sweep skips those)
                 mStatic = m.isStatic || m.isSleeping,
-                localStamp = ++g.stamp,
+                localStamp = ++gridStamp,
                 mIsOver = mOver[mGen] === 1;
 
             // Oversized mover: its bounds span more than maxCells cells, so it
@@ -7674,11 +9409,11 @@ var Collision = __webpack_require__(8);
             // span here is unbounded: a runaway-velocity body can span thousands
             // of cells, and an Infinity bound makes `mcx1`/`mcy1` Infinity, so
             // `for (cx = ...; cx <= Infinity; cx++)` would never terminate (the
-            // hang this guard fixes). Mirror _collisionsGrid: scan the flat
+            // hang this guard fixes). Scan the flat
             // static list for normal statics it overlaps, a bounded O(statics).
             // Normal movers find THIS body via their own oversized pass (it is
             // in dOver); oversized statics/movers are handled by the sOver/dOver
-            // passes below. Skipped for a static (tagged moving) mover, since
+            // passes below. Skipped for a static (promoted, moving) mover, since
             // static-static never resolves.
             if (mIsOver) {
                 // not in the mover index, so the sweep above cannot reach it;
@@ -7731,7 +9466,13 @@ var Collision = __webpack_require__(8);
                     if (scList === null) {
                         scList = m._scList = [];
                     }
-                    scList.length = 0;
+                    // popped, not `scList.length = 0`: TurboFan compiles a length
+                    // store to a StoreIC call, and a store to zero also drops the
+                    // backing store the pushes below then regrow. The inlined pop
+                    // loop has neither. 291 of these per storm step
+                    while (scList.length !== 0) {
+                        scList.pop();
+                    }
                     if (m._scBounds === null) {
                         m._scBounds = new Float64Array(32);
                     }
@@ -7764,7 +9505,7 @@ var Collision = __webpack_require__(8);
 
                         // collect static candidates on a cache miss (tested
                         // from the list after the walk; skipped when the outer
-                        // body is itself static, as a tagged moving surface vs
+                        // body is itself static, as a promoted moving static vs
                         // the static page is static-static and never resolves).
                         // The cell hash is only needed here, so a mover holding
                         // its cached list pays no hashing at all
@@ -7818,7 +9559,7 @@ var Collision = __webpack_require__(8);
                                 || mMaxY < mBounds[dBoundsBase + 2] || mMinY > mBounds[dBoundsBase + 3]) {
                                 continue;
                             }
-                            var dBody = bodies[movers[dj]];
+                            var dBody = movers[dj];
                             if (mStatic && (dBody.isStatic || dBody.isSleeping)) {
                                 continue;
                             }
@@ -7832,8 +9573,8 @@ var Collision = __webpack_require__(8);
 
                 // mover vs its static candidates (cached or just collected).
                 // Their bounds were captured with the list: a body in the static
-                // index does not move (one that does must be tagged with
-                // Detector.setGridDynamic, which makes it a mover instead), so
+                // index does not move (a setter that moves one promotes it to
+                // a mover instead, see Body._promoteIfIndexed), so
                 // the test runs off contiguous memory and only a candidate that
                 // overlaps is ever dereferenced
                 if (!mStatic) {
@@ -7887,7 +9628,7 @@ var Collision = __webpack_require__(8);
                     || mMaxY < mBounds[doBoundsBase + 2] || mMinY > mBounds[doBoundsBase + 3]) {
                     continue;
                 }
-                var doBody = bodies[movers[doOrdinal]];
+                var doBody = movers[doOrdinal];
                 if (mStatic && (doBody.isStatic || doBody.isSleeping)) {
                     continue;
                 }
@@ -7960,6 +9701,24 @@ var Collision = __webpack_require__(8);
      * @property pairs
      * @type {pairs|null}
      * @default null
+     */
+
+    /**
+     * The broadphase `Detector.collisions` runs: `'sweep'` (upstream's sort and
+     * sweep) or `'grid'` (a static index, for worlds of mostly static bodies).
+     * Anything else throws. It may be changed between updates.
+     * @property broadphase
+     * @type string
+     * @default 'sweep'
+     */
+
+    /**
+     * The grid broadphase's cell size in pixels: a finite number above `0`,
+     * tuned to roughly the typical static body's size. It may be changed
+     * between updates, which rebuilds the grid's static index once.
+     * @property cellSize
+     * @type number
+     * @default 32
      */
 
 })();
@@ -8607,11 +10366,24 @@ var Body = __webpack_require__(4);
     Engine.create = function(options) {
         options = options || {};
 
+        // the broadphase and its cell size are the DETECTOR's (see
+        // Detector.create). An engine option named `broadphase` is overwritten
+        // by the back-compatibility `engine.broadphase` below, and one named
+        // `cellSize` is read by nothing, so either would be silently ignored.
+        // The suggested code is a literal, never the value given: that may be
+        // the name of no broadphase at all
+        if (typeof options.broadphase === 'string' || options.cellSize !== undefined) {
+            throw new Error('Matter.Engine: the broadphase and cellSize are set on the detector, not the engine '
+                + '(got broadphase ' + String(options.broadphase) + ', cellSize ' + String(options.cellSize) + '), e.g. '
+                + "Engine.create({ detector: Detector.create({ broadphase: 'grid', cellSize: 32 }) })");
+        }
+
         var defaults = {
             positionIterations: 6,
             velocityIterations: 4,
             constraintIterations: 2,
             enableSleeping: false,
+            enableSolvedVelocityAndBounds: true,
             events: [],
             plugin: {},
             gravity: {
@@ -8641,8 +10413,12 @@ var Body = __webpack_require__(4);
         engine._moverSource = null;
         engine._moverSourceLength = -1;
         engine._moverEpoch = -1;
+        engine._moverSetEpoch = -1;
 
-        // for temporary back compatibility only
+        // for temporary back compatibility only: upstream's stubs for the
+        // `Matter.Grid` module it deleted. They are unrelated to the grid
+        // broadphase, which is `engine.detector.broadphase === 'grid'`, and
+        // nothing reads them
         engine.grid = { buckets: [] };
         engine.world.gravity = engine.gravity;
         engine.broadphase = engine.grid;
@@ -8655,6 +10431,12 @@ var Body = __webpack_require__(4);
      * Moves the simulation forward in time by `delta` milliseconds.
      * Triggers `beforeUpdate`, `beforeSolve` and `afterUpdate` events.
      * Triggers `collisionStart`, `collisionActive` and `collisionEnd` events.
+     *
+     * `engine.pairs.collisionStart` is filled on every update. `engine.pairs.collisionActive`
+     * and `engine.pairs.collisionEnd` are filled only while their event has a listener
+     * when the update reaches collision detection, and are otherwise left empty. So a
+     * `collisionActive` or `collisionEnd` listener added during an update (from a
+     * `beforeSolve` or `collisionStart` listener, say) is first called on the next update.
      * @method update
      * @param {engine} engine
      * @param {number} [delta=16.666]
@@ -8668,6 +10450,12 @@ var Body = __webpack_require__(4);
             timing = engine.timing,
             timestamp = timing.timestamp,
             i;
+
+        // a detector configured with no broadphase, or a grid cell size it
+        // cannot use, throws here, before this update changes anything, rather
+        // than from the broadphase half way through it (see
+        // Detector._assertConfig)
+        Detector._assertConfig(detector);
 
         // warn if high delta
         if (delta > Engine._deltaMax) {
@@ -8683,17 +10471,38 @@ var Body = __webpack_require__(4);
         timing.timestamp += delta;
         timing.lastDelta = delta;
 
-        // create an event object
-        var event = {
-            timestamp: timing.timestamp,
-            delta: delta
-        };
+        // the timestamp every per-update event reports, fixed here as the
+        // event object used to be, so a listener that moves the clock does
+        // not change what a later event of this update reads
+        var eventTimestamp = timing.timestamp;
 
-        Events.trigger(engine, 'beforeUpdate', event);
+        // each per-update event is triggered, and its payload built, only
+        // when it has a listener: Events.trigger would no-op without one, but
+        // only after the payload was allocated. Each listener receives its
+        // own copy of the payload, so building one per event is equivalent
+        // to sharing one
+        if (Engine._hasListener(engine, 'beforeUpdate')) {
+            Events.trigger(engine, 'beforeUpdate', { timestamp: eventTimestamp, delta: delta });
+        }
 
-        // get all bodies and all constraints in the world
-        var allBodies = Composite.allBodies(world),
+        // get all bodies and all constraints in the world. A world with no
+        // child composites is its own body list, so it is used as it is
+        // rather than through `Composite.allBodies`, which builds a fresh copy
+        // after every membership change (every update, on a page being
+        // destroyed). The world is marked as lending it until the last read
+        // below, so a listener that adds or removes a body meanwhile changes a
+        // copy and this update keeps the membership it started with (see
+        // Composite._ownBodies). The detector keeps the array between updates;
+        // a change then is made in place and signalled by
+        // `Composite.setModified`, which is why the classifications key on
+        // Common._bodySetEpoch as well as on the array
+        var lendsBodies = world.composites.length === 0,
+            allBodies = lendsBodies ? world.bodies : Composite.allBodies(world),
             allConstraints = Composite.allConstraints(world);
+
+        if (lendsBodies) {
+            world._bodiesLent = true;
+        }
 
         // if the world has changed
         if (world.isModified) {
@@ -8703,6 +10512,11 @@ var Body = __webpack_require__(4);
             // reset all composite modified flags
             Composite.setModified(world, false, false, true);
         }
+
+        // a flat world's own array: its body journal describes changes to it,
+        // which the grid broadphase reads instead of walking every body
+        // (see Common._journalTouch)
+        detector._world = lendsBodies ? world : null;
 
         // update sleeping if enabled
         if (engine.enableSleeping)
@@ -8721,42 +10535,67 @@ var Body = __webpack_require__(4);
         // The walk itself touches every body in the world, so on a dense static
         // page it is memory-bound and one of the largest single costs in the
         // step, while its answer almost never changes. Rebuild it only when it
-        // can have changed: a different `allBodies` array (Composite nulls its
-        // cache and rebuilds the array on any add / remove) or a bumped static
+        // can have changed: a bumped body-set epoch (any membership change, see
+        // Common._bodySetEpoch), a different `allBodies` array or length (a
+        // caller that swaps the array without signalling), or a bumped static
         // epoch (`Body.setStatic` / `Sleeping.set`; see Common._bodyStaticEpoch).
         var moverBodies = engine._moverBodies || (engine._moverBodies = []),
             staticEpoch = Common._bodyStaticEpoch,
+            setEpoch = Common._bodySetEpoch,
             allBodiesLength = allBodies.length;
 
         if (engine._moverSource !== allBodies
             || engine._moverSourceLength !== allBodiesLength
-            || engine._moverEpoch !== staticEpoch) {
+            || engine._moverEpoch !== staticEpoch
+            || engine._moverSetEpoch !== setEpoch) {
             engine._moverSource = allBodies;
             engine._moverSourceLength = allBodiesLength;
             engine._moverEpoch = staticEpoch;
+            engine._moverSetEpoch = setEpoch;
 
-            var moverCount = 0;
+            // for a flat world the grid classification and the body
+            // journal usually say what changed, which spares the walk (see
+            // Detector._moversFromJournal)
+            if (!(lendsBodies && Detector._moversFromJournal(detector, world, moverBodies))) {
+                var moverCount = 0;
 
-            for (i = 0; i < allBodiesLength; i++) {
-                var classifyBody = allBodies[i];
-                if (!(classifyBody.isStatic || classifyBody.isSleeping)) {
-                    moverBodies[moverCount++] = classifyBody;
+                for (i = 0; i < allBodiesLength; i++) {
+                    var classifyBody = allBodies[i];
+                    if (!(classifyBody.isStatic || classifyBody.isSleeping)) {
+                        moverBodies[moverCount++] = classifyBody;
+                    }
                 }
-            }
-            if (moverBodies.length !== moverCount) {
-                moverBodies.length = moverCount;
+                if (moverBodies.length !== moverCount) {
+                    moverBodies.length = moverCount;
+                }
             }
         }
 
         // apply gravity to all moving bodies
         Engine._bodiesApplyGravity(moverBodies, engine.gravity);
 
+        // whether this update ends with the moving bodies' velocity
+        // properties and bounds up to date with the solve (see the option)
+        var keepSolved = engine.enableSolvedVelocityAndBounds !== false;
+
         // update all body position and rotation by integration
         if (delta > 0) {
             Engine._bodiesUpdate(moverBodies, delta);
+        } else if (!keepSolved) {
+            // nothing is integrated, so the detector and the solve below would
+            // read what the last update left. Bring deferred bounds up to date
+            // first, padded by the velocity they were deferred with, then
+            // recompute velocity from the positions exactly as the skipped
+            // end-of-update pass would have
+            for (i = 0; i < moverBodies.length; i++) {
+                Body._updateStaleBounds(moverBodies[i]);
+            }
+            Engine._bodiesUpdateVelocities(moverBodies);
         }
 
-        Events.trigger(engine, 'beforeSolve', event);
+        if (Engine._hasListener(engine, 'beforeSolve')) {
+            Events.trigger(engine, 'beforeSolve', { timestamp: eventTimestamp, delta: delta });
+        }
 
         // with no constraints in the world every body's constraintImpulse is
         // zero, so the pre/post passes (full-body scans) and the solve loop
@@ -8778,8 +10617,12 @@ var Body = __webpack_require__(4);
         // find all collisions
         var collisions = Detector.collisions(detector);
 
-        // update collision pairs
-        Pairs.update(pairs, collisions, timestamp);
+        // update collision pairs. The active and ended lists are filled only
+        // for a listener of their event: the active list takes one entry per
+        // touching pair per update, and nothing in the engine reads either
+        Pairs.update(pairs, collisions, timestamp,
+            Engine._hasListener(engine, 'collisionActive'),
+            Engine._hasListener(engine, 'collisionEnd'));
 
         // wake up bodies involved in collisions
         if (engine.enableSleeping)
@@ -8810,7 +10653,7 @@ var Body = __webpack_require__(4);
         for (i = 0; i < engine.positionIterations; i++) {
             Resolver.solvePosition(pairs.list, delta, positionDamping, pairs);
         }
-        Resolver.postSolvePosition(allBodies, pairs);
+        Resolver.postSolvePosition(allBodies, pairs, !keepSolved);
 
         // update all constraints (second pass)
         if (hasConstraints) {
@@ -8829,8 +10672,12 @@ var Body = __webpack_require__(4);
         }
         Resolver.postSolveVelocity(pairs);
 
-        // update body speed and velocity properties
-        Engine._bodiesUpdateVelocities(moverBodies);
+        // update body speed and velocity properties. Nothing in the engine
+        // reads them before the next integration overwrites velocity and
+        // angular velocity, so an engine that opted out skips the pass
+        if (keepSolved) {
+            Engine._bodiesUpdateVelocities(moverBodies);
+        }
 
         // trigger collision events, gated the same way as collisionStart
         if (pairs.collisionActive.length > 0 && engineEvents && engineEvents.collisionActive && engineEvents.collisionActive.length > 0) {
@@ -8861,7 +10708,14 @@ var Body = __webpack_require__(4);
         // value there would hold that body awake.
         Engine._bodiesClearForces(engine.enableSleeping ? allBodies : moverBodies);
 
-        Events.trigger(engine, 'afterUpdate', event);
+        // the last read of `allBodies`: from here a change is made in place
+        if (lendsBodies) {
+            world._bodiesLent = false;
+        }
+
+        if (Engine._hasListener(engine, 'afterUpdate')) {
+            Events.trigger(engine, 'afterUpdate', { timestamp: eventTimestamp, delta: delta });
+        }
 
         // log the time elapsed computing this update
         engine.timing.lastElapsed = Common.now() - startTime;
@@ -8901,6 +10755,22 @@ var Body = __webpack_require__(4);
     Engine.clear = function(engine) {
         Pairs.clear(engine.pairs);
         Detector.clear(engine.detector);
+    };
+
+    /**
+     * Whether `name` has at least one listener on `engine`, read at the call
+     * so a listener added or removed earlier in the same update is seen.
+     * @method _hasListener
+     * @private
+     * @param {engine} engine
+     * @param {string} name
+     * @return {boolean}
+     */
+    Engine._hasListener = function(engine, name) {
+        var events = engine.events,
+            callbacks = events && events[name];
+
+        return Boolean(callbacks) && callbacks.length > 0;
     };
 
     /**
@@ -9115,6 +10985,39 @@ var Body = __webpack_require__(4);
      */
 
     /**
+     * A flag that specifies whether each update ends by bringing every moving body's `velocity`,
+     * `angularVelocity`, `speed`, `angularSpeed` and `bounds` up to date with the collision solve.
+     *
+     * The engine itself never reads these on a moving body between updates (integration recomputes
+     * velocity from `position` and `positionPrev`, and bounds from the vertices), so a consumer that
+     * does not read them, or that derives what it needs from `position`, `positionPrev`, `angle`,
+     * `anglePrev` and `deltaTime` the way `Body.updateVelocities` does, can set this to `false` and
+     * skip that work.
+     *
+     * When `false`, between updates a moving body's `velocity` and `angularVelocity` hold the values
+     * integration set before the solve, its `speed` and `angularSpeed` are not kept, and its `bounds`
+     * can lag its last position correction. Bounds recomputed between updates (`Body.setPosition`,
+     * `Body.setAngle`) are padded by that velocity. `Body.setStatic` and `Sleeping.set` bring a body's
+     * bounds up to date from its current vertices and velocity before it stops moving, and an update
+     * that integrates nothing (a `delta` of `0`, e.g. `timing.timeScale` of `0`) brings the bounds and
+     * then the four velocity properties up to date before it detects and solves, so the collision
+     * detector never reads a stale box. Keep this `true` if anything reads those properties between
+     * updates, such as `Render`'s velocity and bounds views, `Query`, `MouseConstraint` or your own
+     * code.
+     *
+     * Positions are otherwise the same either way, with one known exception: with `enableSleeping`
+     * also on, a run that includes updates with a `delta` of `0` can drift from the same run with
+     * this `true` (by about 1e-4 px within a few hundred updates in a measured scene).
+     *
+     * A `collisionActive` or `collisionEnd` listener added part way through an update misses that
+     * update either way (see `Engine.update`).
+     *
+     * @property enableSolvedVelocityAndBounds
+     * @type boolean
+     * @default true
+     */
+
+    /**
      * An `Object` containing properties regarding the timing systems of the engine. 
      *
      * @property timing
@@ -9161,7 +11064,9 @@ var Body = __webpack_require__(4);
      */
 
     /**
-     * A `Matter.Detector` instance.
+     * A `Matter.Detector` instance. Pass one as `options.detector` to choose
+     * the broadphase: `Engine.create({ detector: Detector.create({ broadphase: 'grid' }) })`
+     * (see `Detector.create`).
      *
      * @property detector
      * @type detector
@@ -9169,7 +11074,8 @@ var Body = __webpack_require__(4);
      */
 
     /**
-     * A `Matter.Grid` instance.
+     * A `Matter.Grid` instance. An upstream back-compatibility stub, unrelated
+     * to the grid broadphase (`engine.detector.broadphase`); nothing reads it.
      *
      * @deprecated replaced by `engine.detector`
      * @property grid
@@ -9178,7 +11084,8 @@ var Body = __webpack_require__(4);
      */
 
     /**
-     * Replaced by and now alias for `engine.grid`.
+     * Replaced by and now alias for `engine.grid`. Not the detector's
+     * `broadphase`, which chooses the broadphase (see `Detector.create`).
      *
      * @deprecated replaced by `engine.detector`
      * @property broadphase
@@ -9259,6 +11166,7 @@ module.exports = Resolver;
 var Vertices = __webpack_require__(3);
 var Common = __webpack_require__(0);
 var Bounds = __webpack_require__(1);
+var Body = __webpack_require__(4);
 
 (function() {
 
@@ -9572,9 +11480,10 @@ var Bounds = __webpack_require__(1);
      * @private
      * @method _postSolveBody
      * @param {body} body
+     * @param {boolean} [deferBounds=false] Leave a moving body's bounds to its next integration
      * @return {boolean} `true` when the body still carries a non-zero impulse
      */
-    Resolver._postSolveBody = function(body) {
+    Resolver._postSolveBody = function(body, deferBounds) {
         var positionImpulse = body.positionImpulse,
             positionImpulseX = positionImpulse.x,
             positionImpulseY = positionImpulse.y,
@@ -9584,23 +11493,49 @@ var Bounds = __webpack_require__(1);
             return false;
         }
 
+        // a moving body's bounds are recomputed by its next integration before
+        // the detector reads them, so an engine that opted out defers them and
+        // marks the body (see Body._updateStaleBounds); a static or sleeping
+        // body is not integrated, so its bounds are always kept current here
+        var skipBounds = deferBounds === true && !(body.isStatic || body.isSleeping);
+
         // update body geometry
         for (var j = 0; j < body.parts.length; j++) {
             var part = body.parts[j];
             Vertices.translate(part.vertices, positionImpulse);
-            Bounds.update(part.bounds, part.vertices, velocity);
+            if (!skipBounds) {
+                Bounds.update(part.bounds, part.vertices, velocity);
+            }
             part.position.x += positionImpulseX;
             part.position.y += positionImpulseY;
+        }
+
+        if (skipBounds) {
+            body._boundsStale = true;
         }
 
         // move the body without changing velocity
         body.positionPrev.x += positionImpulseX;
         body.positionPrev.y += positionImpulseY;
 
+        // a static carrying an impulse (frozen while it held one) moves
+        // position and positionPrev together, which keeps the rest row for a
+        // finite impulse; a moving body reads one false flag here
+        if (body._restStatic === true) {
+            body._restStatic = Common._isRestingStatic(body);
+        }
+
         if (positionImpulseX * velocity.x + positionImpulseY * velocity.y < 0) {
             // reset cached impulse if the body has velocity along it
             positionImpulse.x = 0;
             positionImpulse.y = 0;
+
+            // a body frozen while it carried the impulse has stopped moving
+            // (see Body._driftEnded)
+            if (body._sMoved === true) {
+                Body._driftEnded(body);
+            }
+
             return false;
         }
 
@@ -9615,6 +11550,12 @@ var Bounds = __webpack_require__(1);
             && positionImpulse.y < 1e-9 && positionImpulse.y > -1e-9) {
             positionImpulse.x = 0;
             positionImpulse.y = 0;
+
+            // as above
+            if (body._sMoved === true) {
+                Body._driftEnded(body);
+            }
+
             return false;
         }
 
@@ -9630,11 +11571,19 @@ var Bounds = __webpack_require__(1);
      * instead of scanning every body in the world. A body whose pair ended but
      * whose warmed impulse is still decaying stays in a persistent carry list
      * until the impulse clears, preserving the classic path's decay behaviour.
+     *
+     * With `deferBounds` a moving body's bounds are not recomputed after its
+     * position correction: its next integration recomputes them before the
+     * detector reads them, and the body is marked so that anything which stops
+     * it being integrated first brings them up to date (see
+     * `Body._updateStaleBounds`). `Engine.update` passes it when
+     * `enableSolvedVelocityAndBounds` is `false`.
      * @method postSolvePosition
      * @param {body[]} bodies
      * @param {pairs} [container] The engine's pairs structure for scratch state
+     * @param {boolean} [deferBounds=false] Leave moving bodies' bounds to their next integration
      */
-    Resolver.postSolvePosition = function(bodies, container) {
+    Resolver.postSolvePosition = function(bodies, container, deferBounds) {
         var positionWarming = Resolver._positionWarming,
             verticesTranslate = Vertices.translate,
             boundsUpdate = Bounds.update,
@@ -9649,26 +11598,22 @@ var Bounds = __webpack_require__(1);
                 postSolveBody = Resolver._postSolveBody,
                 carryCount = 0;
 
-            // write the flat solver snapshot back to the pairs and bodies
-            // before the per-body impulse application below reads them. Only
-            // when the SoA path actually ran this step (dirty): a caller that
-            // ran the classic solvePosition instead has already mutated the
-            // real objects, and stale array values must not clobber that.
+            // write the flat solver snapshot's body impulses back before the
+            // per-body impulse application below reads them. Only when the
+            // SoA path actually ran this step (dirty): a caller that ran the
+            // classic solvePosition instead has already mutated the real
+            // objects, and stale array values must not clobber that.
+            //
+            // The pair separations are NOT written back to `pair.separation`:
+            // the velocity solve reads them from the snapshot (see
+            // preSolveVelocity), and `Pair.update` overwrites every active
+            // pair's separation with its depth before anything reads it again
             var soaBack = container._soa;
             if (soaBack && soaBack.dirty && soaBack.epoch === epoch) {
-                var backPairRefs = soaBack.pairRefs,
-                    backSep = soaBack.sep,
-                    backImpX = soaBack.impX,
+                var backImpX = soaBack.impX,
                     backImpY = soaBack.impY,
-                    backPairCount = soaBack.pairCount,
                     backBodyCount = soaBack.bodyCount,
                     back;
-
-                if (soaBack.sepValid) {
-                    for (back = 0; back < backPairCount; back++) {
-                        backPairRefs[back].separation = backSep[back];
-                    }
-                }
 
                 // a body the position solve could not move has an unchanged
                 // snapshot, so its write-back is a no-op by value; skip it
@@ -9698,7 +11643,7 @@ var Bounds = __webpack_require__(1);
                 // the zero-impulse early-return of _postSolveBody, inlined to
                 // skip the call (a removed body's impulse is zeroed in place)
                 var carryImpulse = carryBody.positionImpulse;
-                if ((carryImpulse.x !== 0 || carryImpulse.y !== 0) && postSolveBody(carryBody)) {
+                if ((carryImpulse.x !== 0 || carryImpulse.y !== 0) && postSolveBody(carryBody, deferBounds)) {
                     // in-place compaction: carryCount <= i always holds here
                     carry[carryCount++] = carryBody;
                 }
@@ -9711,7 +11656,7 @@ var Bounds = __webpack_require__(1);
             for (i = 0; i < solverBodiesLength; i++) {
                 var solverBody = solverBodies[i],
                     solverImpulse = solverBody.positionImpulse;
-                if ((solverImpulse.x !== 0 || solverImpulse.y !== 0) && postSolveBody(solverBody)) {
+                if ((solverImpulse.x !== 0 || solverImpulse.y !== 0) && postSolveBody(solverBody, deferBounds)) {
                     carry[carryCount++] = solverBody;
                 }
             }
@@ -9736,23 +11681,45 @@ var Bounds = __webpack_require__(1);
             body.totalContacts = 0;
 
             if (positionImpulseX !== 0 || positionImpulseY !== 0) {
+                // see _postSolveBody for the deferral
+                var skipBounds = deferBounds === true && !(body.isStatic || body.isSleeping);
+
                 // update body geometry
                 for (var j = 0; j < body.parts.length; j++) {
                     var part = body.parts[j];
                     verticesTranslate(part.vertices, positionImpulse);
-                    boundsUpdate(part.bounds, part.vertices, velocity);
+                    if (!skipBounds) {
+                        boundsUpdate(part.bounds, part.vertices, velocity);
+                    }
                     part.position.x += positionImpulseX;
                     part.position.y += positionImpulseY;
+                }
+
+                if (skipBounds) {
+                    body._boundsStale = true;
                 }
 
                 // move the body without changing velocity
                 body.positionPrev.x += positionImpulseX;
                 body.positionPrev.y += positionImpulseY;
 
+                // see _postSolveBody
+                if (body._restStatic === true) {
+                    body._restStatic = Common._isRestingStatic(body);
+                }
+
                 if (positionImpulseX * velocity.x + positionImpulseY * velocity.y < 0) {
                     // reset cached impulse if the body has velocity along it
                     positionImpulse.x = 0;
                     positionImpulse.y = 0;
+
+                    // see _postSolveBody. This path never clears a decayed
+                    // impulse, so a frozen body it moves only by decay stays a
+                    // mover for the grid: correct, if costlier, and
+                    // Engine.update never takes this path
+                    if (body._sMoved === true) {
+                        Body._driftEnded(body);
+                    }
                 } else {
                     // warm the next iteration
                     positionImpulse.x *= positionWarming;
@@ -9852,7 +11819,8 @@ var Bounds = __webpack_require__(1);
             // the position solve wrote every active pair's separation into its
             // own snapshot in this same slot order, so alias that too. Only a
             // step whose position solve never ran needs the per-pair copy off
-            // the pair objects, and that path takes a private array back.
+            // the pair objects (the depth `Pair.update` set this step), and
+            // that path takes a private array back.
             var vSeparation;
             if (aSepValid) {
                 vSeparation = soaV.separation = aSep;
@@ -9871,8 +11839,35 @@ var Bounds = __webpack_require__(1);
             // one is NOT aliased: positions moved during the position solve,
             // and a constraint pass can wake bodies between the phases.
             for (i = 0; i < bodyCount; i++) {
-                var vBody = solverBodies[i],
-                    vBodyPosition = vBody.position,
+                var vBody = solverBodies[i];
+
+                // a resting static (see Common._isRestingStatic), about half
+                // the slots on a dense page, gets the constant zero row instead
+                // of a read of the body. Its real row has a velocity of exactly
+                // +0 and an inverse inertia of exactly +0, and every read of
+                // the row is either gated by bCanMove (0 here) or multiplies an
+                // offset by that +0 angular velocity or inertia. The zero
+                // position makes those offsets absolute rather than relative,
+                // which changes nothing: a finite offset times +0 is a zero the
+                // +0 velocity absorbs, and a non-finite one is NaN in both.
+                // (The two part only where a coordinate is within a factor of
+                // two of the largest double, where the relative offset
+                // overflows.) bInvMass is read only under bCanMove, but is
+                // still written: skipping it could leave a hole in the array
+                if (vBody._restStatic === true) {
+                    bPosX[i] = 0;
+                    bPosY[i] = 0;
+                    bPosPrevX[i] = 0;
+                    bPosPrevY[i] = 0;
+                    bAngle[i] = 0;
+                    bAnglePrev[i] = 0;
+                    bInvMass[i] = 0;
+                    bInvInertia[i] = 0;
+                    bCanMove[i] = 0;
+                    continue;
+                }
+
+                var vBodyPosition = vBody.position,
                     vBodyPositionPrev = vBody.positionPrev;
                 bPosX[i] = vBodyPosition.x;
                 bPosY[i] = vBodyPosition.y;
@@ -9896,13 +11891,21 @@ var Bounds = __webpack_require__(1);
                     slotB = aIdxB[i],
                     vNormalX = aNx[i],
                     vNormalY = aNy[i],
-                    // exactly how Collision.collides builds the tangent, so
-                    // deriving it here matches reading collision.tangent
+                    // the tangent is the normal turned a quarter (an exact
+                    // negation and swap), which is how it is derived everywhere
                     vTangentX = -vNormalY,
                     vTangentY = vNormalX;
 
+                // `1 / vContactCount` without the divide, and without a branch.
+                // An active pair's count is the collision's support count,
+                // always 1 or 2 (Collision.collides), and 1.5 - 0.5 * count is
+                // exactly 1 and exactly 0.5 there, so this is the identical
+                // value. A count of 0 (a pair re-activated without an update)
+                // runs no contact below, so its share is never read. NOT
+                // `count === 1 ? 1 : 0.5`: the count is close to a coin flip per
+                // pair, and that branch measured slower than the divide
                 var vInverseMassTotal = vPair.inverseMass,
-                    vPairContactShare = 1 / vContactCount,
+                    vPairContactShare = 1.5 - 0.5 * vContactCount,
                     vInvInertiaA = bInvInertia[slotA],
                     vInvInertiaB = bInvInertia[slotB],
                     vPosAX = bPosX[slotA],
@@ -9994,7 +11997,9 @@ var Bounds = __webpack_require__(1);
                 bodyA = collision.parentA,
                 bodyB = collision.parentB,
                 normal = collision.normal,
-                tangent = collision.tangent;
+                // the normal turned a quarter: an exact negation and swap
+                tangentX = -normal.y,
+                tangentY = normal.x;
 
             // resolve each contact
             for (j = 0; j < contactCount; j++) {
@@ -10005,8 +12010,8 @@ var Bounds = __webpack_require__(1);
 
                 if (normalImpulse !== 0 || tangentImpulse !== 0) {
                     // total impulse from contact
-                    var impulseX = normal.x * normalImpulse + tangent.x * tangentImpulse,
-                        impulseY = normal.y * normalImpulse + tangent.y * tangentImpulse;
+                    var impulseX = normal.x * normalImpulse + tangentX * tangentImpulse,
+                        impulseY = normal.y * normalImpulse + tangentY * tangentImpulse;
 
                     // apply impulse from contact
                     if (!(bodyA.isStatic || bodyA.isSleeping)) {
@@ -10285,8 +12290,9 @@ var Bounds = __webpack_require__(1);
                 bodyB = collision.parentB,
                 normalX = collision.normal.x,
                 normalY = collision.normal.y,
-                tangentX = collision.tangent.x,
-                tangentY = collision.tangent.y,
+                // the normal turned a quarter: an exact negation and swap
+                tangentX = -normalY,
+                tangentY = normalX,
                 inverseMassTotal = pair.inverseMass,
                 friction = pair.friction * pair.frictionStatic * frictionNormalMultiplier,
                 contacts = pair.contacts,
@@ -10458,18 +12464,15 @@ var Common = __webpack_require__(0);
             // means the pair is live and its record is the value, so a probe
             // hit is the record reuse and a miss means a fresh record.
             //
-            // Keys: 0 is empty, -1 is a tombstone left by an ended pair
-            // (`Pairs._recordRemove`); a real pair id is always >= 1. Values
-            // are pre-filled with null so the backing store stays packed.
+            // Keys: 0 is empty; a real pair id is always >= 1. Linear probing
+            // with BACKWARD-SHIFT deletion (`Pairs._recordRemove`), so there
+            // are no tombstones: every non-zero key is a live pair. Values are
+            // pre-filled with null so the backing store stays packed.
             _recordKeys: new Float64Array(Pairs._initialSize),
             _recordValues: new Array(Pairs._initialSize).fill(null),
             _recordMask: Pairs._initialSize - 1,
-            // slots whose key is non-zero (live or tombstone); tombstone reuse
-            // keeps it flat, so it only grows on a write into an empty slot
-            _recordUsed: 0,
-            // live entries only; drives the grow-vs-rehash decision, because a
-            // churning world retires pairs constantly and the tombstones they
-            // leave must not read as fullness
+            // live entries, which with no tombstones is also every occupied
+            // slot; the table doubles when it would pass half load
             _recordLive: 0
         }, options);
     };
@@ -10482,14 +12485,13 @@ var Common = __webpack_require__(0);
      * @param {collision} collision
      */
     Pairs._recordInsert = function(pairs, pairId, collision) {
-        if ((pairs._recordUsed + 1) * 2 > pairs._recordMask + 1) {
+        if ((pairs._recordLive + 1) * 2 > pairs._recordMask + 1) {
             Pairs._recordGrow(pairs);
         }
 
         var keys = pairs._recordKeys,
             mask = pairs._recordMask,
             slot = Pair.hash(collision.bodyA.id, collision.bodyB.id) & mask,
-            firstTombstone = -1,
             key;
 
         while ((key = keys[slot]) !== 0) {
@@ -10498,17 +12500,7 @@ var Common = __webpack_require__(0);
                 return;
             }
 
-            if (key === -1 && firstTombstone === -1) {
-                firstTombstone = slot;
-            }
-
             slot = (slot + 1) & mask;
-        }
-
-        if (firstTombstone !== -1) {
-            slot = firstTombstone;
-        } else {
-            pairs._recordUsed += 1;
         }
 
         keys[slot] = pairId;
@@ -10517,8 +12509,12 @@ var Common = __webpack_require__(0);
     };
 
     /**
-     * Removes an ended pair's record from the record table, leaving a
-     * tombstone so later probe chains stay intact.
+     * Removes an ended pair's record from the record table by backward-shift
+     * deletion: every later entry of the same probe cluster that may legally
+     * sit in the vacated slot moves back into it, and the last slot vacated
+     * that way is emptied. No tombstone is left, so probe chains never walk
+     * over dead slots and the table never needs a same-size purge (which on a
+     * page being destroyed was a ~262 KB reallocation every ~53 steps).
      * @method _recordRemove
      * @param {pairs} pairs
      * @param {number} pairId
@@ -10526,14 +12522,37 @@ var Common = __webpack_require__(0);
      */
     Pairs._recordRemove = function(pairs, pairId, pair) {
         var keys = pairs._recordKeys,
+            values = pairs._recordValues,
             mask = pairs._recordMask,
             slot = Pair.hash(pair.bodyA.id, pair.bodyB.id) & mask,
             key;
 
         while ((key = keys[slot]) !== 0) {
             if (key === pairId) {
-                keys[slot] = -1;
-                pairs._recordValues[slot] = null;
+                var gap = slot,
+                    next = (slot + 1) & mask,
+                    nextKey;
+
+                while ((nextKey = keys[next]) !== 0) {
+                    var record = values[next],
+                        home = Pair.hash(record.bodyA.id, record.bodyB.id) & mask;
+
+                    // an entry may move back into the gap only if its home
+                    // slot is not cyclically inside (gap, next], i.e. it sits
+                    // at least as far from its home as the gap is from it.
+                    // Moving one whose home is after the gap would put it
+                    // before its home, where a probe can never reach it
+                    if (((next - home) & mask) >= ((next - gap) & mask)) {
+                        keys[gap] = nextKey;
+                        values[gap] = record;
+                        gap = next;
+                    }
+
+                    next = (next + 1) & mask;
+                }
+
+                keys[gap] = 0;
+                values[gap] = null;
                 pairs._recordLive -= 1;
                 return;
             }
@@ -10543,10 +12562,9 @@ var Common = __webpack_require__(0);
     };
 
     /**
-     * Rebuilds the record table, re-inserting live records and dropping
-     * tombstones. Keeps the size when tombstones are what filled it (the
-     * churn regime retires pairs every step) and doubles only when live
-     * entries genuinely need the room.
+     * Doubles the record table and re-inserts every entry. Only a table past
+     * half load of LIVE pairs reaches here, since deletion leaves no
+     * tombstones to purge.
      * @method _recordGrow
      * @param {pairs} pairs
      */
@@ -10554,7 +12572,7 @@ var Common = __webpack_require__(0);
         var oldKeys = pairs._recordKeys,
             oldValues = pairs._recordValues,
             oldSize = oldKeys.length,
-            size = (pairs._recordLive + 1) * 4 > oldSize ? oldSize * 2 : oldSize,
+            size = oldSize * 2,
             mask = size - 1,
             keys = new Float64Array(size),
             values = new Array(size).fill(null),
@@ -10563,7 +12581,7 @@ var Common = __webpack_require__(0);
         for (var i = 0; i < oldSize; i += 1) {
             var key = oldKeys[i];
 
-            if (key === 0 || key === -1) {
+            if (key === 0) {
                 continue;
             }
 
@@ -10582,18 +12600,27 @@ var Common = __webpack_require__(0);
         pairs._recordKeys = keys;
         pairs._recordValues = values;
         pairs._recordMask = mask;
-        pairs._recordUsed = used;
         pairs._recordLive = used;
     };
 
     /**
      * Updates pairs given a list of collisions.
+     *
+     * `pairs.collisionStart` is always filled. `pairs.collisionActive` and
+     * `pairs.collisionEnd` are filled unless `collectActive` / `collectEnd` is
+     * `false`, in which case the list is left empty (the engine passes `false`
+     * for an event with no listener; see `Engine.update`).
      * @method update
      * @param {object} pairs
      * @param {collision[]} collisions
      * @param {number} timestamp
+     * @param {boolean} [collectActive=true] Whether to fill `pairs.collisionActive`
+     * @param {boolean} [collectEnd=true] Whether to fill `pairs.collisionEnd`
      */
-    Pairs.update = function(pairs, collisions, timestamp) {
+    Pairs.update = function(pairs, collisions, timestamp, collectActive, collectEnd) {
+        collectActive = collectActive !== false;
+        collectEnd = collectEnd !== false;
+
         var pairUpdate = Pair.update,
             pairCreate = Pair.create,
             pairSetActive = Pair.setActive,
@@ -10617,7 +12644,7 @@ var Common = __webpack_require__(0);
 
             if (pair) {
                 // pair already exists (but may or may not be active)
-                if (pair.isActive) {
+                if (collectActive && pair.isActive) {
                     // pair exists and is active
                     collisionActive[collisionActiveIndex++] = pair;
                 }
@@ -10654,7 +12681,9 @@ var Common = __webpack_require__(0);
                     pairsList[pairsListIndex++] = pair;
                 } else {
                     // remove inactive pairs if either body awake
-                    collisionEnd[collisionEndIndex++] = pair;
+                    if (collectEnd) {
+                        collisionEnd[collisionEndIndex++] = pair;
+                    }
                     Pairs._recordRemove(pairs, pair.id, pair);
                     // the record can outlive the pair in solver scratch, so
                     // drop the back reference or the next `Pairs.update` would
@@ -10691,7 +12720,6 @@ var Common = __webpack_require__(0);
     Pairs.clear = function(pairs) {
         pairs._recordKeys.fill(0);
         pairs._recordValues.fill(null);
-        pairs._recordUsed = 0;
         pairs._recordLive = 0;
         pairs.list.length = 0;
         pairs.collisionStart.length = 0;
@@ -10789,7 +12817,7 @@ var Common = __webpack_require__(0);
      * @readOnly
      * @type {String}
      */
-    Matter.version =  true ? "0.20.0-perf18" : undefined;
+    Matter.version =  true ? "0.20.0-perf19" : undefined;
 
     /**
      * A list of plugin dependencies to be installed. These are normally set and installed through `Matter.use`.

@@ -18,7 +18,7 @@ So the fork is for scenes that are mostly static scenery: tile maps, level geome
 Install from a release tag (`v0.20.0-perfN`). The built bundle (`build/matter.js`) is committed, so there is no build step.
 
 ```bash
-npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-perf18.tar.gz
+npm install https://github.com/alexreardon/matter-js/archive/refs/tags/v0.20.0-perf19.tar.gz
 ```
 
 ## Usage
@@ -69,7 +69,7 @@ Takes every listed body out of the composite in ONE order-preserving pass. A `Co
 
 In both modes:
 
-- `Matter.version` reports the fork tag (`0.20.0-perf18`) rather than `0.20.0`, so a consumer can assert in CI that it resolved the release it pinned. Version RANGES are unaffected (`^0.20.0` and `~0.20.0` still match, since `Plugin.versionSatisfies` compares major/minor/patch and ignores the suffix); only a plugin pinning the exact string `matter-js@0.20.0` would stop matching.
+- `Matter.version` reports the fork tag (`0.20.0-perf19`) rather than `0.20.0`, so a consumer can assert in CI that it resolved the release it pinned. Version RANGES are unaffected (`^0.20.0` and `~0.20.0` still match, since `Plugin.versionSatisfies` compares major/minor/patch and ignores the suffix); only a plugin pinning the exact string `matter-js@0.20.0` would stop matching.
 - The broadphase is configured on the detector (`broadphase`, `cellSize`; see [the `grid` broadphase](#the-grid-broadphase-opt-in)). `Detector.collisions` throws on a detector whose `broadphase` is neither `'sweep'` nor `'grid'`, which includes one built by hand as a plain `{ bodies, pairs }` object: build it with `Detector.create`. `Engine.create` throws on a string `broadphase` option, which upstream overwrote with its back-compatibility `engine.broadphase` field, and on any `cellSize` option. `Engine.update` checks the detector's configuration before it changes anything, so an update that throws on it leaves the world as it was.
 - `Engine.create({ enableSolvedVelocityAndBounds: false })` is new (default `true`, which keeps upstream behaviour). With it `false`, between updates a moving body's `velocity` and `angularVelocity` hold the values integration set before the solve, its `speed` and `angularSpeed` are not kept, and its `bounds` can lag its last position correction. Bounds recomputed between updates (`Body.setPosition`, `Body.setAngle`) are padded by that velocity. `Body.setStatic` and `Sleeping.set` bring a body's bounds up to date before it stops moving, and an update with a `delta` of `0` brings the bounds and the four velocity fields up to date before it detects and solves, so the detector never reads a stale box. Derive velocity with `Body.updateVelocities`' expression if you need it. Positions are otherwise the same either way, with one known exception: with `enableSleeping` also on, a run that includes updates with a `delta` of `0` can drift from the same run with the option `true` (by about `1e-4` px within a few hundred updates in a measured scene). The option's docs in `src/core/Engine.js` say exactly what stays current.
 - `Composite.removeBodies(composite, bodies)` is new: it takes every listed body out of the composite in one order-preserving pass, doing to each exactly what `Composite.removeBody` does. A listed body that is not in the composite is left alone; a body in it twice is removed both times. It does not search child composites or trigger the `beforeRemove` / `afterRemove` events.
