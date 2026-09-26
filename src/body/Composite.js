@@ -459,12 +459,23 @@ var Body = require('./Body');
      * Prefer this to editing `composite.bodies` and calling
      * `Composite.setModified`: it records the removals in the body journal,
      * so a grid detector need not walk every body to find them.
+     *
+     * `bodies` may be `composite.bodies` itself, which empties the
+     * composite. An entry that is not a body throws a `TypeError` before
+     * anything is changed.
      * @method removeBodies
      * @param {composite} composite
      * @param {body[]} bodies
      * @return {composite} The original composite with the bodies removed
      */
     Composite.removeBodies = function(composite, bodies) {
+        // the list read by the passes below must not be the array they
+        // compact: `removeBodies(composite, composite.bodies)` would truncate
+        // it under the pass that restores what it marked
+        if (bodies === composite.bodies) {
+            bodies = bodies.slice(0);
+        }
+
         var bodiesLength = bodies.length,
             saved = Composite._removeSaved,
             i;
@@ -483,8 +494,17 @@ var Body = require('./Body');
             memberGen = composite._memberGen;
 
         for (i = 0; i < bodiesLength; i++) {
-            var listed = bodies[i],
-                walk = listed._sWalk;
+            var listed = bodies[i];
+
+            // not a body: undo the marks made so far before throwing, so a
+            // bad list leaves every body as it was (a mark left behind reads
+            // as 'listed' to every later call, which then removes the body)
+            if (listed === null || typeof listed !== 'object' || typeof listed._sWalk !== 'number') {
+                Composite._unmarkListed(bodies, i, saved);
+                throw new TypeError('Matter.Composite.removeBodies: bodies[' + i + '] is not a body');
+            }
+
+            var walk = listed._sWalk;
 
             if (walk <= -2) {
                 // listed twice: already marked
@@ -564,6 +584,29 @@ var Body = require('./Body');
 
     // scratch for Composite.removeBodies: the `_sWalk` each listed body held
     Composite._removeSaved = [];
+
+    /**
+     * Gives the first `count` bodies of a `Composite.removeBodies` list
+     * back the `_sWalk` it marked them over, for a call that stops before
+     * removing anything. A body listed twice holds its mark once and is given
+     * its value back by its first entry.
+     * @private
+     * @method _unmarkListed
+     * @param {body[]} bodies
+     * @param {number} count
+     * @param {number[]} saved
+     */
+    Composite._unmarkListed = function(bodies, count, saved) {
+        for (var i = 0; i < count; i++) {
+            var listed = bodies[i];
+
+            if (listed._sWalk === -2 || listed._sWalk === -3) {
+                listed._sWalk = saved[i];
+            }
+
+            saved[i] = 0;
+        }
+    };
 
     /**
      * Adds a constraint to the given composite.

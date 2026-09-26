@@ -590,6 +590,83 @@ describe('Composite.removeBodies', () => {
         expect(shared._sWalk).toBe(23);
     });
 
+    // the list WAS the array the pass compacts, so the pass that restores
+    // what it marked read a truncated list, threw, and left every body
+    // marked; each later call then took a marked body for a listed one
+    it('empties the composite when given its own body array, inside an update too, and leaves no mark', () => {
+        const engine = Engine.create({ detector: Detector.create({ broadphase: 'grid' }) });
+        const bodies = [];
+        for (let i = 0; i < 10; i++) {
+            bodies.push(Bodies.rectangle(i * 40, 100, 30, 30, { isStatic: true }));
+        }
+        Composite.add(engine.world, bodies);
+        Engine.update(engine, DELTA);
+
+        Composite.removeBodies(engine.world, engine.world.bodies);
+
+        expect(engine.world.bodies).toEqual([]);
+        for (const body of bodies) {
+            expect(body._sWalk).toBe(-1);
+            expect(body._sOwner).toBe(null);
+            expect(body._sDeparted).toBe(true);
+        }
+
+        // back in by hand (a direct push, signalled), then ONE removed: the
+        // other nine stay
+        for (const body of bodies) {
+            engine.world.bodies.push(body);
+        }
+        Composite.setModified(engine.world, true, true, false);
+        Composite.removeBodies(engine.world, [bodies[4]]);
+        expect(engine.world.bodies).toEqual(bodies.filter((body) => body !== bodies[4]));
+
+        // inside an update the world lends its array to the update
+        Engine.update(engine, DELTA);
+        let during = null;
+        Events.on(engine, 'beforeSolve', () => {
+            Composite.removeBodies(engine.world, engine.world.bodies);
+            during = engine.world.bodies.length;
+        });
+        Engine.update(engine, DELTA);
+        expect(during).toBe(0);
+        expect(engine.world.bodies).toEqual([]);
+        for (const body of bodies) {
+            // no mark (-2 to -4) left behind. These were pushed back by hand,
+            // so the world never owned them and each keeps its walk stamp
+            expect(body._sWalk).toBeGreaterThan(-2);
+            expect(body._sOwner).toBe(null);
+        }
+    });
+
+    it.each([['null', null], ['undefined', undefined], ['a constraint', { type: 'constraint' }]])('throws on %s in the list before changing anything', (name, bad) => {
+        const engine = Engine.create({ detector: Detector.create({ broadphase: 'grid' }) });
+        const bodies = [];
+        for (let i = 0; i < 10; i++) {
+            bodies.push(Bodies.rectangle(i * 40, 100, 30, 30, { isStatic: true }));
+        }
+        Composite.add(engine.world, bodies);
+        Engine.update(engine, DELTA);
+        const walks = bodies.map((body) => body._sWalk);
+        const array = engine.world.bodies;
+
+        // listed twice ahead of the bad entry, so the undo meets a body it
+        // marked once from two entries
+        expect(() => Composite.removeBodies(engine.world, [bodies[2], bodies[5], bodies[2], bad, bodies[7]])).toThrow(TypeError);
+
+        expect(engine.world.bodies).toBe(array);
+        expect(engine.world.bodies).toEqual(bodies);
+        expect(bodies.map((body) => body._sWalk)).toEqual(walks);
+        expect(bodies.every((body) => body._sOwner === engine.world && !body._sDeparted)).toBe(true);
+        expect(engine.world._journalLive).toBe(true);
+        if (bad !== null && bad !== undefined) {
+            expect('_sWalk' in bad).toBe(false);
+        }
+
+        // and the next call removes exactly what it lists
+        Composite.removeBodies(engine.world, [bodies[5]]);
+        expect(engine.world.bodies).toEqual(bodies.filter((body) => body !== bodies[5]));
+    });
+
     it('keeps the journal live, where a direct edit signalled by setModified switches it off', () => {
         const engine = Engine.create({ detector: Detector.create({ broadphase: 'grid' }) });
         const bodies = [];
