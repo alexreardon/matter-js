@@ -1069,7 +1069,17 @@ var Collision = require('./Collision');
      *
      * It can only when the journal describes every change since that
      * classification, which are the conditions under which the detector reads
-     * it itself.
+     * it itself, and when `world.bodies` is still the array that
+     * classification read. The journal describes the WORLD as it is now, and
+     * `Engine.update` steps the array it took at its start: a listener that
+     * adds or removes a body during the update (a `sleepStart` listener,
+     * say, which runs before this) gives the world a fresh array the update
+     * does not step, and a caller that replaces `world.bodies` without
+     * signalling changes the world under a journal that never saw it. Either
+     * leaves the world an array the last classification never read, and the
+     * update then walks. Outside those, the array keeps its identity (an add
+     * or a remove between updates edits it in place), so the test costs the
+     * common case nothing.
      * @private
      * @method _moversFromJournal
      * @param {detector} detector
@@ -1081,6 +1091,7 @@ var Collision = require('./Collision');
         var g = detector._sgrid;
 
         if (g === undefined || g === null || !g.built || g.journalWorld !== world
+            || g.classifyBodies !== world.bodies
             || world._journalLive !== true || g.journalGen !== world._memberGen
             || world._journalLength !== world.bodies.length
             || world._journalForeignWalks !== Common._foreignWalks) {
@@ -1546,6 +1557,15 @@ var Collision = require('./Collision');
 
         if (g.classifyBodies !== bodies || g.classifyLength !== n || g.classifyEpoch !== classifyEpoch
             || g.classifySetEpoch !== classifySetEpoch) {
+            // whether this is the array the last classification read. A flat
+            // world keeps its array through every add and remove made between
+            // updates; a new one is a copy a listener's change made during an
+            // update (which the journal recorded), or an array a caller put in
+            // the world's place without a signal (which the journal cannot
+            // have seen, and which keeps its length if it swapped a body). The
+            // two look alike from here, so a new array is walked: one walk
+            // after a listener's change, none in a world changed between updates
+            var sameArray = g.classifyBodies === bodies;
             g.classifyBodies = bodies;
             g.classifyLength = n;
             g.classifyEpoch = classifyEpoch;
@@ -1561,10 +1581,10 @@ var Collision = require('./Collision');
                 liveWorld = world !== null && world.bodies === bodies ? world : null;
 
             // the journal is read only while it describes every change since
-            // this index's last full walk: started by that walk, still live, and
-            // accounting for the array's length (a caller that edits the array
-            // without signalling changes that first)
-            if (liveWorld !== null && g.built && liveWorld._journalLive === true
+            // this index's last full walk: started by that walk, still live,
+            // over the same array, and accounting for the array's length (a
+            // caller that edits the array without signalling changes that first)
+            if (liveWorld !== null && sameArray && g.built && liveWorld._journalLive === true
                 && g.journalWorld === liveWorld && g.journalGen === liveWorld._memberGen
                 && liveWorld._journalLength === n && liveWorld._journalForeignWalks === Common._foreignWalks
                 && movers.length <= n * Detector._journalMoverShare) {

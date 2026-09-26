@@ -51,6 +51,9 @@ function armState(arm) {
     }
     buckets.sort();
     return {
+        // the engine's own mover list, which it can build from the journal
+        // too (Detector._moversFromJournal)
+        engineMovers: arm.engine._moverBodies.map(indexOf).join(','),
         movers: g.movers.map(indexOf).join(','),
         buckets: buckets.join('|'),
         sOver: g.sOver.map(indexOf).join(','),
@@ -323,6 +326,136 @@ describe('the grid body journal', () => {
         // a mass sleep or wake records more than a quarter of the world,
         // which switches the journal off for one full walk
         expect(journalReads).toBeGreaterThan(100);
+    });
+
+    // Sleeping.update runs inside the update, after world.bodies was lent to
+    // it and before the engine builds its mover list, so a sleep listener
+    // that adds or removes a body gives the world a fresh array the update
+    // does not step. The engine read its list from the journal regardless,
+    // which describes the WORLD: it integrated a body added mid-update that
+    // the update's own array does not hold, and skipped one it does hold
+    it.each([['adds a body'], ['removes an awake body']])('matches the full walk when a sleepStart listener %s', (name) => {
+        const adds = name === 'adds a body';
+        const moversFromJournal = Detector._moversFromJournal;
+        let fired = 0;
+        let engineLists = 0;
+        let companionsAt = -1;
+        Detector._moversFromJournal = function() {
+            const built = moversFromJournal.apply(this, arguments);
+            engineLists += built ? 1 : 0;
+            return built;
+        };
+        let result;
+        try {
+            result = runPair({
+            steps: 150,
+            sleeping: true,
+            setup(arms, add) {
+                setupPage(arms, add);
+                for (let k = 0; k < 6; k++) {
+                    add(() => Bodies.rectangle(80 + k * 110, 590, 20, 20));
+                }
+                // companions: awake, held up by a force each update
+                companionsAt = arms[0].bodies.length;
+                for (let k = 0; k < 6; k++) {
+                    add(() => Bodies.rectangle(100 + k * 110, 470, 16, 16));
+                }
+            },
+            listen(arms) {
+                for (const arm of arms) {
+                    const count = arm.bodies.length;
+                    for (let k = 0; k < 6; k++) {
+                        const sleeper = arm.bodies[count - 12 + k];
+                        const companion = arm.bodies[count - 6 + k];
+                        Events.on(sleeper, 'sleepStart', () => {
+                            if (arm === arms[0]) {
+                                fired++;
+                            }
+                            if (adds) {
+                                const body = Bodies.rectangle(60 + arm.bodies.length * 7 % 700, 560, 18, 18);
+                                arm.indexOf.set(body, arm.bodies.length);
+                                arm.bodies.push(body);
+                                Composite.add(arm.world, body);
+                            } else {
+                                Composite.remove(arm.world, companion);
+                            }
+                        });
+                    }
+                }
+            },
+            perStep(step, arms, random) {
+                // a release now and then, between updates, which the engine
+                // reads from the journal
+                const release = step % 3 === 0 ? pick(arms[0], random, (body) => body.isStatic && inWorld(arms[0], body)) : -1;
+                for (const arm of arms) {
+                    if (release !== -1) {
+                        Body.setStatic(arm.bodies[release], false);
+                    }
+                    // the companions, the last six bodies the setup added
+                    for (const companion of arm.bodies.slice(companionsAt, companionsAt + 6)) {
+                        if (inWorld(arm, companion)) {
+                            Body.applyForce(companion, companion.position, { x: 0, y: -0.001 * companion.mass });
+                        }
+                    }
+                }
+            }
+            });
+        } finally {
+            Detector._moversFromJournal = moversFromJournal;
+        }
+
+        expect(fired).toBeGreaterThan(2);
+        // the engine did build its list from the journal: the scene reaches
+        // the path it tests
+        expect(engineLists).toBeGreaterThan(10);
+        expect(result.journalReads).toBeGreaterThan(0);
+    });
+
+    // a caller that replaces world.bodies without signalling: same length,
+    // one static swapped for a new moving body. The journal never heard of
+    // the swap, so only the array identity says it is stale, for the
+    // engine's list and for the detector's classification alike. At step 20
+    // a signalled removal comes first, so the same update hands the detector
+    // the swapped array (the length matches, so the journal looked
+    // complete); at step 50 the swap comes alone, and the detector meets the
+    // new array only at the next signalled change, step 55
+    it('matches the full walk when world.bodies is replaced without a signal', () => {
+        const { journalReads } = runPair({
+            steps: 60,
+            setup: setupPage,
+            perStep(step, arms, random, add) {
+                if (step === 2) {
+                    add(() => Bodies.rectangle(300, 500, 20, 20));
+                }
+                if (step === 20 || step === 50) {
+                    for (const arm of arms) {
+                        if (step === 20) {
+                            Composite.removeBodies(arm.world, [arm.bodies[60]]);
+                        }
+                        const replacement = Bodies.rectangle(450 + step * 2, 500, 20, 20);
+                        arm.indexOf.set(replacement, arm.bodies.length);
+                        arm.bodies.push(replacement);
+                        const copy = arm.world.bodies.slice(0);
+                        copy[step === 20 ? 5 : 7] = replacement;
+                        arm.world.bodies = copy;
+                    }
+                }
+                if (step === 25) {
+                    // an epoch bump with no membership change
+                    for (const arm of arms) {
+                        Body.setStatic(arm.bodies[30], false);
+                    }
+                }
+                if (step === 35 || step === 55) {
+                    // a signalled change, which hands the detector the array
+                    for (const arm of arms) {
+                        Composite.removeBodies(arm.world, [arm.bodies[step]]);
+                    }
+                }
+            }
+        });
+
+        expect(journalReads).toBeGreaterThan(0);
     });
 
     it('walks instead of reading the journal above the mover share, and back, and still matches', () => {
