@@ -509,8 +509,12 @@ describe('Engine body list', () => {
     // `beforeSolve` and `collisionStart`, plus direct edits between updates.
     // `nested` adds an empty child composite, which sends the engine down the
     // `Composite.allBodies` copy path: the behaviour the flat path must match.
-    // The child is created in both runs, so both consume the same ids
-    function runListeners({ nested, owned = true }) {
+    // The child is created in both runs, so both consume the same ids.
+    // `addDuringUpdate` false leaves the listeners removal-only: the add in
+    // `beforeSolve` would otherwise copy the lent array before any removal
+    // meets it. `clearAt` has `beforeSolve` call `Composite.clear(world,
+    // false)` on that update
+    function runListeners({ nested, owned = true, addDuringUpdate = true, clearAt = -1 }) {
         Common._nextId = 0;
 
         const ownBodies = Composite._ownBodies;
@@ -546,10 +550,20 @@ describe('Engine body list', () => {
 
             let copies = 0;
             let lentSeen = 0;
+            let lentRemovals = 0;
+            let clearLent = false;
+            let step = 0;
 
             Events.on(engine, 'beforeSolve', () => {
                 if (world._bodiesLent) {
                     lentSeen++;
+                }
+                if (step === clearAt) {
+                    clearLent = world._bodiesLent;
+                    Composite.clear(world, false);
+                }
+                if (!addDuringUpdate) {
+                    return;
                 }
                 const before = world.bodies;
                 // lands overlapping the floor, so detecting it THIS update
@@ -565,12 +579,15 @@ describe('Engine body list', () => {
                 const pair = event.pairs[0];
                 const mover = pair && [pair.bodyA, pair.bodyB].find((body) => !body.isStatic && body !== hanging);
                 if (mover && world.bodies.includes(mover)) {
+                    if (world._bodiesLent) {
+                        lentRemovals++;
+                    }
                     Composite.remove(world, mover);
                 }
             });
 
             const hashes = [];
-            for (let step = 0; step < 200; step++) {
+            for (step = 0; step < 200; step++) {
                 // rain, and now and then a direct edit plus the signal
                 const drop = add(Bodies.rectangle(40 + rand() * 560, 100 + rand() * 100, 12 + rand() * 12, 12 + rand() * 12));
                 Body.setVelocity(drop, { x: (rand() - 0.5) * 3, y: rand() * 3 });
@@ -602,7 +619,7 @@ describe('Engine body list', () => {
                 hashes.push(hash);
             }
 
-            return { hashes, copies, lentSeen, engine, world };
+            return { hashes, copies, lentSeen, lentRemovals, clearLent, engine, world };
         } finally {
             Composite._ownBodies = ownBodies;
         }
@@ -618,6 +635,38 @@ describe('Engine body list', () => {
         expect(flat.copies).toBe(200);
         expect(nested.lentSeen).toBe(0);
         expect(flat.world._bodiesLent).toBe(false);
+    });
+
+    // no add during the update, so each removal meets the lent array itself
+    // (review-4): removeBodyAt and clear must copy it, and the lending must
+    // last until the update's last read
+    test('listeners that only remove see the membership the copy path sees', () => {
+        const flat = runListeners({ nested: false, addDuringUpdate: false });
+        const nested = runListeners({ nested: true, addDuringUpdate: false });
+
+        expect(flat.hashes).toEqual(nested.hashes);
+        expect(flat.copies).toBe(0);
+        expect(flat.lentRemovals).toBeGreaterThan(0);
+        expect(nested.lentRemovals).toBe(0);
+    });
+
+    test('a listener\'s Composite.clear(world, false) sees the membership the copy path sees', () => {
+        // the clear also drops the nested run's child composite, so from the
+        // next update both runs lend; the update of the clear is the one that
+        // compares the two paths
+        const flat = runListeners({ nested: false, addDuringUpdate: false, clearAt: 120 });
+        const nested = runListeners({ nested: true, addDuringUpdate: false, clearAt: 120 });
+
+        expect(flat.hashes).toEqual(nested.hashes);
+        expect(flat.clearLent).toBe(true);
+        expect(nested.clearLent).toBe(false);
+    });
+
+    test('NEGATIVE: with the copy-on-change disabled, a removal-only listener changes the update under it', () => {
+        const nested = runListeners({ nested: true, addDuringUpdate: false });
+        const unowned = runListeners({ nested: false, owned: false, addDuringUpdate: false });
+
+        expect(unowned.hashes).not.toEqual(nested.hashes);
     });
 
     test('NEGATIVE: with the copy-on-change disabled, a listener\'s add changes the update under it', () => {
