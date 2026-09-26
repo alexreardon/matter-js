@@ -1192,6 +1192,13 @@ var Axes = require('../geometry/Axes');
      * @param {vector} velocity
      */
     Body.setVelocity = function(body, velocity) {
+        // bounds an engine deferred are padded by the velocity they were
+        // deferred with, which this is about to overwrite, so bring them up
+        // to date first (see Body._updateStaleBounds). `setSpeed` comes
+        // through here; `setAngularVelocity` pads no bounds, and
+        // `setPosition` recomputes every bound it writes a velocity for
+        Body._updateStaleBounds(body);
+
         var timeScale = body.deltaTime / Body._baseDelta;
         body.positionPrev.x = body.position.x - velocity.x * timeScale;
         body.positionPrev.y = body.position.y - velocity.y * timeScale;

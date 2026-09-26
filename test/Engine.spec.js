@@ -122,6 +122,49 @@ describe('Engine resting-body passes', () => {
     });
 });
 
+describe('Engine deferred bounds (enableSolvedVelocityAndBounds false)', () => {
+    // A box lands on a floor; the update that first corrects its position is
+    // the one that, with the option off, defers its bounds (padded by the
+    // velocity of that update). A velocity write between updates must not
+    // change what a later freeze indexes: the freeze has to see the bounds
+    // the option on would have left.
+    function freezeAfterWrite(solved, write) {
+        const engine = Engine.create({ enableSleeping: false, enableSolvedVelocityAndBounds: solved });
+        const floor = Bodies.rectangle(200, 300, 400, 20, { isStatic: true });
+        const box = Bodies.rectangle(200, 270, 20, 20);
+        Body.setVelocity(box, { x: 0, y: 6 });
+        Composite.add(engine.world, [floor, box]);
+
+        let updates = 0;
+        while (updates < 200 && box.positionImpulse.y === 0) {
+            Engine.update(engine, DELTA);
+            updates += 1;
+        }
+
+        const deferred = box._boundsStale;
+        write(box);
+        Body.setStatic(box, true);
+        return { deferred, bounds: JSON.stringify(box.bounds) };
+    }
+
+    const writers = {
+        setVelocity: (body) => Body.setVelocity(body, { x: 5, y: -3 }),
+        setSpeed: (body) => Body.setSpeed(body, 9)
+    };
+
+    Object.keys(writers).forEach((name) => {
+        test(`${name} between updates, then setStatic, freezes the bounds the option on leaves`, () => {
+            const on = freezeAfterWrite(true, writers[name]);
+            const off = freezeAfterWrite(false, writers[name]);
+
+            // the scene really deferred the bounds with the option off
+            expect(off.deferred).toBe(true);
+            expect(on.deferred).toBe(false);
+            expect(off.bounds).toBe(on.bounds);
+        });
+    });
+});
+
 describe('Engine per-update events', () => {
     const Events = require('../src/core/Events');
 
