@@ -630,6 +630,10 @@ describe('a resting body moved after the grid indexed it', function() {
     function runShelf(move, options) {
         var sleeping = Boolean(options && options.sleeping);
         var moveBeforeFirstStep = Boolean(options && options.moveBeforeFirstStep);
+        // { step, cellSize }: a cell-size change at that step, which rebuilds
+        // the static index from every body in the world
+        var cellSizeChange = (options && options.cellSizeChange) || null;
+        var indexedAfterRebuild = null;
         var engine = createGridEngine();
         var world = engine.world;
         var random = createRandom(0x5e1f);
@@ -688,7 +692,15 @@ describe('a resting body moved after the grid indexed it', function() {
                     }
                     movingSteps++;
                 }
+                if (cellSizeChange !== null && step === cellSizeChange.step) {
+                    engine.detector.cellSize = cellSizeChange.cellSize;
+                }
                 Engine.update(engine, DELTA);
+                if (cellSizeChange !== null && step === cellSizeChange.step) {
+                    indexedAfterRebuild = shelf.filter(function(piece) {
+                        return piece._sIndexed || engine.detector._sgrid.indexed.indexOf(piece) !== -1;
+                    }).length;
+                }
                 if (step >= 30) {
                     var touching = engine.pairs.list.some(function(pair) {
                         return pair.isActive && shelfIds.has(pair.bodyA.parent.id) !== shelfIds.has(pair.bodyB.parent.id);
@@ -705,6 +717,7 @@ describe('a resting body moved after the grid indexed it', function() {
         return {
             checked: checked,
             shelf: shelf,
+            indexedAfterRebuild: indexedAfterRebuild,
             contactShare: contactSteps / movingSteps,
             debrisRise: debrisStartY - debrisEndY
         };
@@ -722,6 +735,30 @@ describe('a resting body moved after the grid indexed it', function() {
             expect(piece._sIndexed).toBe(false);
         });
         // the debris stays on the moving shelf
+        expect(result.contactShare).toBeGreaterThan(0.9);
+    });
+
+    // the full rebuild a cell-size change forces walks every body in the
+    // world, not the classification, so it has its own test of the promotion:
+    // a promoted static is still static, and indexing it again would answer
+    // for the pose at the rebuild while it moves on (and, being a mover too,
+    // pair it with its debris twice)
+    test('a promoted shelf stays out of the static index through a cell-size rebuild', function() {
+        var rebuild = jest.spyOn(Detector, '_staticIndexRebuild');
+        var result = runShelf(SETTERS[0][1], { cellSizeChange: { step: 60, cellSize: 48 } });
+        var rebuilds = rebuild.mock.calls.length;
+        rebuild.mockRestore();
+
+        // the first step, and the change
+        expect(rebuilds).toBe(2);
+        expect(result.indexedAfterRebuild).toBe(0);
+        expect(result.checked.calls).toBe(150);
+        expect(result.checked.first).toBe(null);
+        expect(result.checked.mismatches).toBe(0);
+        result.shelf.forEach(function(piece) {
+            expect(piece._sMoved).toBe(true);
+            expect(piece._sIndexed).toBe(false);
+        });
         expect(result.contactShare).toBeGreaterThan(0.9);
     });
 
