@@ -677,6 +677,70 @@ describe('the grid visit stamp', function() {
     });
 });
 
+// A body keeps its index state (buckets, slot) on itself, so it can sit in
+// one grid index at a time. Moved between two worlds that two grid engines
+// step, the index that took it read the other's state and the other, when it
+// let go, unbucketed the body from the NEW one: a static the sweep collides
+// with was missing from the grid's answer
+describe('a body moved between two grid worlds', function() {
+    function gridEngine() {
+        var engine = Engine.create({ enableSleeping: false, detector: Detector.create({ broadphase: 'grid' }) });
+        engine.gravity.y = 0;
+        return engine;
+    }
+
+    test.each([[0], [3]])('is answered for by the grid that steps it, whichever steps first (%p other statics)', function(padding) {
+        var first = gridEngine();
+        var second = gridEngine();
+        var index;
+        for (index = 0; index < padding; index++) {
+            Composite.add(first.world, Bodies.rectangle(1000 + index * 40, 1000, 30, 30, { isStatic: true }));
+        }
+        var shelf = Bodies.rectangle(200, 400, 60, 20, { isStatic: true });
+        Composite.add(first.world, shelf);
+        for (index = 0; index < 3; index++) {
+            Engine.update(first, DELTA);
+        }
+
+        // over to the second world, which indexes it; then the first lets go
+        Composite.remove(first.world, shelf);
+        Composite.add(second.world, shelf);
+        var probe = Bodies.rectangle(500, 400, 10, 10, { isSensor: true });
+        Composite.add(second.world, probe);
+        Engine.update(second, DELTA);
+        Engine.update(first, DELTA);
+
+        expect(first.detector._sgrid.indexed).not.toContain(shelf);
+        expect(second.detector._sgrid.indexed).toContain(shelf);
+
+        // the shelf moves onto the probe, and a fresh probe lands on its old pose
+        Body.setPosition(shelf, { x: 500, y: 400 });
+        var checked = checkedAgainstSweep(function() {
+            Engine.update(second, DELTA);
+            Engine.update(first, DELTA);
+        });
+        expect(checked.calls).toBe(2);
+        expect(checked.mismatches).toBe(0);
+        expect(hasCollisionBetween(second.detector.collisions, shelf, probe)).toBe(true);
+
+        // and a body indexed where it arrived, never moved, is found too
+        var still = Bodies.rectangle(700, 400, 60, 20, { isStatic: true });
+        Composite.add(first.world, still);
+        Engine.update(first, DELTA);
+        Composite.remove(first.world, still);
+        Composite.add(second.world, still);
+        Engine.update(second, DELTA);
+        Engine.update(first, DELTA);
+        var fresh = Bodies.rectangle(700, 400, 10, 10, { isSensor: true });
+        Composite.add(second.world, fresh);
+        checked = checkedAgainstSweep(function() {
+            Engine.update(second, DELTA);
+        });
+        expect(checked.mismatches).toBe(0);
+        expect(hasCollisionBetween(second.detector.collisions, still, fresh)).toBe(true);
+    });
+});
+
 // Bucket contents are kept in body order, the order a full rebuild gives, and
 // the candidate emission order the simulation is baselined on
 describe('the static index keeps rebuild order', function() {

@@ -234,7 +234,13 @@ var Axes = require('../geometry/Axes');
             // last walk did not stamp (see Composite._ownedGen), so it needs no
             // place in the cluster above. Declared LAST so every field above
             // keeps its place
-            _sOwner: null
+            _sOwner: null,
+            // the grid index (a grid detector's `_sgrid`) that _sBuckets and
+            // _sIndexedAt describe while _sIndexed, so a body moved to a world
+            // another grid engine steps is taken out of the first one's index
+            // rather than confusing the two (see Detector._staticIndexInsert).
+            // Declared LAST, after _sOwner, so every field above keeps its place
+            _sGrid: null
         };
 
         var body = Common.extend(defaults, options);

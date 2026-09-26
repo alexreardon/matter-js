@@ -591,6 +591,16 @@ var Collision = require('./Collision');
             cy,
             at;
 
+        // still in ANOTHER grid's index (a body moved between two worlds
+        // stepped by two grid engines): take it out of that one first, while
+        // its buckets and slot still say where it sits there. Otherwise that
+        // grid keeps a body it no longer steps, and when it next unindexes it
+        // reads the buckets this grid is about to give it
+        if (body._sIndexed === true && body._sGrid !== g && body._sGrid !== null) {
+            Detector._staticIndexRemove(body._sGrid, body);
+            buckets = body._sBuckets;
+        }
+
         if (buckets === null) {
             buckets = body._sBuckets = [];
         } else {
@@ -602,6 +612,7 @@ var Collision = require('./Collision');
         }
 
         body._sIndexed = true;
+        body._sGrid = g;
         body._sIndexedAt = g.indexed.length;
         g.indexed.push(body);
         g.sFlatValid = false;
@@ -735,12 +746,16 @@ var Collision = require('./Collision');
 
     /**
      * Removes a static body from the index entirely: out of the membership
-     * list, and out of every bucket it was inserted into.
+     * list, and out of every bucket it was inserted into. From the index of
+     * the grid that holds it (`body._sGrid`), which is `g` unless the body
+     * came from a world another grid engine steps: its buckets and slot
+     * describe that grid's index, and it is taken out of that one.
      * @private
      * @method _staticIndexRemove
      */
     Detector._staticIndexRemove = function(g, body) {
-        var indexed = g.indexed,
+        var owner = body._sGrid === null ? g : body._sGrid,
+            indexed = owner.indexed,
             slot = body._sIndexedAt;
 
         // swap-remove from the membership list. Its order carries no meaning
@@ -756,8 +771,9 @@ var Collision = require('./Collision');
 
         body._sIndexed = false;
         body._sIndexedAt = -1;
+        body._sGrid = null;
 
-        Detector._staticIndexUnbucket(g, body);
+        Detector._staticIndexUnbucket(owner, body);
     };
 
     /**
@@ -786,6 +802,16 @@ var Collision = require('./Collision');
         g.sOver.length = 0;
         g.sFlat.length = 0;
         g.sFlatValid = false;
+
+        // every body the old index held lets go of it, including one that
+        // has left the world since (the loop below reaches only members)
+        for (i = 0; i < g.indexed.length; i++) {
+            var held = g.indexed[i];
+            held._sIndexed = false;
+            held._sIndexedAt = -1;
+            held._sGrid = null;
+        }
+
         g.indexed.length = 0;
         // the epoch bump below invalidates every cached candidate list, so
         // per-cell reports from this rebuild would be a pure cost
@@ -793,6 +819,11 @@ var Collision = require('./Collision');
 
         for (i = 0; i < n; i++) {
             var body = bodies[i];
+
+            // held by another grid's index (see _staticIndexInsert)
+            if (body._sIndexed === true && body._sGrid !== g && body._sGrid !== null) {
+                Detector._staticIndexRemove(body._sGrid, body);
+            }
 
             body._sIndexed = false;
 
@@ -842,6 +873,7 @@ var Collision = require('./Collision');
                     Detector._staticIndexUnbucket(g, body);
                     body._sIndexed = false;
                     body._sIndexedAt = -1;
+                    body._sGrid = null;
                     continue;
                 }
 
@@ -980,7 +1012,7 @@ var Collision = require('./Collision');
                 // indexed body the walk did not stamp. Only a body in THIS
                 // index, as the scan only reads this index; the mover list
                 // below drops it either way
-                if (body._sIndexed && indexed[body._sIndexedAt] === body) {
+                if (body._sIndexed && body._sGrid === g) {
                     Detector._staticIndexRemove(g, body);
                     staticDirty = true;
                 }
@@ -1447,10 +1479,12 @@ var Collision = require('./Collision');
      * measured 1.3-4.8x).
      *
      * Because that state lives on the BODY rather than on the detector, a body
-     * belongs to one grid detector at a time. Sharing bodies between two
-     * engines was already unsupported here (the candidate cache and the
-     * broadphase stamps have the same constraint); the static index membership
-     * simply makes it explicit.
+     * belongs to one grid detector at a time. It can MOVE between worlds that
+     * two grid engines step: the index state names the grid that holds it
+     * (`_sGrid`), and a grid indexing a body another holds takes it out of
+     * that one first (see _staticIndexInsert). A body in two worlds at once,
+     * both stepped, is unsupported (the candidate cache has the same
+     * constraint).
      * @private
      * @method _collisionsGrid
      * @param {detector} detector
@@ -1895,7 +1929,7 @@ var Collision = require('./Collision');
             sFlat.length = 0;
             for (i = 0; i < n; i++) {
                 var flatBody = bodies[i];
-                if (flatBody._sIndexed && flatBody._sBuckets.length > 0) {
+                if (flatBody._sIndexed && flatBody._sGrid === g && flatBody._sBuckets.length > 0) {
                     sFlat.push(flatBody);
                 }
             }
