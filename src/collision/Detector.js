@@ -591,16 +591,6 @@ var Collision = require('./Collision');
             cy,
             at;
 
-        // still in ANOTHER grid's index (a body moved between two worlds
-        // stepped by two grid engines): take it out of that one first, while
-        // its buckets and slot still say where it sits there. Otherwise that
-        // grid keeps a body it no longer steps, and when it next unindexes it
-        // reads the buckets this grid is about to give it
-        if (body._sIndexed === true && body._sGrid !== g && body._sGrid !== null) {
-            Detector._staticIndexRemove(body._sGrid, body);
-            buckets = body._sBuckets;
-        }
-
         if (buckets === null) {
             buckets = body._sBuckets = [];
         } else {
@@ -750,6 +740,15 @@ var Collision = require('./Collision');
      * the grid that holds it (`body._sGrid`), which is `g` unless the body
      * came from a world another grid engine steps: its buckets and slot
      * describe that grid's index, and it is taken out of that one.
+     *
+     * That is how a body moved between two grid worlds leaves the first
+     * index. The removal marks it departed (Composite.removeBody), and
+     * whichever grid classifies it first takes it out of the index that holds
+     * it: the old grid, finding it gone from its world, or the new one,
+     * finding it departed. Either way the index that held it loses it whole,
+     * list, buckets and changed-cell report, and the new grid then indexes it
+     * afresh. Before, the old grid unbucketed it through the buckets the new
+     * one had given it.
      * @private
      * @method _staticIndexRemove
      */
@@ -807,9 +806,11 @@ var Collision = require('./Collision');
         // has left the world since (the loop below reaches only members)
         for (i = 0; i < g.indexed.length; i++) {
             var held = g.indexed[i];
-            held._sIndexed = false;
-            held._sIndexedAt = -1;
-            held._sGrid = null;
+            if (held._sGrid === g) {
+                held._sIndexed = false;
+                held._sIndexedAt = -1;
+                held._sGrid = null;
+            }
         }
 
         g.indexed.length = 0;
@@ -819,11 +820,6 @@ var Collision = require('./Collision');
 
         for (i = 0; i < n; i++) {
             var body = bodies[i];
-
-            // held by another grid's index (see _staticIndexInsert)
-            if (body._sIndexed === true && body._sGrid !== g && body._sGrid !== null) {
-                Detector._staticIndexRemove(body._sGrid, body);
-            }
 
             body._sIndexed = false;
 
@@ -1480,11 +1476,12 @@ var Collision = require('./Collision');
      *
      * Because that state lives on the BODY rather than on the detector, a body
      * belongs to one grid detector at a time. It can MOVE between worlds that
-     * two grid engines step: the index state names the grid that holds it
-     * (`_sGrid`), and a grid indexing a body another holds takes it out of
-     * that one first (see _staticIndexInsert). A body in two worlds at once,
-     * both stepped, is unsupported (the candidate cache has the same
-     * constraint).
+     * two grid engines step (removed from one, added to the other): the index
+     * state names the grid that holds it (`_sGrid`), and the removal takes it
+     * out of that index whole (see _staticIndexRemove). A body indexed by two
+     * grids at once (two stepped worlds holding it, or a second grid detector
+     * run over a world another grid engine steps) is unsupported: the last to
+     * index it holds it, and the other answers wrongly for it.
      * @private
      * @method _collisionsGrid
      * @param {detector} detector
