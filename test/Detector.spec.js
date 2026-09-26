@@ -573,6 +573,89 @@ describe('Detector configuration', function() {
     });
 });
 
+// A body carries the grid's visit stamp (`_gsStamp`) from whichever detector
+// last visited it. With a counter per detector, a stamp another detector left
+// could equal the one a pass took, and the pass skipped the body as already
+// seen: a static released out of a journal pass stayed out of the mover lists,
+// and a static left out of a mover's candidates missed its pair. Two detectors
+// over one world is the case that reaches it: a detector swapped in for
+// another, and two engines stepping bodies moved between their worlds
+describe('the grid visit stamp', function() {
+    test('a grid detector swapped in for another skips no body the old one stamped', function() {
+        var engine = createGridEngine();
+        var world = engine.world;
+        var random = createRandom(0x57a4);
+        var row;
+        var col;
+
+        engine.gravity.y = 1;
+        for (row = 0; row < 16; row++) {
+            for (col = 0; col < 24; col++) {
+                var tile = Bodies.rectangle(20 + col * 34, 300 + row * 22, 30, 18);
+                Body.setStatic(tile, true);
+                Composite.add(world, tile);
+            }
+        }
+        for (var index = 0; index < 60; index++) {
+            Composite.add(world, Bodies.rectangle(40 + random() * 760, 100 + random() * 150, 10 + random() * 10, 10 + random() * 10));
+        }
+
+        var problems = [];
+        var staleStamps = 0;
+        var checked = checkedAgainstSweep(function() {
+            for (var step = 0; step < 240; step++) {
+                var before = world.bodies.map(function(body) { return body._gsStamp; });
+                var newest = Math.max.apply(null, before);
+                if (step === 40) {
+                    // a fresh detector over the same world: every body still
+                    // carries the old one's stamps
+                    var fresh = Detector.create({ broadphase: 'grid', cellSize: 32 });
+                    fresh.pairs = engine.pairs;
+                    engine.detector = fresh;
+                    Composite.setModified(world, true, true, false);
+                }
+                if (step >= 40) {
+                    // a release every step, and a freeze every third
+                    var statics = world.bodies.filter(function(body) { return body.isStatic; });
+                    var chosen = statics[Math.floor(random() * statics.length)];
+                    Body.setStatic(chosen, false);
+                    Body.setVelocity(chosen, { x: random() * 4 - 2, y: -1 });
+                    if (step % 3 === 0) {
+                        var moving = world.bodies.filter(function(body) { return !body.isStatic; });
+                        Body.setStatic(moving[Math.floor(random() * moving.length)], true);
+                    }
+                }
+                Engine.update(engine, DELTA);
+
+                // a stamp this update wrote is newer than every stamp any
+                // body carried before it, so no pass can mistake a body
+                // another detector visited for one it visited itself
+                world.bodies.forEach(function(body, index) {
+                    if (index < before.length && body._gsStamp !== before[index] && body._gsStamp <= newest) {
+                        staleStamps++;
+                    }
+                });
+
+                var g = engine.detector._sgrid;
+                var movers = world.bodies.filter(function(body) { return !(body.isStatic || body.isSleeping); });
+                var ids = function(list) { return list.map(function(body) { return body.id; }).join(','); };
+                if (ids(engine._moverBodies) !== ids(movers) || ids(g.movers) !== ids(movers)) {
+                    problems.push(step);
+                }
+                var badIndexed = g.indexed.filter(function(body) { return !body.isStatic; });
+                if (badIndexed.length > 0) {
+                    problems.push('indexed ' + step);
+                }
+            }
+        });
+
+        expect(staleStamps).toBe(0);
+        expect(problems).toEqual([]);
+        expect(checked.calls).toBe(240);
+        expect(checked.first).toBe(null);
+    });
+});
+
 // A resting body (static or asleep) that a Body setter moves after the grid
 // indexed it is promoted to a mover by that setter (Body._promoteIfIndexed):
 // nothing tags it. Every setter that moves or reshapes a body is run through

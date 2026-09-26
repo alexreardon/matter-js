@@ -14,6 +14,28 @@ var Collision = require('./Collision');
 (function() {
 
     /**
+     * The grid broadphase's visit stamp, written to `body._gsStamp` (and to
+     * the flat mover stamps) to mark a body already seen by one pass: a
+     * candidate collected once however many of a mover's cells hold it, a
+     * journal entry read once however often it was recorded. ONE counter for
+     * every grid detector, so every stamp is fresh for every body: with a
+     * counter per detector, a stamp another detector left on a body could
+     * equal the one a pass took, and the pass skipped that body as already
+     * seen (a released static left out of the mover lists, a static left out
+     * of a mover's candidates).
+     *
+     * Known limit, unchanged by sharing the counter (one detector takes the
+     * same stamps either way): past `2^31` stamps, about 33 hours of a
+     * 300-mover world at 60 updates a second, the flat mover stamps (an
+     * `Int32Array`) wrap and stop deduping a mover reached through several
+     * cells, so its pair is emitted more than once, and `_gsStamp` leaves the
+     * small-integer range, which changes the field's representation on every
+     * body once.
+     * @private
+     */
+    var gridStamp = 0;
+
+    /**
      * Creates a new collision detector.
      *
      * The broadphase is chosen per detector, with `broadphase` (`'sweep'`, the
@@ -932,8 +954,9 @@ var Collision = require('./Collision');
             indexed = g.indexed,
             // marks this pass's entries, so a body listed twice is classified
             // once and the mover list below can drop every one of them. From
-            // the candidate generation's counter, whose every stamp is fresh
-            stamp = ++g.stamp,
+            // the grid's one counter, whose every stamp is fresh (see
+            // gridStamp)
+            stamp = ++gridStamp,
             staticDirty = false,
             arrivalCount = 0,
             moverCount = 0,
@@ -1104,7 +1127,7 @@ var Collision = require('./Collision');
             movers = g.movers,
             moversLength = movers.length,
             arrivals = g.arrivals,
-            stamp = ++g.stamp,
+            stamp = ++gridStamp,
             arrivalCount = 0,
             moverCount = 0,
             i;
@@ -1463,7 +1486,7 @@ var Collision = require('./Collision');
                 // OVERSIZED MOVER reads, so it is rebuilt lazily, on the rare
                 // steps one exists, instead of maintained on every change
                 sFlatValid: false,
-                movers: [], stamp: 1, built: false, indexedStaticCount: -1,
+                movers: [], built: false, indexedStaticCount: -1,
                 // classification cache: the movers list and static count are
                 // only recomputed when the body set or any body's
                 // moving-vs-resting role actually changed
@@ -1880,7 +1903,7 @@ var Collision = require('./Collision');
                 // a moved static promoted to a mover must still not generate
                 // static-static pairs (the sweep skips those)
                 mStatic = m.isStatic || m.isSleeping,
-                localStamp = ++g.stamp,
+                localStamp = ++gridStamp,
                 mIsOver = mOver[mGen] === 1;
 
             // Oversized mover: its bounds span more than maxCells cells, so it
