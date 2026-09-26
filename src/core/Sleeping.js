@@ -112,6 +112,10 @@ var Common = require('./Common');
             Common._bodyStaticEpoch++;
             Common._journalTouch(body);
 
+            // a real change of rest ends a grid promotion (see
+            // Body._endPromotion)
+            Body._endPromotion(body);
+
             // Engine clears force buffers for moving bodies only, so a force
             // applied while this body was asleep must be dropped here rather
             // than surviving into the step after it wakes

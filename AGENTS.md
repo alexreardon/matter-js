@@ -107,7 +107,9 @@ These are load-bearing; each has cost real time when broken.
   `Body._promoteIfIndexed` with the bounds the body had BEFORE the setter
   ran, which turns a static or sleeping body the grid has already indexed into
   a mover when those bounds changed (the bounds are all the index holds of a
-  body, so a setter that leaves them as they were promotes nothing). A NEW
+  body, so a setter that leaves them as they were promotes nothing), until a
+  real `Body.setStatic` / `Sleeping.set` transition ends it
+  (`Body._endPromotion`). A NEW
   method that moves or reshapes a body must capture the bounds first and call
   it with them after, or the grid keeps answering for the old pose.
   `test/Detector.spec.js` runs every setter against the sweep.

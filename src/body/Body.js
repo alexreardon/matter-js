@@ -450,9 +450,11 @@ var Axes = require('../geometry/Axes');
      * `scale(1, 1)` about its position) promotes nothing, as
      * `setPositionAndAngle` with nothing changed never did.
      *
-     * A promoted body stays a mover while it rests (`_sMoved`), and the
-     * promotion is recorded exactly as any change of role is: the static epoch
-     * moves, and the body goes in its world's body journal (see
+     * A promoted body stays a mover while it rests (`_sMoved`); a real change
+     * of rest (`Body.setStatic` or `Sleeping.set` flipping its flag) ends
+     * the promotion (see Body._endPromotion). The promotion is recorded
+     * exactly as any change of role is: the static epoch moves, and the body
+     * goes in its world's body journal (see
      * Common._bodyStaticEpoch and Common._journalTouch). A resting body moved
      * before any grid step has indexed it needs none of this, and is simply
      * indexed at its new pose; so does one removed from its world since the
@@ -500,6 +502,34 @@ var Axes = require('../geometry/Axes');
     };
 
     /**
+     * Ends a grid promotion (see Body._promoteIfIndexed) on a real change of
+     * rest: `Body.setStatic` or `Sleeping.set` flipping the body's flag,
+     * which journals it and moves the static epoch, so the grid classifies it
+     * afresh. A body promoted while it rested is a mover only while that rest
+     * lasts: released it is a mover anyway, and resting again it is indexed
+     * where it rests, rather than staying a mover for good (a teleported
+     * sleeper, a scrolled pane piece frozen again after a release). A body
+     * promoted since the grid last classified it is still in the index at the
+     * pose it was promoted from, so it is marked as a removal marks a body
+     * (`_sDeparted`), and the next classification takes it out and indexes
+     * it again if it rests.
+     * @method _endPromotion
+     * @private
+     * @param {body} body
+     */
+    Body._endPromotion = function(body) {
+        if (body._sMoved !== true) {
+            return;
+        }
+
+        body._sMoved = false;
+
+        if (body._sIndexed === true) {
+            body._sDeparted = true;
+        }
+    };
+
+    /**
      * Sets the body as static, including isStatic flag and setting mass and inertia to Infinity.
      * @method setStatic
      * @param {body} body
@@ -511,6 +541,11 @@ var Axes = require('../geometry/Axes');
         // would have been padded by
         if (isStatic) {
             Body._updateStaleBounds(body);
+        }
+
+        // a real change of rest ends a grid promotion (see Body._endPromotion)
+        if (!body.isStatic !== !isStatic) {
+            Body._endPromotion(body);
         }
 
         for (var i = 0; i < body.parts.length; i++) {

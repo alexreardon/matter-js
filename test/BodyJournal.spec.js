@@ -187,6 +187,9 @@ describe('the grid body journal', () => {
     });
 
     it('matches the full walk through batch removals, same-step round trips and moving statics', () => {
+        // every static a move promoted (a later release ends a promotion, so
+        // they are counted as they happen)
+        const promoted = new Set();
         const { journalReads, arms } = runPair({
             steps: 160,
             setup: setupPage,
@@ -229,6 +232,9 @@ describe('the grid body journal', () => {
                     if (moving !== -1 && step % 6 === 0) {
                         const body = arm.bodies[moving];
                         Body.setPosition(body, { x: body.position.x + shift, y: body.position.y });
+                        if (arm === journal && body._sMoved) {
+                            promoted.add(moving);
+                        }
                     }
                 }
             }
@@ -236,7 +242,7 @@ describe('the grid body journal', () => {
 
         expect(journalReads).toBeGreaterThan(150);
         // the moves promoted statics in both arms alike
-        expect(arms[0].bodies.filter((body) => body._sMoved).length).toBeGreaterThan(3);
+        expect(promoted.size).toBeGreaterThan(3);
         expect(arms[1].bodies.map((body) => body._sMoved)).toEqual(arms[0].bodies.map((body) => body._sMoved));
     });
 

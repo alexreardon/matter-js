@@ -1049,6 +1049,92 @@ describe('a resting body moved after the grid indexed it', function() {
         expect(shelf._sCx0).toBe(Math.floor(shelf.bounds.min.x / 32));
     });
 
+    // a promotion was for good: a teleported sleeper, or a moved static
+    // released and frozen again somewhere, stayed a mover while it rested
+    // there, costing a mover's work every step for the rest of its life
+    test.each([
+        ['asleep', function(body, resting) { require('../src/core/Sleeping').set(body, resting); }],
+        ['static', function(body, resting) { Body.setStatic(body, resting); }]
+    ])('a real change of rest ends a promotion (%s), and the body is indexed where it rests again', function(name, rest) {
+        var engine = createGridEngine();
+        var shelf = Bodies.rectangle(100, 300, 200, 20);
+        rest(shelf, true);
+        var ball = Bodies.circle(600, 150, 10);
+        Composite.add(engine.world, [shelf, ball, Bodies.rectangle(40, 40, 10, 10, { isStatic: true })]);
+
+        var checked = checkedAgainstSweep(function() {
+            Engine.update(engine, DELTA);
+            Body.setPosition(shelf, { x: 600, y: 300 });
+            expect(shelf._sMoved).toBe(true);
+            Engine.update(engine, DELTA);
+            expect(engine.detector._sgrid.movers).toContain(shelf);
+
+            // released for a while, then resting again where it ends up
+            rest(shelf, false);
+            expect(shelf._sMoved).toBe(false);
+            engine.gravity.y = 0;
+            for (var step = 0; step < 5; step++) {
+                Engine.update(engine, DELTA);
+            }
+            rest(shelf, true);
+            engine.gravity.y = 1;
+            for (step = 0; step < 90; step++) {
+                Engine.update(engine, DELTA);
+            }
+        });
+
+        expect(checked.mismatches).toBe(0);
+        expect(shelf._sMoved).toBe(false);
+        expect(shelf._sIndexed).toBe(true);
+        expect(engine.detector._sgrid.movers).not.toContain(shelf);
+        expect(hasCollisionBetween(engine.detector.collisions, ball, shelf)).toBe(true);
+    });
+
+    // promoted and then put to rest another way before the grid saw the
+    // promotion: still in the index at the pose it was promoted from, so
+    // ending the promotion must also re-index it
+    test('a promotion ended before the grid saw it re-indexes the body where it now is', function() {
+        var engine = createGridEngine();
+        var shelf = Bodies.rectangle(100, 300, 200, 20, { isStatic: true });
+        var ball = Bodies.circle(600, 200, 10);
+        Composite.add(engine.world, [shelf, Bodies.rectangle(40, 40, 10, 10, { isStatic: true })]);
+        Engine.update(engine, DELTA);
+
+        Body.setPosition(shelf, { x: 600, y: 300 });
+        expect(shelf._sMoved).toBe(true);
+        // a static put to sleep: a real change of the sleeping flag
+        require('../src/core/Sleeping').set(shelf, true);
+        expect(shelf._sMoved).toBe(false);
+        Composite.add(engine.world, ball);
+
+        var checked = checkedAgainstSweep(function() {
+            for (var step = 0; step < 120; step++) {
+                Engine.update(engine, DELTA);
+            }
+        });
+
+        expect(checked.mismatches).toBe(0);
+        expect(ball.position.y).toBeLessThan(300);
+        expect(shelf._sIndexed).toBe(true);
+        expect(shelf._sCx0).toBe(Math.floor(shelf.bounds.min.x / 32));
+    });
+
+    test('a setter on a body that stays at rest keeps its promotion', function() {
+        var engine = createGridEngine();
+        var shelf = Bodies.rectangle(100, 300, 200, 20, { isStatic: true });
+        Composite.add(engine.world, shelf);
+        Engine.update(engine, DELTA);
+        Body.setPosition(shelf, { x: 110, y: 300 });
+        Engine.update(engine, DELTA);
+
+        // not a change of rest: already static, and already awake
+        Body.setStatic(shelf, true);
+        require('../src/core/Sleeping').set(shelf, false);
+        expect(shelf._sMoved).toBe(true);
+        Engine.update(engine, DELTA);
+        expect(engine.detector._sgrid.movers).toContain(shelf);
+    });
+
     test('on the sweep nothing is indexed, so a move promotes nothing', function() {
         var engine = Engine.create();
         var floor = Bodies.rectangle(200, 400, 60, 20, { isStatic: true });
