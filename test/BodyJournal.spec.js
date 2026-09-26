@@ -692,3 +692,195 @@ describe('Composite.removeBodies', () => {
         expect(engine.world._journalLive).toBe(false);
     });
 });
+
+// The game's configuration end to end (review-10 A3): the option off, the grid
+// with the journal at its default share, batch eviction through
+// `Composite.removeBodies`, statics a setter moves every update after the grid
+// indexed them (inner-scroll riders, promoted to movers), and release / freeze
+// churn with freezes of bodies still carrying a position impulse. The
+// reference is the configuration every one of those was proven against: the
+// journal off (a full walk every update) and the option on. The state both
+// must agree on is the simulation (poses, impulses, vertices, resting bounds,
+// the pair list and its warm starts, the collisionStart stream) and the
+// velocity a consumer reads: the engine's with the option on, derived from the
+// poses (as `Body.updateVelocities` does) with it off.
+describe('the game\'s configuration end to end', () => {
+    const Common = require('../src/core/Common');
+    const scratch64 = new Float64Array(1);
+    const scratch32 = new Uint32Array(scratch64.buffer);
+
+    // FNV-1a over the exact bits
+    function mix(hash, value) {
+        scratch64[0] = value;
+        hash = Math.imul(hash ^ scratch32[0], 16777619);
+        return Math.imul(hash ^ scratch32[1], 16777619);
+    }
+
+    function fingerprint(engine, bodies, solved) {
+        let hash = 2166136261;
+        for (const body of bodies) {
+            hash = mix(hash, body.id);
+            hash = mix(hash, body.isStatic ? 1 : 0);
+            hash = mix(hash, body.position.x);
+            hash = mix(hash, body.position.y);
+            hash = mix(hash, body.positionPrev.x);
+            hash = mix(hash, body.positionPrev.y);
+            hash = mix(hash, body.angle);
+            hash = mix(hash, body.anglePrev);
+            hash = mix(hash, body.positionImpulse.x);
+            hash = mix(hash, body.positionImpulse.y);
+            for (const vertex of body.vertices) {
+                hash = mix(hash, vertex.x);
+                hash = mix(hash, vertex.y);
+            }
+            if (body.isStatic || body.isSleeping) {
+                hash = mix(hash, body.bounds.min.x);
+                hash = mix(hash, body.bounds.max.x);
+                hash = mix(hash, body.bounds.min.y);
+                hash = mix(hash, body.bounds.max.y);
+            } else if (solved) {
+                hash = mix(hash, body.velocity.x);
+                hash = mix(hash, body.velocity.y);
+                hash = mix(hash, body.angularVelocity);
+            } else {
+                const timeScale = Body._baseDelta / body.deltaTime;
+                hash = mix(hash, (body.position.x - body.positionPrev.x) * timeScale);
+                hash = mix(hash, (body.position.y - body.positionPrev.y) * timeScale);
+                hash = mix(hash, (body.angle - body.anglePrev) * timeScale);
+            }
+        }
+        for (const pair of engine.pairs.list) {
+            hash = mix(hash, pair.id);
+            hash = mix(hash, pair.contacts[0].normalImpulse);
+            hash = mix(hash, pair.contacts[0].tangentImpulse);
+            hash = mix(hash, pair.contacts[1].normalImpulse);
+            hash = mix(hash, pair.contacts[1].tangentImpulse);
+        }
+        for (const pair of engine.pairs.collisionStart) {
+            hash = mix(hash, pair.id);
+        }
+        return hash;
+    }
+
+    function runGame({ game }) {
+        const readJournal = Detector._classifyFromJournal;
+        const counts = { journalReads: 0, frozenWithImpulse: 0, batchRemovals: 0, removed: 0, promotedRiders: 0 };
+
+        Detector._classifyFromJournal = function() {
+            counts.journalReads++;
+            return readJournal.apply(this, arguments);
+        };
+
+        try {
+            Common._nextId = 0;
+            const random = createRandom(4242);
+            const engine = Engine.create({
+                enableSleeping: false,
+                enableSolvedVelocityAndBounds: !game,
+                detector: Detector.create({ broadphase: 'grid', cellSize: 32 })
+            });
+            const world = engine.world;
+            const bodies = [];
+            const tiles = [];
+            const live = [];
+
+            const addStatic = (x, y, width, height) => {
+                // built dynamic then frozen, so a release restores a real mass
+                const body = Bodies.rectangle(x, y, width, height);
+                Body.setStatic(body, true);
+                Composite.add(world, body);
+                bodies.push(body);
+                return body;
+            };
+
+            for (let k = 0; k < 12; k++) {
+                addStatic(40 + k * 70, 640, 68, 30);
+            }
+            for (let r = 0; r < 14; r++) {
+                for (let c = 0; c < 16; c++) {
+                    tiles.push(addStatic(30 + c * 50 + (r % 2) * 6, 40 + r * 28, 42, 20));
+                }
+            }
+            const riders = [];
+            for (let k = 0; k < 6; k++) {
+                riders.push(addStatic(80 + k * 130, 450, 60, 12));
+            }
+
+            const hashes = [];
+            for (let step = 0; step < 240; step++) {
+                // release a few statics into debris
+                for (let k = 0; k < 3 && tiles.length > 0; k++) {
+                    const tile = tiles.splice(Math.floor(random() * tiles.length), 1)[0];
+                    Body.setStatic(tile, false);
+                    Body.setVelocity(tile, { x: (random() - 0.5) * 6, y: 2 + random() * 4 });
+                    live.push({ body: tile, born: step });
+                }
+
+                // freeze a debris body released on an earlier update, half the
+                // time just after a velocity write (a teleport between updates)
+                const pickEntry = live[Math.floor(random() * live.length)];
+                if (pickEntry && pickEntry.born !== step && !pickEntry.body.isStatic) {
+                    const impulse = pickEntry.body.positionImpulse;
+                    if (impulse.x !== 0 || impulse.y !== 0) {
+                        counts.frozenWithImpulse++;
+                    }
+                    if (random() < 0.5) {
+                        Body.setVelocity(pickEntry.body, { x: (random() - 0.5) * 8, y: -random() * 4 });
+                    }
+                    Body.setStatic(pickEntry.body, true);
+                }
+
+                // the riders move with their scroll container, after the grid
+                // indexed them
+                if (step > 0) {
+                    for (const rider of riders) {
+                        Body.setPosition(rider, { x: rider.position.x + 0.75, y: rider.position.y - 0.25 });
+                    }
+                }
+
+                // evict old debris in one batch, and top the page back up
+                const evicted = [];
+                while (live.length > 0 && step - live[0].born > 16) {
+                    evicted.push(live.shift().body);
+                }
+                if (evicted.length > 0) {
+                    Composite.removeBodies(world, evicted);
+                    counts.removed += evicted.length;
+                    if (evicted.length > 1) {
+                        counts.batchRemovals++;
+                    }
+                    for (let k = 0; k < evicted.length; k++) {
+                        tiles.push(addStatic(40 + random() * 760, 40 + random() * 380, 42, 20));
+                    }
+                }
+
+                if (!game) {
+                    // the reference: a full classification walk every update
+                    world._journalLive = false;
+                }
+                Engine.update(engine, DELTA);
+                hashes.push(fingerprint(engine, bodies, !game));
+            }
+
+            counts.promotedRiders = riders.filter((rider) => rider._sMoved === true).length;
+            return { hashes, counts };
+        } finally {
+            Detector._classifyFromJournal = readJournal;
+        }
+    }
+
+    test('the option off with the journal is bit-identical to the option on with the full walk', () => {
+        const reference = runGame({ game: false });
+        const game = runGame({ game: true });
+
+        // the reference never read a journal; the game read it
+        expect(reference.counts.journalReads).toBe(0);
+        expect(game.counts.journalReads).toBeGreaterThan(100);
+        // every regime the configuration claims was really exercised
+        expect(game.counts.promotedRiders).toBe(6);
+        expect(game.counts.frozenWithImpulse).toBeGreaterThan(10);
+        expect(game.counts.batchRemovals).toBeGreaterThan(20);
+
+        expect(game.hashes.findIndex((hash, index) => hash !== reference.hashes[index])).toBe(-1);
+    });
+});
