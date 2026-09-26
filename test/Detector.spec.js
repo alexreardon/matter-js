@@ -935,6 +935,82 @@ describe('a resting body moved after the grid indexed it', function() {
         expect(tiles[4]._sIndexed).toBe(false);
     });
 
+    // the bounds are all the index holds of a body, so a setter that leaves
+    // them exactly as they were leaves nothing stale. These promoted, moved the
+    // static epoch and journaled the body, where setPositionAndAngle with
+    // nothing changed never did
+    test.each([
+        ['Body.setPosition to where it is', function(body) { Body.setPosition(body, { x: body.position.x, y: body.position.y }); }],
+        ['Body.setPosition to where it is, inferring velocity', function(body) { Body.setPosition(body, { x: body.position.x, y: body.position.y }, true); }],
+        ['Body.translate by zero', function(body) { Body.translate(body, { x: 0, y: 0 }); }],
+        ['Body.set position to where it is', function(body) { Body.set(body, 'position', { x: body.position.x, y: body.position.y }); }],
+        ['Body.setAngle to its angle', function(body) { Body.setAngle(body, body.angle); }],
+        ['Body.rotate by zero', function(body) { Body.rotate(body, 0); }],
+        ['Body.scale by one', function(body) { Body.scale(body, 1, 1); }],
+        ['Body.setPositionAndAngle to its pose', function(body) { Body.setPositionAndAngle(body, body.position.x, body.position.y, body.angle); }]
+    ])('%s leaves the bounds as they were and promotes nothing', function(name, noop) {
+        var engine = createGridEngine();
+        var tiles = [];
+        for (var index = 0; index < 20; index++) {
+            tiles.push(Bodies.rectangle(20 + index * 30, 200, 24, 12, { isStatic: true }));
+        }
+        var box = Bodies.rectangle(92, 180, 20, 20);
+        Composite.add(engine.world, tiles.concat([box]));
+        Engine.update(engine, DELTA);
+        Engine.update(engine, DELTA);
+
+        var tile = tiles[2];
+        var before = [tile.bounds.min.x, tile.bounds.min.y, tile.bounds.max.x, tile.bounds.max.y];
+        var epoch = Common._bodyStaticEpoch;
+        var touched = engine.world._touchedCount;
+
+        noop(tile);
+
+        expect([tile.bounds.min.x, tile.bounds.min.y, tile.bounds.max.x, tile.bounds.max.y]).toEqual(before);
+        expect(tile._sMoved).toBe(false);
+        expect(Common._bodyStaticEpoch).toBe(epoch);
+        expect(engine.world._touchedCount).toBe(touched);
+
+        var checked = checkedAgainstSweep(function() {
+            for (var step = 0; step < 30; step++) {
+                Engine.update(engine, DELTA);
+            }
+        });
+        expect(checked.mismatches).toBe(0);
+        expect(tile._sIndexed).toBe(true);
+        expect(hasCollisionBetween(engine.detector.collisions, box, tile)).toBe(true);
+    });
+
+    // a body out of its world is taken out of the index at the next
+    // classification whether or not it comes back, so a move meanwhile has
+    // nothing stale to fix: promoting it made a re-added static a mover for
+    // good, wherever it came back to
+    test('a static removed from its world and moved before the grid saw it go is re-indexed where it comes back, not promoted', function() {
+        var engine = createGridEngine();
+        var floor = Bodies.rectangle(200, 400, 60, 20, { isStatic: true });
+        var box = Bodies.rectangle(500, 230, 20, 20);
+        Composite.add(engine.world, [floor, box, Bodies.rectangle(40, 40, 10, 10, { isStatic: true })]);
+        Engine.update(engine, DELTA);
+        expect(floor._sIndexed).toBe(true);
+
+        Composite.remove(engine.world, floor);
+        Body.setPosition(floor, { x: 500, y: 300 });
+        expect(floor._sMoved).toBe(false);
+        Composite.add(engine.world, floor);
+
+        var checked = checkedAgainstSweep(function() {
+            for (var step = 0; step < 40; step++) {
+                Engine.update(engine, DELTA);
+            }
+        });
+
+        expect(checked.mismatches).toBe(0);
+        expect(floor._sMoved).toBe(false);
+        expect(floor._sIndexed).toBe(true);
+        expect(engine.detector._sgrid.movers).not.toContain(floor);
+        expect(hasCollisionBetween(engine.detector.collisions, box, floor)).toBe(true);
+    });
+
     test('on the sweep nothing is indexed, so a move promotes nothing', function() {
         var engine = Engine.create();
         var floor = Bodies.rectangle(200, 400, 60, 20, { isStatic: true });

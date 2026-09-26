@@ -436,25 +436,46 @@ var Axes = require('../geometry/Axes');
     /**
      * Promotes `body` to a mover of the grid broadphase when it is a resting
      * body (static or asleep) that a grid detector already holds in its static
-     * index. Every setter that moves or reshapes a body calls this after the
-     * move (`setPosition`, `setAngle`, `setPositionAndAngle`, `scale`,
-     * `setVertices`, and through them `translate`, `rotate`, `setParts`
-     * and `Body.set`): the index captured the body's bounds when it bucketed
-     * it, and would otherwise go on answering for the old pose.
+     * index, and the setter that just ran changed its bounds. Every setter that
+     * moves or reshapes a body calls this after the move, with the bounds it
+     * had before (`setPosition`, `setAngle`, `setPositionAndAngle`,
+     * `scale`, `setVertices`, and through them `translate`, `rotate`,
+     * `setParts` and `Body.set`): the index captured the body's bounds when
+     * it bucketed it, and would otherwise go on answering for the old pose.
      *
-     * A promoted body stays a mover for the rest of its life (`_sMoved`),
-     * and the promotion is recorded exactly as any change of role is: the
-     * static epoch moves, and the body goes in its world's body journal (see
+     * The bounds are the whole of what the index holds of a body (the cells
+     * it covers, and the bounds each mover caches with its candidates), so a
+     * setter that leaves them exactly as they were (`setPosition` to where
+     * the body is, `translate` by zero, `setAngle` to its angle,
+     * `scale(1, 1)` about its position) promotes nothing, as
+     * `setPositionAndAngle` with nothing changed never did.
+     *
+     * A promoted body stays a mover while it rests (`_sMoved`), and the
+     * promotion is recorded exactly as any change of role is: the static epoch
+     * moves, and the body goes in its world's body journal (see
      * Common._bodyStaticEpoch and Common._journalTouch). A resting body moved
      * before any grid step has indexed it needs none of this, and is simply
-     * indexed at its new pose. On the sweep nothing is ever indexed, so this is
-     * one field read.
+     * indexed at its new pose; so does one removed from its world since the
+     * grid last classified it (`_sDeparted`), which the next classification
+     * takes out of the index whether or not it is added back. On the sweep
+     * nothing is ever indexed, so this is one field read.
      * @method _promoteIfIndexed
      * @private
      * @param {body} body
+     * @param {number} minX the body's `bounds.min.x` before the setter ran
+     * @param {number} minY
+     * @param {number} maxX
+     * @param {number} maxY
      */
-    Body._promoteIfIndexed = function(body) {
-        if (body._sIndexed !== true || body._sMoved === true || !(body.isStatic || body.isSleeping)) {
+    Body._promoteIfIndexed = function(body, minX, minY, maxX, maxY) {
+        if (body._sIndexed !== true || body._sMoved === true || !(body.isStatic || body.isSleeping)
+            || body._sDeparted === true) {
+            return;
+        }
+
+        var bounds = body.bounds;
+
+        if (bounds.min.x === minX && bounds.min.y === minY && bounds.max.x === maxX && bounds.max.y === maxY) {
             return;
         }
 
@@ -723,6 +744,13 @@ var Axes = require('../geometry/Axes');
      * @param {vector[]} vertices
      */
     Body.setVertices = function(body, vertices) {
+        // the bounds the grid may have indexed (see Body._promoteIfIndexed)
+        var bounds = body.bounds,
+            minX = bounds.min.x,
+            minY = bounds.min.y,
+            maxX = bounds.max.x,
+            maxY = bounds.max.y;
+
         // change vertices
         if (vertices[0].body === body) {
             body.vertices = vertices;
@@ -752,7 +780,7 @@ var Axes = require('../geometry/Axes');
         // both the vertices and the axes have been replaced
         Body._updateBoxTag(body);
 
-        Body._promoteIfIndexed(body);
+        Body._promoteIfIndexed(body, minX, minY, maxX, maxY);
     };
 
     /**
@@ -872,7 +900,13 @@ var Axes = require('../geometry/Axes');
      * @param {boolean} [updateVelocity=false]
      */
     Body.setPosition = function(body, position, updateVelocity) {
-        var delta = Vector.sub(position, body.position);
+        var delta = Vector.sub(position, body.position),
+            // the bounds the grid may have indexed (see Body._promoteIfIndexed)
+            bounds = body.bounds,
+            minX = bounds.min.x,
+            minY = bounds.min.y,
+            maxX = bounds.max.x,
+            maxY = bounds.max.y;
 
         if (updateVelocity) {
             body.positionPrev.x = body.position.x;
@@ -894,7 +928,7 @@ var Axes = require('../geometry/Axes');
         }
 
         body._restStatic = Common._isRestingStatic(body);
-        Body._promoteIfIndexed(body);
+        Body._promoteIfIndexed(body, minX, minY, maxX, maxY);
     };
 
     /**
@@ -906,7 +940,13 @@ var Axes = require('../geometry/Axes');
      * @param {boolean} [updateVelocity=false]
      */
     Body.setAngle = function(body, angle, updateVelocity) {
-        var delta = angle - body.angle;
+        var delta = angle - body.angle,
+            // the bounds the grid may have indexed (see Body._promoteIfIndexed)
+            bounds = body.bounds,
+            minX = bounds.min.x,
+            minY = bounds.min.y,
+            maxX = bounds.max.x,
+            maxY = bounds.max.y;
         
         if (updateVelocity) {
             body.anglePrev = body.angle;
@@ -928,7 +968,7 @@ var Axes = require('../geometry/Axes');
         }
 
         body._restStatic = Common._isRestingStatic(body);
-        Body._promoteIfIndexed(body);
+        Body._promoteIfIndexed(body, minX, minY, maxX, maxY);
     };
 
     /**
@@ -967,6 +1007,13 @@ var Axes = require('../geometry/Axes');
             }
             return;
         }
+
+        // the bounds the grid may have indexed (see Body._promoteIfIndexed)
+        var bounds = body.bounds,
+            oldMinX = bounds.min.x,
+            oldMinY = bounds.min.y,
+            oldMaxX = bounds.max.x,
+            oldMaxY = bounds.max.y;
 
         // The setPosition half: shift position and positionPrev by the delta.
         var deltaX = x - body.position.x,
@@ -1040,15 +1087,13 @@ var Axes = require('../geometry/Axes');
         if (velocity.x > 0) { maxX += velocity.x; } else { minX += velocity.x; }
         if (velocity.y > 0) { maxY += velocity.y; } else { minY += velocity.y; }
 
-        var bounds = body.bounds;
-
         bounds.min.x = minX;
         bounds.max.x = maxX;
         bounds.min.y = minY;
         bounds.max.y = maxY;
 
         body._restStatic = Common._isRestingStatic(body);
-        Body._promoteIfIndexed(body);
+        Body._promoteIfIndexed(body, oldMinX, oldMinY, oldMaxX, oldMaxY);
     };
 
     /**
@@ -1203,7 +1248,13 @@ var Axes = require('../geometry/Axes');
      */
     Body.scale = function(body, scaleX, scaleY, point) {
         var totalArea = 0,
-            totalInertia = 0;
+            totalInertia = 0,
+            // the bounds the grid may have indexed (see Body._promoteIfIndexed)
+            bounds = body.bounds,
+            minX = bounds.min.x,
+            minY = bounds.min.y,
+            maxX = bounds.max.x,
+            maxY = bounds.max.y;
 
         point = point || body.position;
 
@@ -1267,7 +1318,7 @@ var Axes = require('../geometry/Axes');
             }
         }
 
-        Body._promoteIfIndexed(body);
+        Body._promoteIfIndexed(body, minX, minY, maxX, maxY);
     };
 
     /**

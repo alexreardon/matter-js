@@ -104,9 +104,12 @@ These are load-bearing; each has cost real time when broken.
 - **A resting body a setter moves is promoted, not tagged.** `Body.setPosition`,
   `setAngle`, `setPositionAndAngle`, `scale` and `setVertices` (so also
   `translate`, `rotate`, `setParts` and `Body.set`) call
-  `Body._promoteIfIndexed`, which turns a static or sleeping body the grid has
-  already indexed into a mover for good. A NEW method that moves or reshapes
-  a body must call it too, or the grid keeps answering for the old pose.
+  `Body._promoteIfIndexed` with the bounds the body had BEFORE the setter
+  ran, which turns a static or sleeping body the grid has already indexed into
+  a mover when those bounds changed (the bounds are all the index holds of a
+  body, so a setter that leaves them as they were promotes nothing). A NEW
+  method that moves or reshapes a body must capture the bounds first and call
+  it with them after, or the grid keeps answering for the old pose.
   `test/Detector.spec.js` runs every setter against the sweep.
 
 ## Gates
