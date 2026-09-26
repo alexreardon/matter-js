@@ -1011,6 +1011,44 @@ describe('a resting body moved after the grid indexed it', function() {
         expect(hasCollisionBetween(engine.detector.collisions, box, floor)).toBe(true);
     });
 
+    // released, moved and rested again, all before the grid next classified
+    // it: the move ran while the body was moving, so it promoted nothing,
+    // and the classification then saw a static that was a static last time,
+    // indexed. The index kept it at the cells it was released from, and a
+    // ball dropped onto where it really was fell through (1606.6 on the grid,
+    // 280.5 on the sweep)
+    test.each([
+        ['static', function(body, resting) { Body.setStatic(body, resting); }],
+        ['asleep', function(body, resting) { require('../src/core/Sleeping').set(body, resting); }]
+    ])('a body released, moved and put back to rest (%s) before the grid saw it move is indexed where it rests', function(name, rest) {
+        var engine = createGridEngine();
+        var shelf = Bodies.rectangle(100, 300, 200, 20);
+        rest(shelf, true);
+        Composite.add(engine.world, [shelf, Bodies.rectangle(40, 40, 10, 10, { isStatic: true })]);
+        Engine.update(engine, DELTA);
+        expect(shelf._sIndexed).toBe(true);
+
+        rest(shelf, false);
+        Body.setPosition(shelf, { x: 600, y: 300 });
+        rest(shelf, true);
+        var ball = Bodies.circle(600, 200, 10);
+        Composite.add(engine.world, ball);
+
+        var checked = checkedAgainstSweep(function() {
+            for (var step = 0; step < 120; step++) {
+                Engine.update(engine, DELTA);
+            }
+        });
+
+        expect(checked.mismatches).toBe(0);
+        // the ball rests on the shelf where it now is
+        expect(ball.position.y).toBeLessThan(300);
+        expect(hasCollisionBetween(engine.detector.collisions, ball, shelf)).toBe(true);
+        expect(shelf._sIndexed).toBe(true);
+        expect(shelf._sMoved).toBe(false);
+        expect(shelf._sCx0).toBe(Math.floor(shelf.bounds.min.x / 32));
+    });
+
     test('on the sweep nothing is indexed, so a move promotes nothing', function() {
         var engine = Engine.create();
         var floor = Bodies.rectangle(200, 400, 60, 20, { isStatic: true });

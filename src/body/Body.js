@@ -457,8 +457,16 @@ var Axes = require('../geometry/Axes');
      * before any grid step has indexed it needs none of this, and is simply
      * indexed at its new pose; so does one removed from its world since the
      * grid last classified it (`_sDeparted`), which the next classification
-     * takes out of the index whether or not it is added back. On the sweep
-     * nothing is ever indexed, so this is one field read.
+     * takes out of the index whether or not it is added back.
+     *
+     * A body released (or woken) since the grid last classified it is still in
+     * the index, and a setter can move it before the next classification. If
+     * it is still moving then, that classification takes it out of the index;
+     * but if it rests again first, nothing else would, and the index would go
+     * on answering for the pose it was released from. So its move marks it as
+     * a removal does (`_sDeparted`), and the next classification takes it out
+     * and indexes it again wherever it rests. On the sweep nothing is ever
+     * indexed, so this is one field read.
      * @method _promoteIfIndexed
      * @private
      * @param {body} body
@@ -468,14 +476,21 @@ var Axes = require('../geometry/Axes');
      * @param {number} maxY
      */
     Body._promoteIfIndexed = function(body, minX, minY, maxX, maxY) {
-        if (body._sIndexed !== true || body._sMoved === true || !(body.isStatic || body.isSleeping)
-            || body._sDeparted === true) {
+        if (body._sIndexed !== true || body._sMoved === true || body._sDeparted === true) {
             return;
         }
 
         var bounds = body.bounds;
 
         if (bounds.min.x === minX && bounds.min.y === minY && bounds.max.x === maxX && bounds.max.y === maxY) {
+            return;
+        }
+
+        // released or woken since the grid indexed it: re-indexed where it
+        // rests, if it rests again before the grid next classifies it. The
+        // release already journaled it, which is what reads the mark
+        if (!(body.isStatic || body.isSleeping)) {
+            body._sDeparted = true;
             return;
         }
 
