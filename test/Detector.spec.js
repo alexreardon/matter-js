@@ -677,6 +677,100 @@ describe('the grid visit stamp', function() {
     });
 });
 
+// Bucket contents are kept in body order, the order a full rebuild gives, and
+// the candidate emission order the simulation is baselined on
+describe('the static index keeps rebuild order', function() {
+    // what a full rebuild over `bodies` puts in each cell, computed without
+    // touching any body (a second detector would overwrite each body's index
+    // state)
+    function rebuildOrder(bodies, cellSize) {
+        var buckets = new Map();
+        bodies.forEach(function(body) {
+            if (!(body.isStatic || body.isSleeping) || body._sMoved) {
+                return;
+            }
+            var cx0 = Math.floor(body.bounds.min.x / cellSize),
+                cx1 = Math.floor(body.bounds.max.x / cellSize),
+                cy0 = Math.floor(body.bounds.min.y / cellSize),
+                cy1 = Math.floor(body.bounds.max.y / cellSize);
+            if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) > 24) {
+                return;
+            }
+            for (var cx = cx0; cx <= cx1; cx++) {
+                for (var cy = cy0; cy <= cy1; cy++) {
+                    var key = (cx + 0x100000) * 0x200000 + (cy + 0x100000);
+                    if (!buckets.has(key)) {
+                        buckets.set(key, []);
+                    }
+                    buckets.get(key).push(body.id);
+                }
+            }
+        });
+        return buckets;
+    }
+
+    function liveOrder(g, key) {
+        var cxOffset = Math.floor(key / 0x200000);
+        var bucket = Detector._cellGet(g.sTable, key, Detector._cellHash(cxOffset, key - cxOffset * 0x200000));
+        return bucket ? bucket.map(function(body) { return body.id; }) : [];
+    }
+
+    // a listener that removes a static and adds it back during an update
+    // moves it to the end of the world's NEW array; the grid, walking the
+    // array the update was lent, re-indexed it where it sat in that one and
+    // spent its departure mark, so the next walk (of the new array) left it
+    // there, out of the order a rebuild gives, for good
+    test.each([['beforeSolve'], ['collisionStart'], ['afterUpdate']])('a static a %s listener removes and adds back is re-indexed in rebuild order', function(eventName) {
+        var engine = createGridEngine();
+        var world = engine.world;
+        var random = createRandom(0x0de9);
+        var tiles = [];
+        var index;
+        for (index = 0; index < 24; index++) {
+            tiles.push(Bodies.rectangle(20 + index * 40, 500, 40, 40, { isStatic: true }));
+            tiles.push(Bodies.rectangle(30 + index * 40, 470, 40, 20, { isStatic: true }));
+        }
+        Composite.add(world, tiles);
+
+        var moves = 0;
+        var step = 0;
+        require('../src/core/Events').on(engine, eventName, function() {
+            if (step % 5 === 2) {
+                var tile = tiles[Math.floor(random() * tiles.length)];
+                Composite.remove(world, tile);
+                Composite.add(world, tile);
+                moves++;
+            }
+        });
+
+        var grid = Detector._collisionsGrid;
+        var outOfOrder = [];
+        Detector._collisionsGrid = function(detector) {
+            var collisions = grid.apply(this, arguments);
+            var expected = rebuildOrder(detector.bodies, detector.cellSize);
+            expected.forEach(function(ids, key) {
+                if (liveOrder(detector._sgrid, key).join(',') !== ids.join(',')) {
+                    outOfOrder.push(step);
+                }
+            });
+            return collisions;
+        };
+        try {
+            for (step = 0; step < 120; step++) {
+                for (var k = 0; k < 2; k++) {
+                    Composite.add(world, Bodies.rectangle(40 + random() * 900, 50 + random() * 60, 12, 12));
+                }
+                Engine.update(engine, DELTA);
+            }
+        } finally {
+            Detector._collisionsGrid = grid;
+        }
+
+        expect(moves).toBeGreaterThan(10);
+        expect(outOfOrder).toEqual([]);
+    });
+});
+
 // A resting body (static or asleep) that a Body setter moves after the grid
 // indexed it is promoted to a mover by that setter (Body._promoteIfIndexed):
 // nothing tags it. Every setter that moves or reshapes a body is run through

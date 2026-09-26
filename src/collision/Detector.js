@@ -1260,6 +1260,15 @@ var Collision = require('./Collision');
         var movers = g.movers,
             staticDirty = false,
             staticCount,
+            // an array the named world no longer holds: the one Engine.update
+            // lent, which a listener replaced during this update by adding or
+            // removing a body (see Composite._ownBodies). A body it removed
+            // and added back is re-indexed below where it sits in THIS array,
+            // but it sits elsewhere in the world's new one, which the next
+            // classification walks; so it keeps its departure mark for that
+            // walk to re-index it again (otherwise its buckets keep the order
+            // of the array it left, not the one a rebuild would give)
+            keepDeparted = world !== null && liveWorld === null && world.bodies !== bodies,
             i;
 
         // `movers` is filled BY INDEX and trimmed once below, rather than
@@ -1334,7 +1343,7 @@ var Collision = require('./Collision');
             // re-insert it at its new position, or bucket order would no
             // longer match the order a full rebuild produces
             if (body._sDeparted) {
-                body._sDeparted = false;
+                body._sDeparted = keepDeparted;
                 // out of the world it was in no mover index, so the
                 // per-cell invalidation sweep could not reach it
                 body._scEpoch = -1;
