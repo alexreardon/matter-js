@@ -157,7 +157,8 @@ var Axes = require('../geometry/Axes');
             _boundsStale: false,
             _solverStamp: 0,
             // slot index into the resolver's flat solver arrays (valid only
-            // while _solverStamp matches the current solver epoch)
+            // while _solverStamp matches the current solver epoch; 0 is the
+            // shared row of a resting static, see Resolver.preSolvePosition)
             _solverIndex: 0,
             // grid static-candidate cache (see Detector._collisionsGrid;
             // _scEpoch is up in the classification-walk cluster)

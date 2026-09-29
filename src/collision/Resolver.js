@@ -33,6 +33,11 @@ var Body = require('../body/Body');
      * visit only the bodies the solver can have affected instead of scanning
      * the whole world (dense static pages make that scan the cost).
      *
+     * A resting static with a zero impulse is stamped (its `totalContacts` is
+     * kept) but takes no slot and no list entry: it reads the shared constant
+     * row in slot 0, so neither snapshot nor write-back visits it. On a dense
+     * page most solver bodies are such statics.
+     *
      * `_solverStamp` is pre-declared in `Body.create`; see the rule there
      * before adding any new per-body scratch field (a lazily added field
      * splits body hidden classes and slows the whole engine).
@@ -77,7 +82,21 @@ var Body = require('../body/Body');
                 soaPairCount = 0;
 
             // find total contacts on each body, collecting each touched body
-            // once (epoch stamp) and zeroing its contact count on first touch
+            // once (epoch stamp) and zeroing its contact count on first touch.
+            //
+            // Slot 0 is SHARED by every resting static (see
+            // Common._isRestingStatic) carrying an impulse of exactly +0: its
+            // row in both snapshots is the constant one such a body would get
+            // anyway (impulse +0, immovable, and the zero velocity row
+            // preSolveVelocity writes for a resting static), and nothing
+            // between the two snapshots can move a static (postSolvePosition
+            // applies a zero impulse to nothing, and the constraint passes
+            // skip statics). So such a body takes no slot of its own, is not
+            // in _solverBodies, and no pass snapshots or writes back its row.
+            // Every other touched body takes slot k and sits at
+            // _solverBodies[k - 1]. A static's impulse is +0 on every path the
+            // engine writes (the solver only adds to +0, and the decay clears
+            // to +0), so the sign test is for a caller that wrote a -0
             for (i = 0; i < pairsLength; i++) {
                 pair = pairs[i];
 
@@ -92,16 +111,28 @@ var Body = require('../body/Body');
 
                 if (parentA._solverStamp !== epoch) {
                     parentA._solverStamp = epoch;
-                    parentA._solverIndex = solverBodyCount;
                     parentA.totalContacts = 0;
-                    solverBodies[solverBodyCount++] = parentA;
+                    var impulseA = parentA.positionImpulse;
+                    if (parentA._restStatic === true && impulseA.x === 0 && impulseA.y === 0
+                        && 1 / impulseA.x > 0 && 1 / impulseA.y > 0) {
+                        parentA._solverIndex = 0;
+                    } else {
+                        solverBodies[solverBodyCount++] = parentA;
+                        parentA._solverIndex = solverBodyCount;
+                    }
                 }
 
                 if (parentB._solverStamp !== epoch) {
                     parentB._solverStamp = epoch;
-                    parentB._solverIndex = solverBodyCount;
                     parentB.totalContacts = 0;
-                    solverBodies[solverBodyCount++] = parentB;
+                    var impulseB = parentB.positionImpulse;
+                    if (parentB._restStatic === true && impulseB.x === 0 && impulseB.y === 0
+                        && 1 / impulseB.x > 0 && 1 / impulseB.y > 0) {
+                        parentB._solverIndex = 0;
+                    } else {
+                        solverBodies[solverBodyCount++] = parentB;
+                        parentB._solverIndex = solverBodyCount;
+                    }
                 }
 
                 parentA.totalContacts += contactCount;
@@ -136,17 +167,26 @@ var Body = require('../body/Body');
                 soaImpY = soa.impY,
                 soaTc = soa.tc,
                 soaCanMove = soa.canMove;
+
+            // the shared resting-static row (slot 0)
+            soaImpX[0] = 0;
+            soaImpY[0] = 0;
+            soaTc[0] = 0;
+            soaCanMove[0] = 0;
+
             for (i = 0; i < solverBodyCount; i++) {
                 var solverBody = solverBodies[i],
-                    solverBodyImpulse = solverBody.positionImpulse;
-                soaImpX[i] = solverBodyImpulse.x;
-                soaImpY[i] = solverBodyImpulse.y;
-                soaTc[i] = solverBody.totalContacts;
-                soaCanMove[i] = (solverBody.isStatic || solverBody.isSleeping) ? 0 : 1;
+                    solverBodyImpulse = solverBody.positionImpulse,
+                    solverSlot = i + 1;
+                soaImpX[solverSlot] = solverBodyImpulse.x;
+                soaImpY[solverSlot] = solverBodyImpulse.y;
+                soaTc[solverSlot] = solverBody.totalContacts;
+                soaCanMove[solverSlot] = (solverBody.isStatic || solverBody.isSleeping) ? 0 : 1;
             }
 
             soa.pairCount = soaPairCount;
-            soa.bodyCount = solverBodyCount;
+            // slots, counting the shared one
+            soa.bodyCount = solverBodyCount + 1;
             soa.epoch = epoch;
             soa.sepValid = false;
             soa.dirty = false;
@@ -464,12 +504,13 @@ var Body = require('../body/Body');
                 // snapshot, so its write-back is a no-op by value; skip it
                 // (solver bodies are mostly statics on a dense page)
                 var backCanMove = soaBack.canMove;
-                for (back = 0; back < backBodyCount; back++) {
+                // slot 0 is the shared resting-static row, never movable
+                for (back = 1; back < backBodyCount; back++) {
                     if (backCanMove[back] === 0) {
                         continue;
                     }
 
-                    var backImpulse = solverBodies[back].positionImpulse;
+                    var backImpulse = solverBodies[back - 1].positionImpulse;
                     backImpulse.x = backImpX[back];
                     backImpulse.y = backImpY[back];
                 }
@@ -680,11 +721,24 @@ var Body = require('../body/Body');
             }
 
             // per-body snapshot into the slots assigned by preSolvePosition
-            // (same epoch, same _solverIndex ordering as _solverBodies). This
-            // one is NOT aliased: positions moved during the position solve,
-            // and a constraint pass can wake bodies between the phases.
-            for (i = 0; i < bodyCount; i++) {
-                var vBody = solverBodies[i];
+            // (same epoch; slot k holds _solverBodies[k - 1]). This one is NOT
+            // aliased: positions moved during the position solve, and a
+            // constraint pass can wake bodies between the phases.
+            //
+            // First the shared resting-static row (slot 0; see
+            // preSolvePosition), the row the branch below writes for one
+            bPosX[0] = 0;
+            bPosY[0] = 0;
+            bPosPrevX[0] = 0;
+            bPosPrevY[0] = 0;
+            bAngle[0] = 0;
+            bAnglePrev[0] = 0;
+            bInvMass[0] = 0;
+            bInvInertia[0] = 0;
+            bCanMove[0] = 0;
+
+            for (var slot = 1; slot <= bodyCount; slot++) {
+                var vBody = solverBodies[slot - 1];
 
                 // a resting static (see Common._isRestingStatic), about half
                 // the slots on a dense page, gets the constant zero row instead
@@ -700,29 +754,29 @@ var Body = require('../body/Body');
                 // overflows.) bInvMass is read only under bCanMove, but is
                 // still written: skipping it could leave a hole in the array
                 if (vBody._restStatic === true) {
-                    bPosX[i] = 0;
-                    bPosY[i] = 0;
-                    bPosPrevX[i] = 0;
-                    bPosPrevY[i] = 0;
-                    bAngle[i] = 0;
-                    bAnglePrev[i] = 0;
-                    bInvMass[i] = 0;
-                    bInvInertia[i] = 0;
-                    bCanMove[i] = 0;
+                    bPosX[slot] = 0;
+                    bPosY[slot] = 0;
+                    bPosPrevX[slot] = 0;
+                    bPosPrevY[slot] = 0;
+                    bAngle[slot] = 0;
+                    bAnglePrev[slot] = 0;
+                    bInvMass[slot] = 0;
+                    bInvInertia[slot] = 0;
+                    bCanMove[slot] = 0;
                     continue;
                 }
 
                 var vBodyPosition = vBody.position,
                     vBodyPositionPrev = vBody.positionPrev;
-                bPosX[i] = vBodyPosition.x;
-                bPosY[i] = vBodyPosition.y;
-                bPosPrevX[i] = vBodyPositionPrev.x;
-                bPosPrevY[i] = vBodyPositionPrev.y;
-                bAngle[i] = vBody.angle;
-                bAnglePrev[i] = vBody.anglePrev;
-                bInvMass[i] = vBody.inverseMass;
-                bInvInertia[i] = vBody.inverseInertia;
-                bCanMove[i] = (vBody.isStatic || vBody.isSleeping) ? 0 : 1;
+                bPosX[slot] = vBodyPosition.x;
+                bPosY[slot] = vBodyPosition.y;
+                bPosPrevX[slot] = vBodyPositionPrev.x;
+                bPosPrevY[slot] = vBodyPositionPrev.y;
+                bAngle[slot] = vBody.angle;
+                bAnglePrev[slot] = vBody.anglePrev;
+                bInvMass[slot] = vBody.inverseMass;
+                bInvInertia[slot] = vBody.inverseInertia;
+                bCanMove[slot] = (vBody.isStatic || vBody.isSleeping) ? 0 : 1;
             }
 
             // per-pair and per-contact snapshot, with the classic warm-start
@@ -823,7 +877,8 @@ var Body = require('../body/Body');
 
             soaV.pairCount = aPairCount;
             soaV.contactTotal = vContactIndex;
-            soaV.bodyCount = bodyCount;
+            // slots, counting the shared one
+            soaV.bodyCount = bodyCount + 1;
             soaV.epoch = container._solverEpoch;
             soaV.dirty = true;
 
@@ -913,12 +968,14 @@ var Body = require('../body/Body');
         // the snapshot flag; nothing wakes bodies between the snapshot and
         // here) has unchanged values, so its write-back is skipped outright
         var bCanMove = soaV.bCanMove;
-        for (i = 0; i < bodyCount; i++) {
+
+        // slot 0 is the shared resting-static row (see preSolvePosition)
+        for (i = 1; i < bodyCount; i++) {
             if (bCanMove[i] === 0) {
                 continue;
             }
 
-            var writeBody = solverBodies[i],
+            var writeBody = solverBodies[i - 1],
                 writeBodyPositionPrev = writeBody.positionPrev;
             writeBodyPositionPrev.x = bPosPrevX[i];
             writeBodyPositionPrev.y = bPosPrevY[i];
