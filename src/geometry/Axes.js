@@ -46,6 +46,7 @@ var Common = require('../core/Common');
      * @param {number} angle
      */
     Axes.rotate = function(axes, angle) {
+        // a fused copy lives in Body._transformSinglePart: change it with this
         if (angle === 0)
             return;
         

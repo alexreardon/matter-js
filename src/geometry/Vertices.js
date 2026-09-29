@@ -169,6 +169,7 @@ var Common = require('../core/Common');
      * @param {number} scalar
      */
     Vertices.translate = function(vertices, vector, scalar) {
+        // a fused copy lives in Body._transformSinglePart: change it with this
         scalar = typeof scalar !== 'undefined' ? scalar : 1;
 
         var verticesLength = vertices.length,
@@ -198,6 +199,7 @@ var Common = require('../core/Common');
      * @param {vector} point
      */
     Vertices.rotate = function(vertices, angle, point) {
+        // a fused copy lives in Body._transformSinglePart: change it with this
         if (angle === 0)
             return;
 
