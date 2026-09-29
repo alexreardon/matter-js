@@ -211,13 +211,17 @@ The only public record of what each release bought. Benefit is whole-step `Engin
 
 ### `perf20`
 
-The squeeze-11 round: `5` commits on top of `perf19`. Both changes are bit-identical to `perf19`: the 46-example gate prints `·` on all 46, and `bench/grid-correctness.js` finds every scene identical. The win is below the timing tables' session noise, so it was measured build-to-build against `perf19` rather than published into those cells: one build per process, both build orders, `n = 80` per cell, in the consumer's configuration (option `false`). The round was measured as a whole.
+The squeeze-11 round: `5` commits on top of `perf19`. Both changes are bit-identical to `perf19`: the 46-example gate prints `·` on all 46, and `bench/grid-correctness.js` finds every scene identical. The win is below the timing tables' session noise, so it was measured build-to-build against `perf19` rather than published into those cells: one build per process, both build orders, in the consumer's configuration (option `false`). Each change was measured alone, and then the round as a whole. Each figure is the change in time per update against `perf19`, with its 95% `t` interval; a figure marked noise has an interval that crosses zero.
 
 | Change | Benefit |
 | --- | --- |
-| **One shared solver slot for resting statics** — every resting static with a `+0` impulse shares one zero slot, so the solver snapshot and its write-back skip them; a `-0` impulse keeps a slot of its own | inside the total |
-| **Fused single-part pose update** — a rotating single-part body is translated and rotated, and its axes and bounds updated, in one pass instead of four | inside the total |
-| **Round total** (the consumer's configuration, option `false`) | calm `-2.31%` (±`0.60`), settle `-2.58%` (±`0.31`), churn `-4.42%` (±`0.57`), storm `-3.11%` (±`0.89`) |
+| **One shared solver slot for resting statics.** The solver no longer copies a resting static in or writes it back. | calm `-1.87%` (±`0.49`), settle `-1.32%` (±`0.53`), churn `-3.96%` (±`0.79`), storm `-2.64%` (±`0.59`); `n = 90` |
+| **Fused single-part pose update.** A rotating single-part body updates its vertices, axes and bounds in one pass. | calm `-0.30%` (±`0.47`, noise), settle `-1.67%` (±`0.31`), churn `-0.47%` (±`0.88`, noise), storm `-1.04%` (±`0.82`); `n = 80`, the shipped version |
+| **Round total** (the consumer's configuration, option `false`) | calm `-2.31%` (±`0.60`), settle `-2.58%` (±`0.31`), churn `-4.42%` (±`0.57`), storm `-3.11%` (±`0.89`); `n = 80` |
+
+**The shared solver slot.** Each step, the solver copies every body in a contact pair into flat arrays, one row (a slot) per body. It iterates on those arrays, then writes each row back to its body. A static body never moves, so its copy and its write-back are wasted work. In a page scene most solver bodies are resting statics: about `1006` of `1437` per step in the churn scene. Now every resting static whose accumulated position impulse is exactly `+0` points at slot `0`, one shared row of zeros. It gets no copy in and no write-back. It is still stamped, so its contact count stays right. A static with a `-0` impulse (or any other value) keeps a slot of its own, because the shared row holds `+0` and only a body whose own row would hold exactly that can share it. That is what keeps the result bit-identical. The engine never writes a `-0` impulse; the check is for a caller that does.
+
+**The fused pose update.** Each step, a moving body translates its vertices by its velocity, rotates them about its position, rotates its axes and recomputes its bounds. That was four helper calls (`Vertices.translate`, `Vertices.rotate`, `Axes.rotate` and `Bounds.update`), each with its own loop. Now a rotating single-part body does all four in one pass over its vertices (`Body._transformSinglePart`), with the same arithmetic in the same order. The result is bit-identical: the parity tests in [`test/Body.spec.js`](test/Body.spec.js) compare the vertices, axes and bounds with `Object.is`, which tells `+0` from `-0`. A body that is not rotating still calls the original helpers. The four helpers carry comments that name the fused copies they must stay in sync with.
 
 ### `perf19`
 
