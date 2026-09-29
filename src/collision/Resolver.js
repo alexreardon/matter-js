@@ -33,10 +33,11 @@ var Body = require('../body/Body');
      * visit only the bodies the solver can have affected instead of scanning
      * the whole world (dense static pages make that scan the cost).
      *
-     * A resting static with a zero impulse is stamped (its `totalContacts` is
-     * kept) but takes no slot and no list entry: it reads the shared constant
-     * row in slot 0, so neither snapshot nor write-back visits it. On a dense
-     * page most solver bodies are such statics.
+     * A resting static with an impulse of exactly +0 is stamped (its
+     * `totalContacts` is kept) but takes no slot of its own and no list entry:
+     * it reads the shared constant row in slot 0, so neither snapshot nor
+     * write-back visits it. On a dense page most touched bodies are such
+     * statics.
      *
      * `_solverStamp` is pre-declared in `Body.create`; see the rule there
      * before adding any new per-body scratch field (a lazily added field
@@ -68,7 +69,7 @@ var Body = require('../body/Body');
                     mul2: [], sep: [], pairRefs: [],
                     impX: [], impY: [], tc: [], canMove: [],
                     share: [], shareDampen: 0, shareEpoch: -1,
-                    pairCount: 0, bodyCount: 0, epoch: 0,
+                    pairCount: 0, slotCount: 0, epoch: 0,
                     sepValid: false, dirty: false
                 }),
                 soaIdxA = soa.idxA,
@@ -94,9 +95,10 @@ var Body = require('../body/Body');
             // skip statics). So such a body takes no slot of its own, is not
             // in _solverBodies, and no pass snapshots or writes back its row.
             // Every other touched body takes slot k and sits at
-            // _solverBodies[k - 1]. A static's impulse is +0 on every path the
-            // engine writes (the solver only adds to +0, and the decay clears
-            // to +0), so the sign test is for a caller that wrote a -0
+            // _solverBodies[k - 1]. No engine path writes a -0 impulse (the
+            // factory and every clear write +0, and a sum is -0 only when both
+            // terms are), so the sign test (`1 / x > 0`, false for -0, whose
+            // reciprocal is -Infinity) is for a caller that wrote one
             for (i = 0; i < pairsLength; i++) {
                 pair = pairs[i];
 
@@ -186,7 +188,7 @@ var Body = require('../body/Body');
 
             soa.pairCount = soaPairCount;
             // slots, counting the shared one
-            soa.bodyCount = solverBodyCount + 1;
+            soa.slotCount = solverBodyCount + 1;
             soa.epoch = epoch;
             soa.sepValid = false;
             soa.dirty = false;
@@ -263,11 +265,11 @@ var Body = require('../body/Body');
                 soa.shareEpoch = soa.epoch;
                 soa.shareDampen = positionDampen;
 
-                var shareBodyCount = soa.bodyCount;
+                var shareSlotCount = soa.slotCount;
 
                 // immovable slots are written 0 rather than skipped, so the
                 // array stays packed (a hole would put it in dictionary mode)
-                for (var shareIndex = 0; shareIndex < shareBodyCount; shareIndex++) {
+                for (var shareIndex = 0; shareIndex < shareSlotCount; shareIndex++) {
                     shareArr[shareIndex] = canMove[shareIndex] === 1 ? positionDampen / tcArr[shareIndex] : 0;
                 }
             }
@@ -497,15 +499,15 @@ var Body = require('../body/Body');
             if (soaBack && soaBack.dirty && soaBack.epoch === epoch) {
                 var backImpX = soaBack.impX,
                     backImpY = soaBack.impY,
-                    backBodyCount = soaBack.bodyCount,
+                    backSlotCount = soaBack.slotCount,
                     back;
 
-                // a body the position solve could not move has an unchanged
-                // snapshot, so its write-back is a no-op by value; skip it
-                // (solver bodies are mostly statics on a dense page)
+                // a body the position solve could not move (static or
+                // sleeping) has an unchanged snapshot, so its write-back is a
+                // no-op by value; skip it
                 var backCanMove = soaBack.canMove;
                 // slot 0 is the shared resting-static row, never movable
-                for (back = 1; back < backBodyCount; back++) {
+                for (back = 1; back < backSlotCount; back++) {
                     if (backCanMove[back] === 0) {
                         continue;
                     }
@@ -537,8 +539,7 @@ var Body = require('../body/Body');
 
             // bodies touched by this step's pairs; append any that finish the
             // step still carrying a warmed impulse. The zero-impulse check is
-            // inlined because most solver bodies on a dense page are statics
-            // that never accumulate one.
+            // inlined to skip the call for a body with no impulse to apply.
             for (i = 0; i < solverBodiesLength; i++) {
                 var solverBody = solverBodies[i],
                     solverImpulse = solverBody.positionImpulse;
@@ -660,7 +661,7 @@ var Body = require('../body/Body');
                     cNormalImpulse: [], cTangentImpulse: [], cRefs: [],
                     bPosX: [], bPosY: [], bPosPrevX: [], bPosPrevY: [],
                     bAngle: [], bAnglePrev: [], bInvMass: [], bInvInertia: [], bCanMove: [],
-                    pairCount: 0, contactTotal: 0, bodyCount: 0, epoch: 0, dirty: false
+                    pairCount: 0, contactTotal: 0, slotCount: 0, epoch: 0, dirty: false
                 }),
                 solverBodies = container._solverBodies || (container._solverBodies = []),
                 bodyCount = solverBodies.length,
@@ -740,12 +741,13 @@ var Body = require('../body/Body');
             for (var slot = 1; slot <= bodyCount; slot++) {
                 var vBody = solverBodies[slot - 1];
 
-                // a resting static (see Common._isRestingStatic), about half
-                // the slots on a dense page, gets the constant zero row instead
-                // of a read of the body. Its real row has a velocity of exactly
-                // +0 and an inverse inertia of exactly +0, and every read of
-                // the row is either gated by bCanMove (0 here) or multiplies an
-                // offset by that +0 angular velocity or inertia. The zero
+                // a resting static (see Common._isRestingStatic) with a slot of
+                // its own (its impulse is not +0) gets the constant zero row
+                // instead of a read of the body. Its real row has a velocity
+                // of exactly +0 and an inverse inertia of exactly +0, and
+                // every read of the row is either gated by bCanMove (0 here)
+                // or multiplies an offset by that +0 angular velocity or
+                // inertia. The zero
                 // position makes those offsets absolute rather than relative,
                 // which changes nothing: a finite offset times +0 is a zero the
                 // +0 velocity absorbs, and a non-finite one is NaN in both.
@@ -878,7 +880,7 @@ var Body = require('../body/Body');
             soaV.pairCount = aPairCount;
             soaV.contactTotal = vContactIndex;
             // slots, counting the shared one
-            soaV.bodyCount = bodyCount + 1;
+            soaV.slotCount = bodyCount + 1;
             soaV.epoch = container._solverEpoch;
             soaV.dirty = true;
 
@@ -952,7 +954,7 @@ var Body = require('../body/Body');
         }
 
         var solverBodies = container._solverBodies,
-            bodyCount = soaV.bodyCount,
+            slotCount = soaV.slotCount,
             bPosPrevX = soaV.bPosPrevX,
             bPosPrevY = soaV.bPosPrevY,
             bAnglePrev = soaV.bAnglePrev,
@@ -970,7 +972,7 @@ var Body = require('../body/Body');
         var bCanMove = soaV.bCanMove;
 
         // slot 0 is the shared resting-static row (see preSolvePosition)
-        for (i = 1; i < bodyCount; i++) {
+        for (i = 1; i < slotCount; i++) {
             if (bCanMove[i] === 0) {
                 continue;
             }

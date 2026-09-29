@@ -69,11 +69,13 @@ function firstDivergence(a, b) {
     return a.findIndex((hash, index) => hash !== b[index]);
 }
 
-// every update, the number of solver slots that took the zero row, and the
-// number of position corrections applied to a flagged static
+// summed over every update: `restSlots`, the resting statics with a slot of
+// their own (an impulse other than +0) that took the zero row; `shared`, the
+// resting statics that took the shared slot 0 instead (these are not in
+// `_solverBodies`); and the position corrections applied to a flagged static
 function withProbes(fn) {
     const postSolveBody = Resolver._postSolveBody;
-    const probe = { restSlots: 0, flaggedCorrections: 0 };
+    const probe = { restSlots: 0, shared: 0, flaggedCorrections: 0 };
     Resolver._postSolveBody = function(body, deferBounds) {
         if (body._restStatic === true) {
             probe.flaggedCorrections++;
@@ -190,6 +192,8 @@ function run({ restRow = true, options = {}, beforeUpdate = null } = {}) {
                 hashes.push(fingerprint(engine));
 
                 probe.restSlots += engine.pairs._solverBodies.filter((body) => body._restStatic).length;
+                const epoch = engine.pairs._solverEpoch;
+                probe.shared += Composite.allBodies(world).filter((body) => body._solverStamp === epoch && body._solverIndex === 0).length;
                 restStaticsSeen = Math.max(restStaticsSeen, Composite.allBodies(world).filter((body) => body._restStatic).length);
             }
 
@@ -342,9 +346,12 @@ describe('rest row: the solve', () => {
         const reference = run({ restRow: false });
 
         expect(firstDivergence(shipped.hashes, reference.hashes)).toBe(-1);
-        // the zero row is used, and never for a static that moves
+        // the zero row is used, in a slot of its own and in the shared slot 0,
+        // and never for a static that moves
         expect(shipped.probe.restSlots).toBeGreaterThan(1000);
         expect(reference.probe.restSlots).toBe(0);
+        expect(shipped.probe.shared).toBeGreaterThan(1000);
+        expect(reference.probe.shared).toBe(0);
         shipped.moving.forEach((body) => expect(body._restStatic).toBe(false));
         expect(shipped.slider._restStatic).toBe(true);
         // statics frozen while carrying an impulse are corrected as statics
@@ -368,6 +375,38 @@ describe('rest row: the solve', () => {
         const reference = run({ restRow: false, options });
         expect(firstDivergence(shipped.hashes, reference.hashes)).toBe(-1);
         expect(shipped.probe.restSlots).toBeGreaterThan(1000);
+        expect(shipped.probe.shared).toBeGreaterThan(1000);
+    });
+
+    test('a resting static with a -0 impulse takes a slot of its own, not the shared slot 0', () => {
+        Common._nextId = 0;
+        const engine = Engine.create({ detector: Detector.create({ broadphase: 'grid', cellSize: 32 }) });
+        const plain = Bodies.rectangle(100, 200, 80, 20, { isStatic: true });
+        const signedX = Bodies.rectangle(300, 200, 80, 20, { isStatic: true });
+        const signedY = Bodies.rectangle(500, 200, 80, 20, { isStatic: true });
+        signedX.positionImpulse.x = -0;
+        signedY.positionImpulse.y = -0;
+        // a box overlapping each static, so all three are in an active pair
+        Composite.add(engine.world, [plain, signedX, signedY]);
+        [100, 300, 500].forEach((x) => Composite.add(engine.world, Bodies.rectangle(x, 185, 20, 20)));
+
+        Engine.update(engine, 1000 / 60);
+
+        const epoch = engine.pairs._solverEpoch;
+        const solverBodies = engine.pairs._solverBodies;
+        [plain, signedX, signedY].forEach((body) => {
+            expect(body._restStatic).toBe(true);
+            expect(body._solverStamp).toBe(epoch);
+        });
+        expect(Object.is(signedX.positionImpulse.x, -0)).toBe(true);
+        expect(Object.is(signedY.positionImpulse.y, -0)).toBe(true);
+        [signedX, signedY].forEach((body) => {
+            expect(body._solverIndex).toBeGreaterThan(0);
+            expect(solverBodies[body._solverIndex - 1]).toBe(body);
+        });
+        // the +0 control shares slot 0
+        expect(plain._solverIndex).toBe(0);
+        expect(solverBodies).not.toContain(plain);
     });
 
     test('NEGATIVE: the flag forced on for the statics that move diverges', () => {
