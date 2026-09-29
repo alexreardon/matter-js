@@ -1481,16 +1481,7 @@ var Axes = require('../geometry/Axes');
         // operations and their order are identical to the general loop below,
         // so the result is bit-identical.
         if (partsLength === 1) {
-            var only = parts[0];
-
-            Vertices.translate(only.vertices, velocity);
-
-            if (angularVelocity !== 0) {
-                Vertices.rotate(only.vertices, angularVelocity, position);
-                Axes.rotate(only.axes, angularVelocity);
-            }
-
-            Bounds.update(only.bounds, only.vertices, velocity);
+            Body._transformSinglePart(parts[0], velocity, angularVelocity, position);
             return;
         }
 
@@ -1514,6 +1505,153 @@ var Axes = require('../geometry/Axes');
 
             Bounds.update(part.bounds, part.vertices, velocity);
         }
+    };
+
+    /**
+     * `Body.update`'s geometry step for a single-part body, in ONE pass over
+     * its vertices: `Vertices.translate`, then `Vertices.rotate` about the
+     * updated `position`, then `Bounds.update` padded by `velocity`, fused.
+     *
+     * Every vertex takes the same operations in the same order as the three
+     * separate walks, so the result is bit-identical: the translated
+     * coordinate is held in a register instead of being stored and reloaded,
+     * and the bounds fold each final coordinate in as it is written, from
+     * vertex 0 in `Bounds.update`'s order. The fold is two independent selects
+     * rather than `Bounds.update`'s `if / else if`, which picks the same value
+     * every time: a coordinate above the max cannot also be below the min
+     * (the two start equal and only move apart), a tie keeps the value
+     * already held (so a signed zero goes the same way), and a NaN compares
+     * false in both. A tumbling box moves its extreme corner every step,
+     * which the branches mispredict. `Axes.rotate` takes the same `cos` and
+     * `sin` the vertices used, which `Math.cos` and `Math.sin` return for the
+     * same argument every call.
+     * @method _transformSinglePart
+     * @private
+     * @param {body} part the body itself, which is its own only part
+     * @param {vector} velocity
+     * @param {number} angularVelocity
+     * @param {vector} position the already integrated position
+     */
+    Body._transformSinglePart = function(part, velocity, angularVelocity, position) {
+        var vertices = part.vertices,
+            verticesLength = vertices.length;
+
+        if (verticesLength === 0) {
+            Vertices.translate(vertices, velocity);
+
+            if (angularVelocity !== 0) {
+                Vertices.rotate(vertices, angularVelocity, position);
+                Axes.rotate(part.axes, angularVelocity);
+            }
+
+            Bounds.update(part.bounds, vertices, velocity);
+            return;
+        }
+
+        var translateX = velocity.x,
+            translateY = velocity.y,
+            vertex = vertices[0],
+            spBody = vertex.body,
+            x,
+            y,
+            minX,
+            maxX,
+            minY,
+            maxY,
+            i;
+
+        // the self-projection memo describes these vertex positions
+        if (spBody) {
+            spBody._spValid = false;
+        }
+
+        if (angularVelocity !== 0) {
+            var cos = Math.cos(angularVelocity),
+                sin = Math.sin(angularVelocity),
+                pointX = position.x,
+                pointY = position.y,
+                dx,
+                dy;
+
+            dx = (vertex.x + translateX) - pointX;
+            dy = (vertex.y + translateY) - pointY;
+            x = pointX + (dx * cos - dy * sin);
+            y = pointY + (dx * sin + dy * cos);
+            vertex.x = x;
+            vertex.y = y;
+            minX = x;
+            maxX = x;
+            minY = y;
+            maxY = y;
+
+            for (i = 1; i < verticesLength; i++) {
+                vertex = vertices[i];
+                dx = (vertex.x + translateX) - pointX;
+                dy = (vertex.y + translateY) - pointY;
+                x = pointX + (dx * cos - dy * sin);
+                y = pointY + (dx * sin + dy * cos);
+                vertex.x = x;
+                vertex.y = y;
+
+                maxX = x > maxX ? x : maxX;
+                minX = x < minX ? x : minX;
+                maxY = y > maxY ? y : maxY;
+                minY = y < minY ? y : minY;
+            }
+
+            var axes = part.axes,
+                axesLength = axes.length,
+                axis,
+                axisX;
+
+            for (i = 0; i < axesLength; i++) {
+                axis = axes[i];
+                axisX = axis.x * cos - axis.y * sin;
+                axis.y = axis.x * sin + axis.y * cos;
+                axis.x = axisX;
+            }
+        } else {
+            x = vertex.x + translateX;
+            y = vertex.y + translateY;
+            vertex.x = x;
+            vertex.y = y;
+            minX = x;
+            maxX = x;
+            minY = y;
+            maxY = y;
+
+            for (i = 1; i < verticesLength; i++) {
+                vertex = vertices[i];
+                x = vertex.x + translateX;
+                y = vertex.y + translateY;
+                vertex.x = x;
+                vertex.y = y;
+
+                maxX = x > maxX ? x : maxX;
+                minX = x < minX ? x : minX;
+                maxY = y > maxY ? y : maxY;
+                minY = y < minY ? y : minY;
+            }
+        }
+
+        if (translateX > 0) {
+            maxX += translateX;
+        } else {
+            minX += translateX;
+        }
+
+        if (translateY > 0) {
+            maxY += translateY;
+        } else {
+            minY += translateY;
+        }
+
+        var bounds = part.bounds;
+
+        bounds.min.x = minX;
+        bounds.max.x = maxX;
+        bounds.min.y = minY;
+        bounds.max.y = maxY;
     };
 
     /**
