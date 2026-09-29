@@ -743,18 +743,17 @@ var Body = require('../body/Body');
 
                 // a resting static (see Common._isRestingStatic) with a slot of
                 // its own (its impulse is not +0) gets the constant zero row
-                // instead of a read of the body. Its real row has a velocity
-                // of exactly +0 and an inverse inertia of exactly +0, and
-                // every read of the row is either gated by bCanMove (0 here)
-                // or multiplies an offset by that +0 angular velocity or
-                // inertia. The zero
-                // position makes those offsets absolute rather than relative,
-                // which changes nothing: a finite offset times +0 is a zero the
-                // +0 velocity absorbs, and a non-finite one is NaN in both.
-                // (The two part only where a coordinate is within a factor of
-                // two of the largest double, where the relative offset
-                // overflows.) bInvMass is read only under bCanMove, but is
-                // still written: skipping it could leave a hole in the array
+                // instead of a read of the body. Its real row has a velocity of
+                // exactly +0 and an inverse inertia of exactly +0, and every
+                // read of the row is either gated by bCanMove (0 here) or
+                // multiplies an offset by that +0 angular velocity or inertia.
+                // The zero position makes those offsets absolute rather than
+                // relative, which changes nothing: a finite offset times +0 is
+                // a zero the +0 velocity absorbs, and a non-finite one is NaN
+                // in both. (The two part only where a coordinate is within a
+                // factor of two of the largest double, where the relative
+                // offset overflows.) bInvMass is read only under bCanMove, but
+                // is still written: skipping it could leave a hole in the array
                 if (vBody._restStatic === true) {
                     bPosX[slot] = 0;
                     bPosY[slot] = 0;

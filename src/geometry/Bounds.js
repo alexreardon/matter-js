@@ -36,7 +36,8 @@ module.exports = Bounds;
      * @param {vector} velocity
      */
     Bounds.update = function(bounds, vertices, velocity) {
-        // a fused copy lives in Body._transformSinglePart: change it with this
+        // fused copies live in Body._transformSinglePart and
+        // Body.setPositionAndAngle: change them with this
         var verticesLength = vertices.length;
 
         if (verticesLength === 0) {

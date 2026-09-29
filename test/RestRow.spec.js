@@ -378,7 +378,7 @@ describe('rest row: the solve', () => {
         expect(shipped.probe.shared).toBeGreaterThan(1000);
     });
 
-    test('a resting static with a -0 impulse takes a slot of its own, not the shared slot 0', () => {
+    test('a resting static with a -0 impulse takes a slot of its own, not the shared slot 0, as parentA and as parentB', () => {
         Common._nextId = 0;
         const engine = Engine.create({ detector: Detector.create({ broadphase: 'grid', cellSize: 32 }) });
         const plain = Bodies.rectangle(100, 200, 80, 20, { isStatic: true });
@@ -389,24 +389,40 @@ describe('rest row: the solve', () => {
         // a box overlapping each static, so all three are in an active pair
         Composite.add(engine.world, [plain, signedX, signedY]);
         [100, 300, 500].forEach((x) => Composite.add(engine.world, Bodies.rectangle(x, 185, 20, 20)));
+        // statics created AFTER their boxes take the higher id, so each is its
+        // pair's parentB (the three above are parentA): the other branch of
+        // the slot 0 predicate
+        const boxOfSignedB = Bodies.rectangle(700, 185, 20, 20);
+        const signedB = Bodies.rectangle(700, 200, 80, 20, { isStatic: true });
+        const boxOfPlainB = Bodies.rectangle(900, 185, 20, 20);
+        const plainB = Bodies.rectangle(900, 200, 80, 20, { isStatic: true });
+        signedB.positionImpulse.x = -0;
+        Composite.add(engine.world, [boxOfSignedB, signedB, boxOfPlainB, plainB]);
 
         Engine.update(engine, 1000 / 60);
 
+        const pairOf = (body) => engine.pairs.list.find((pair) => pair.bodyA === body || pair.bodyB === body);
+        [plain, signedX, signedY].forEach((body) => expect(pairOf(body).collision.parentA).toBe(body));
+        [signedB, plainB].forEach((body) => expect(pairOf(body).collision.parentB).toBe(body));
+
         const epoch = engine.pairs._solverEpoch;
         const solverBodies = engine.pairs._solverBodies;
-        [plain, signedX, signedY].forEach((body) => {
+        [plain, signedX, signedY, signedB, plainB].forEach((body) => {
             expect(body._restStatic).toBe(true);
             expect(body._solverStamp).toBe(epoch);
         });
         expect(Object.is(signedX.positionImpulse.x, -0)).toBe(true);
         expect(Object.is(signedY.positionImpulse.y, -0)).toBe(true);
-        [signedX, signedY].forEach((body) => {
+        expect(Object.is(signedB.positionImpulse.x, -0)).toBe(true);
+        [signedX, signedY, signedB].forEach((body) => {
             expect(body._solverIndex).toBeGreaterThan(0);
             expect(solverBodies[body._solverIndex - 1]).toBe(body);
         });
-        // the +0 control shares slot 0
-        expect(plain._solverIndex).toBe(0);
-        expect(solverBodies).not.toContain(plain);
+        // the +0 controls share slot 0
+        [plain, plainB].forEach((body) => {
+            expect(body._solverIndex).toBe(0);
+            expect(solverBodies).not.toContain(body);
+        });
     });
 
     test('NEGATIVE: the flag forced on for the statics that move diverges', () => {

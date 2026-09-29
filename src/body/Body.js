@@ -217,7 +217,8 @@ var Axes = require('../geometry/Axes');
             // onto its own axes, packed flat as [min0, max0, min1, max1, ...],
             // one pair per axis. _spValid is cleared by every site that moves a
             // vertex or changes the axes (see Vertices.translate/rotate/scale,
-            // Body.setVertices/setParts/scale and the inlined rotate in
+            // Body.setVertices/setParts/scale, the fused pass in
+            // Body._transformSinglePart and the inlined rotate in
             // Body.setPositionAndAngle)
             _sp: null,
             _spValid: false,
@@ -1519,8 +1520,11 @@ var Axes = require('../geometry/Axes');
      * with `Object.is`). Change it when they change, and keep each expression
      * exactly as they compute it: never regroup the arithmetic. The bounds
      * fold uses two independent selects where `Bounds.update` has
-     * `if / else if`; both pick the same value, since a tie keeps the held
-     * value and a NaN compares false.
+     * `if / else if`; both pick the same value. The premise is min <= max:
+     * both start at the first vertex, and max only rises and min only falls,
+     * so it holds throughout (or both are NaN), no vertex passes both tests,
+     * and the second select never fires where the `else` would have
+     * skipped it. A tie keeps the held value and a NaN compares false.
      * @method _transformSinglePart
      * @private
      * @param {body} part the body, which is its own only part
