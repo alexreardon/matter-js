@@ -20,6 +20,35 @@ var Common = require('../core/Common');
      * @return {axes} A new axes from the given vertices
      */
     Axes.fromVertices = function(vertices) {
+        if (vertices.length === 4) {
+            var first = vertices[0],
+                second = vertices[1],
+                third = vertices[2],
+                fourth = vertices[3];
+
+            // An axis-aligned rectangle overwrites its first two normals with
+            // the last two under the same gradient keys, in insertion order.
+            if (first.y === second.y && second.x === third.x
+                && third.y === fourth.y && fourth.x === first.x
+                && first.x !== second.x && first.y !== fourth.y) {
+                var horizontalNormal = Vector.normalise({
+                        x: fourth.y - third.y,
+                        y: third.x - fourth.x
+                    }),
+                    verticalNormal = Vector.normalise({
+                        x: first.y - fourth.y,
+                        y: fourth.x - first.x
+                    });
+
+                // Underflow or overflow can merge the gradient keys. Keep the
+                // original reduction for those degenerate normalisations.
+                if (horizontalNormal.y !== 0 && Number.isFinite(horizontalNormal.y)
+                    && verticalNormal.x !== 0 && Number.isFinite(verticalNormal.x)) {
+                    return [horizontalNormal, verticalNormal];
+                }
+            }
+        }
+
         var axes = {};
 
         // find the unique axes, using edge normal gradients
